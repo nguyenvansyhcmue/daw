@@ -1,0 +1,22 @@
+services:
+  foundry-mcp-server:
+    image: node:22-alpine
+    container_name: foundry-mcp-server
+    working_dir: /workspace
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: development
+      FOUNDRY_PROJECT_ENDPOINT: ${FOUNDRY_PROJECT_ENDPOINT:-}
+      FOUNDRY_API_KEY: ${FOUNDRY_API_KEY:-}
+    volumes:
+      - "D:/Stu:/workspace"
+    command:
+      - node
+      - -e
+      - >-
+        require('http').createServer((req,res)=>{
+        res.writeHead(200,{'content-type':'application/json'});
+        res.end(JSON.stringify({service:'foundry-mcp-server',status:'ready'}));
+        }).listen(3000,'0.0.0.0')
+    restart: unless-stopped

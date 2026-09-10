@@ -1,0 +1,22 @@
+#pragma once
+
+#include <juce_gui_basics/juce_gui_basics.h>
+
+#include <atomic>
+
+class AudioPeakMeter final : public juce::Component, private juce::Timer
+{
+public:
+    AudioPeakMeter();
+
+    void paint(juce::Graphics& g) override;
+    void resized() override {}
+
+    void updatePeak(float newLevel) noexcept;
+
+private:
+    void timerCallback() override;
+
+    std::atomic<float> currentPeak { 0.0f };
+    float displayedPeak = 0.0f;
+};

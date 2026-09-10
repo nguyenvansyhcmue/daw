@@ -1,0 +1,28 @@
+# CMake and IDE build output
+build/
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Compiled binaries and intermediate files
+Debug/
+Release/
+x64/
+*.obj
+*.lib
+*.dll
+*.exe
+*.pdb
+*.ilk
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+*.swp
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example

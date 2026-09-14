@@ -23,17 +23,33 @@ juce_add_gui_app(StudioForgeDAW
     VERSION "1.0.0"
 )
 
+# Keep the development binary distinct from the distributable.  On Windows this
+# also prevents an antivirus scan of a just-run Debug executable from blocking
+# the next incremental link of the Release-named product.
+set_target_properties(StudioForgeDAW PROPERTIES
+    DEBUG_OUTPUT_NAME "StudioForge DAW Debug"
+)
+
 target_sources(StudioForgeDAW PRIVATE
     Source/Core/Main.cpp
     Source/Core/MainWindow.cpp
     Source/AudioEngine/AudioEngine.cpp
     Source/AudioEngine/AudioGraph.cpp
     Source/Models/TrackDataModel.cpp
+    Source/Project/ProjectSerializer.cpp
+    Source/Media/MediaReloadService.cpp
+    Source/Recording/RecordingSession.cpp
+    Source/Midi/MidiCore.cpp
+    Source/Plugins/PluginHostService.cpp
     Source/UI/MainComponent.cpp
     Source/UI/ControlBar.cpp
     Source/UI/ArrangeWindow.cpp
     Source/UI/MixerPane.cpp
+    Source/UI/PianoRoll.cpp
+    Source/UI/InspectorPane.cpp
     Source/UI/AudioPeakMeter.cpp
+    Source/UI/AssetBrowserPane.cpp
+    Source/UI/PerformanceFooter.cpp
 )
 
 target_include_directories(StudioForgeDAW PRIVATE
@@ -59,19 +75,21 @@ target_compile_definitions(StudioForgeDAW PRIVATE
     JUCE_USE_CURL=0
     JUCE_DISPLAY_SPLASH_SCREEN=0
     JUCE_PROJUCER_INCLUDE_JUCE_HEADER=0
+    JUCE_PLUGINHOST_VST3=1
 )
 
 if (MSVC)
     target_compile_options(StudioForgeDAW PRIVATE
-        /O2
         /Oi
+        /FS
+        $<$<CONFIG:Release>:/O2>
     )
 endif()
 
 if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(StudioForgeDAW PRIVATE
-        -O3
-        -march=native
+        $<$<CONFIG:Release>:-O3>
+        $<$<CONFIG:Release>:-march=native>
     )
 endif()
 
@@ -79,4 +97,72 @@ if (APPLE)
     target_compile_definitions(StudioForgeDAW PRIVATE
         JUCE_MAC=1
     )
+endif()
+
+include(CTest)
+
+if (BUILD_TESTING)
+    juce_add_plugin(StudioForgeVst3TestEffect
+        COMPANY_NAME "StudioForge"
+        PLUGIN_MANUFACTURER_CODE StFg
+        PLUGIN_CODE Tsfx
+        FORMATS VST3
+        PRODUCT_NAME "StudioForge VST3 Test Effect v2"
+        IS_SYNTH FALSE
+        NEEDS_MIDI_INPUT TRUE
+        NEEDS_MIDI_OUTPUT FALSE
+        VST3_CATEGORIES Fx
+    )
+
+    target_sources(StudioForgeVst3TestEffect PRIVATE Tests/VST3TestEffect.cpp)
+    target_link_libraries(StudioForgeVst3TestEffect PRIVATE juce::juce_audio_utils)
+    target_compile_definitions(StudioForgeVst3TestEffect PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_VST3_CAN_REPLACE_VST2=0
+    )
+    if (MSVC)
+        target_compile_options(StudioForgeVst3TestEffect PRIVATE /FS)
+        target_link_options(StudioForgeVst3TestEffect_VST3 PRIVATE /INCREMENTAL:NO)
+    endif()
+
+    add_executable(StudioForgeCoreTests
+        Tests/CorePlaybackMixerTests.cpp
+        Source/AudioEngine/AudioEngine.cpp
+        Source/AudioEngine/AudioGraph.cpp
+        Source/Models/TrackDataModel.cpp
+        Source/Project/ProjectSerializer.cpp
+        Source/Media/MediaReloadService.cpp
+        Source/Recording/RecordingSession.cpp
+        Source/Midi/MidiCore.cpp
+        Source/Plugins/PluginHostService.cpp
+    )
+
+    target_include_directories(StudioForgeCoreTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/Source
+    )
+
+    target_link_libraries(StudioForgeCoreTests PRIVATE
+        juce::juce_audio_basics
+        juce::juce_audio_devices
+        juce::juce_audio_formats
+        juce::juce_audio_processors
+        juce::juce_core
+        juce::juce_events
+    )
+
+    target_compile_definitions(StudioForgeCoreTests PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_PLUGINHOST_VST3=1
+        STUDIOFORGE_TEST_VST3_PATH="$<TARGET_FILE:StudioForgeVst3TestEffect_VST3>"
+    )
+
+    if (MSVC)
+        target_compile_options(StudioForgeCoreTests PRIVATE /FS)
+    endif()
+
+    add_dependencies(StudioForgeCoreTests StudioForgeVst3TestEffect_VST3)
+
+    add_test(NAME StudioForgeCoreTests COMMAND StudioForgeCoreTests)
 endif()

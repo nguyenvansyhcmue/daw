@@ -1,0 +1,70 @@
+#pragma once
+
+#include <juce_core/juce_core.h>
+
+#include "../Models/ProjectIdentifiers.h"
+
+#include <vector>
+
+struct PersistedClipState
+{
+    ClipId id;
+    TrackId trackId;
+    juce::String sourcePath;
+    juce::String clipName;
+    double startSample = 0.0;
+    double durationSamples = 0.0;
+    double sourceOffsetSamples = 0.0;
+    float gain = 1.0f;
+    double fadeInSamples = 0.0;
+    double fadeOutSamples = 0.0;
+};
+
+struct PersistedTrackState
+{
+    TrackId id;
+    juce::String name;
+    float volume = 1.0f;
+    float pan = 0.0f;
+    bool muted = false;
+    bool solo = false;
+    std::vector<PersistedClipState> clips;
+};
+
+struct PersistedTempoEvent
+{
+    double samplePosition = 0.0;
+    double bpm = 120.0;
+};
+
+struct PersistedMidiNoteState
+{
+    MidiEventId id;
+    int pitch = 60;
+    float velocity = 1.0f;
+    double startSample = 0.0;
+    double durationSamples = 1.0;
+    int channel = 1;
+};
+
+struct PersistedMidiClipState
+{
+    MidiClipId id;
+    TrackId trackId;
+    double startSample = 0.0;
+    std::vector<PersistedMidiNoteState> notes;
+};
+
+struct ProjectState
+{
+    static constexpr int formatVersion = 4;
+
+    double bpm = 120.0;
+    int timeSignatureNumerator = 4;
+    bool cycleActive = false;
+    double cycleStartSample = 0.0;
+    double cycleEndSample = 0.0;
+    std::vector<PersistedTempoEvent> tempoMap;
+    std::vector<PersistedTrackState> tracks;
+    std::vector<PersistedMidiClipState> midiClips;
+};

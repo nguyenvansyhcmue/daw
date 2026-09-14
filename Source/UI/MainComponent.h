@@ -8,6 +8,11 @@
 #include "AudioPeakMeter.h"
 #include "ControlBar.h"
 #include "MixerPane.h"
+#include "PianoRoll.h"
+#include "InspectorPane.h"
+#include "AssetBrowserPane.h"
+#include "PerformanceFooter.h"
+#include "../Plugins/PluginHostService.h"
 
 class LogicProLookAndFeel final : public juce::LookAndFeel_V4
 {
@@ -49,6 +54,24 @@ public:
 
     void paint(juce::Graphics& g) override;
     void resized() override;
+    bool keyPressed(const juce::KeyPress& key) override;
+    bool handleGlobalKeyPress(const juce::KeyPress& key);
+
+    juce::Result saveProject(const juce::File& file);
+    juce::Result loadProject(const juce::File& file, juce::StringArray* missingMediaReferences = nullptr);
+    juce::Result createNewProject();
+    bool isProjectDirty() const noexcept;
+    void markProjectSaved() noexcept;
+    bool undoEdit();
+    bool redoEdit();
+    void setInspectorPanelVisible(bool visible);
+    void setBrowserPanelVisible(bool visible);
+    void setMixerPanelVisible(bool visible);
+    bool addTrackFromCommand();
+    void setWorkspaceTrackHeight(int height);
+    bool isInspectorPanelVisible() const noexcept { return inspectorPane.isVisible(); }
+    bool isBrowserPanelVisible() const noexcept { return assetBrowser.isVisible(); }
+    bool isMixerPanelVisible() const noexcept { return mixerPane.isVisible(); }
 
     TrackDataModel& getTrackDataModel() noexcept { return trackDataModel; }
 
@@ -56,7 +79,14 @@ private:
     LogicProLookAndFeel lookAndFeel;
     TrackDataModel trackDataModel;
     AudioEngine audioEngine { &trackDataModel };
-    ControlBar controlBar { &trackDataModel };
+    PluginHostService pluginHost;
+    ControlBar controlBar { &trackDataModel, &audioEngine };
     ArrangeWindow arrangeWindow { &trackDataModel };
-    MixerPane mixerPane { &trackDataModel, &audioEngine };
+    InspectorPane inspectorPane { &trackDataModel, &audioEngine };
+    AssetBrowserPane assetBrowser;
+    PerformanceFooter performanceFooter { &audioEngine };
+    MixerPane mixerPane { &trackDataModel, &audioEngine, &pluginHost };
+    PianoRoll pianoRoll { &trackDataModel };
+    std::unique_ptr<juce::FileChooser> bounceFileChooser;
+    uint64_t savedProjectRevision = 0;
 };

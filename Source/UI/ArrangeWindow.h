@@ -11,35 +11,48 @@ public:
 
     void paint(juce::Graphics& g) override;
     void resized() override {}
+    void mouseDown(const juce::MouseEvent&) override;
+    std::function<void(int)> onTrackSelected;
+    void setSelectedTrack(int track) noexcept { selectedTrack = track; repaint(); }
 
     void setTrackModel(TrackDataModel* model) noexcept { trackModel = model; }
 
 private:
     TrackDataModel* trackModel = nullptr;
+    int selectedTrack = 0;
 };
 
-class TimelineGrid final : public juce::Component
+class TimelineGrid final : public juce::Component, private juce::Timer
 {
 public:
     explicit TimelineGrid(TrackDataModel* model = nullptr);
 
     void paint(juce::Graphics& g) override;
     void mouseDown(const juce::MouseEvent& event) override;
+    void mouseDoubleClick(const juce::MouseEvent& event) override;
     void mouseDrag(const juce::MouseEvent& event) override;
     void mouseUp(const juce::MouseEvent& event) override;
     bool keyPressed(const juce::KeyPress& key) override;
+    std::function<void(int)> onTrackSelected;
+    std::function<void(MidiClipId)> onMidiClipSelected;
+    void setSelectedTrack(int track) noexcept { selectedTrack = track; selectedClip = -1; repaint(); }
     void resized() override {}
 
     void setTrackModel(TrackDataModel* model) noexcept { trackModel = model; }
 
 private:
+    void timerCallback() override;
+
     TrackDataModel* trackModel = nullptr;
     double viewStartSample = 0.0;
     double zoomFactor = 1.0;
-    int draggedClipIndex = -1;
-    double dragOffsetSamples = 0.0;
     int selectedTrack = -1;
     int selectedClip = -1;
+    ClipId selectedClipId;
+    double clipDragStartSample = 0.0;
+    double clipDragPreviewSample = 0.0;
+    int clipDragPreviewTrack = -1;
+    bool draggingClip = false;
     bool trimmingLeft = false;
     bool trimmingRight = false;
 };
@@ -63,6 +76,9 @@ class ArrangeWindow final : public juce::Component, public juce::FileDragAndDrop
 public:
     explicit ArrangeWindow(TrackDataModel* model = nullptr);
 
+    std::function<void(int)> onTrackSelected;
+    std::function<void(MidiClipId)> onMidiClipSelected;
+
     void paint(juce::Graphics& g) override;
     void resized() override;
     bool isInterestedInFileDrag(const juce::StringArray& files) override;
@@ -70,6 +86,7 @@ public:
     void fileDragMove(const juce::StringArray& files, int x, int y) override;
     void fileDragExit(const juce::StringArray& files) override;
     void filesDropped(const juce::StringArray& files, int x, int y) override;
+    void importAudioFile(const juce::File& file, int trackIndex, double startSample);
 
 private:
     juce::ThreadPool loader { 2 };

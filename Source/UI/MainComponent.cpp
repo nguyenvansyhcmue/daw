@@ -1,4 +1,6 @@
 #include "MainComponent.h"
+#include "../Project/ProjectSerializer.h"
+#include "../Project/ProjectState.h"
 
 #include <cmath>
 
@@ -6,10 +8,10 @@
 
 namespace
 {
-const auto darkBackground = juce::Colour(0xff1a1a1a);
-const auto panelBackground = juce::Colour(0xff2b2b2b);
-const auto accentBlue = juce::Colour(0xff00a8ff);
-const auto accentCyan = juce::Colour(0xff00ffe0);
+const auto darkBackground = juce::Colour(0xff252526);
+const auto panelBackground = juce::Colour(0xff343434);
+const auto accentBlue = juce::Colour(0xff6f88a8);
+const auto accentCyan = juce::Colour(0xffa7c5df);
 }
 
 LogicProLookAndFeel::LogicProLookAndFeel()
@@ -105,22 +107,208 @@ MainComponent::MainComponent()
     setLookAndFeel(&lookAndFeel);
     addAndMakeVisible(controlBar);
     addAndMakeVisible(arrangeWindow);
-    addAndMakeVisible(mixerPane);
+    addChildComponent(inspectorPane);
+    addChildComponent(assetBrowser);
+    addAndMakeVisible(performanceFooter);
+    addChildComponent(mixerPane);
+    addChildComponent(pianoRoll);
 
-    trackDataModel.ensureTrackCount(8);
-    trackDataModel.getTrack(0).volume = 0.9f;
-    trackDataModel.getTrack(1).volume = 1.0f;
-    trackDataModel.getTrack(2).volume = 0.8f;
-    trackDataModel.getTrack(3).volume = 0.7f;
-    trackDataModel.getTrack(4).volume = 0.9f;
-    trackDataModel.getTrack(5).volume = 1.0f;
-    trackDataModel.getTrack(6).volume = 0.8f;
-    trackDataModel.getTrack(7).volume = 0.9f;
+    // Keep the selected channel's controls in view by default, matching the
+    // arrangement-first workflow rather than starting with a blank left rail.
+    inspectorPane.setVisible(true);
+    controlBar.setInspectorVisible(true);
+    assetBrowser.setVisible(true);
+    controlBar.setBrowserVisible(true);
+
+    controlBar.onMixerToggle = [this]
+    {
+        const auto visible = ! mixerPane.isVisible();
+        mixerPane.setVisible(visible);
+        controlBar.setMixerVisible(visible);
+        resized();
+    };
+    controlBar.onInspectorToggle = [this]
+    {
+        const auto visible = ! inspectorPane.isVisible();
+        inspectorPane.setVisible(visible);
+        controlBar.setInspectorVisible(visible);
+        resized();
+    };
+    controlBar.onPianoRollToggle = [this]
+    {
+        const auto visible = ! pianoRoll.isVisible();
+        pianoRoll.setVisible(visible);
+        controlBar.setPianoRollVisible(visible);
+        resized();
+    };
+    controlBar.onBrowserToggle = [this]
+    {
+        const auto visible = ! assetBrowser.isVisible();
+        assetBrowser.setVisible(visible);
+        controlBar.setBrowserVisible(visible);
+        resized();
+    };
+    arrangeWindow.onTrackSelected = [this](int track) { inspectorPane.setSelectedTrack(track); };
+    arrangeWindow.onMidiClipSelected = [this](MidiClipId clip)
+    {
+        pianoRoll.setActiveClip(clip);
+        pianoRoll.setVisible(true);
+        controlBar.setPianoRollVisible(true);
+        resized();
+    };
+    assetBrowser.onAudioFileActivated = [this](const juce::File& file)
+    {
+        arrangeWindow.importAudioFile(file, 0, trackDataModel.getPlayheadPosition());
+    };
+    performanceFooter.onBounceRequested = [this]
+    {
+        bounceFileChooser = std::make_unique<juce::FileChooser>("Bounce mixdown", juce::File {}, "*.wav");
+        bounceFileChooser->launchAsync(juce::FileBrowserComponent::saveMode
+                                           | juce::FileBrowserComponent::canSelectFiles,
+            [this](const juce::FileChooser& chooser)
+            {
+                const auto output = chooser.getResult();
+                if (output != juce::File {})
+                    audioEngine.renderOfflineWav(output.withFileExtension(".wav"), trackDataModel.getSampleRate());
+                bounceFileChooser.reset();
+            });
+    };
+
+    trackDataModel.ensureTrackCount(TrackDataModel::maxTracks);
+    inspectorPane.setSelectedTrack(0);
+    markProjectSaved();
 }
 
 MainComponent::~MainComponent()
 {
     setLookAndFeel(nullptr);
+}
+
+bool MainComponent::keyPressed(const juce::KeyPress& key)
+{
+    return handleGlobalKeyPress(key);
+}
+
+bool MainComponent::handleGlobalKeyPress(const juce::KeyPress& key)
+{
+    if (key.getModifiers().isAnyModifierKeyDown())
+        return false;
+
+    if (key.isKeyCode(juce::KeyPress::spaceKey))
+    {
+        controlBar.togglePlayback();
+        return true;
+    }
+    if (key.isKeyCode(juce::KeyPress::returnKey))
+    {
+        controlBar.stopPlayback();
+        trackDataModel.setPlayheadPosition(0.0);
+        return true;
+    }
+    if (key.getKeyCode() == 'r' || key.getKeyCode() == 'R')
+    {
+        controlBar.toggleRecording();
+        return true;
+    }
+
+    return false;
+}
+
+juce::Result MainComponent::saveProject(const juce::File& file)
+{
+    const auto result = ProjectSerializer::save(trackDataModel, file);
+    if (result.wasOk())
+        markProjectSaved();
+    return result;
+}
+
+juce::Result MainComponent::loadProject(const juce::File& file, juce::StringArray* missingMediaReferences)
+{
+    audioEngine.setPlaybackState(false);
+    const auto result = ProjectSerializer::load(trackDataModel, file, missingMediaReferences);
+    if (result.wasOk())
+    {
+        inspectorPane.setSelectedTrack(0);
+        mixerPane.refreshFromModel();
+        arrangeWindow.repaint();
+        pianoRoll.repaint();
+        markProjectSaved();
+    }
+    return result;
+}
+
+juce::Result MainComponent::createNewProject()
+{
+    audioEngine.setPlaybackState(false);
+    ProjectState state;
+    state.tempoMap.push_back({ 0.0, 120.0 });
+    for (uint64_t id = 1; id <= TrackDataModel::maxTracks; ++id)
+        state.tracks.push_back({ { id } });
+
+    const auto result = trackDataModel.applyProjectState(state);
+    if (result.wasOk())
+    {
+        inspectorPane.setSelectedTrack(0);
+        mixerPane.refreshFromModel();
+        arrangeWindow.repaint();
+        pianoRoll.repaint();
+        markProjectSaved();
+    }
+    return result;
+}
+
+bool MainComponent::isProjectDirty() const noexcept
+{
+    return trackDataModel.getProjectRevision() != savedProjectRevision;
+}
+
+void MainComponent::markProjectSaved() noexcept
+{
+    savedProjectRevision = trackDataModel.getProjectRevision();
+}
+
+bool MainComponent::undoEdit()
+{
+    const auto changed = trackDataModel.undo();
+    if (changed) { mixerPane.refreshFromModel(); arrangeWindow.repaint(); }
+    return changed;
+}
+
+bool MainComponent::redoEdit()
+{
+    const auto changed = trackDataModel.redo();
+    if (changed) { mixerPane.refreshFromModel(); arrangeWindow.repaint(); }
+    return changed;
+}
+
+void MainComponent::setInspectorPanelVisible(bool visible)
+{
+    inspectorPane.setVisible(visible); controlBar.setInspectorVisible(visible); resized();
+}
+
+void MainComponent::setBrowserPanelVisible(bool visible)
+{
+    assetBrowser.setVisible(visible); controlBar.setBrowserVisible(visible); resized();
+}
+
+void MainComponent::setMixerPanelVisible(bool visible)
+{
+    mixerPane.setVisible(visible); controlBar.setMixerVisible(visible); resized();
+}
+
+bool MainComponent::addTrackFromCommand()
+{
+    if (! trackDataModel.addTrack().isValid())
+        return false;
+    arrangeWindow.repaint();
+    mixerPane.refreshFromModel();
+    return true;
+}
+
+void MainComponent::setWorkspaceTrackHeight(int height)
+{
+    trackDataModel.setTrackHeight(height);
+    arrangeWindow.repaint();
 }
 
 void MainComponent::paint(juce::Graphics& g)
@@ -134,7 +322,19 @@ void MainComponent::paint(juce::Graphics& g)
 void MainComponent::resized()
 {
     auto area = getLocalBounds();
-    controlBar.setBounds(area.removeFromTop(72));
-    mixerPane.setBounds(area.removeFromBottom(160));
-    arrangeWindow.setBounds(area.reduced(0, 0));
+    controlBar.setBounds(area.removeFromTop(54));
+    performanceFooter.setBounds(area.removeFromBottom(38));
+
+    // Reserve bottom panes before assigning the arrange area.  Giving ArrangeWindow
+    // the full bounds first made these panes overlay its tracks instead of docking.
+    if (mixerPane.isVisible())
+        mixerPane.setBounds(area.removeFromBottom(210));
+    if (pianoRoll.isVisible())
+        pianoRoll.setBounds(area.removeFromBottom(250));
+    if (inspectorPane.isVisible())
+        inspectorPane.setBounds(area.removeFromLeft(230));
+    if (assetBrowser.isVisible())
+        assetBrowser.setBounds(area.removeFromRight(250));
+
+    arrangeWindow.setBounds(area);
 }

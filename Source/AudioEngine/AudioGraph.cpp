@@ -45,9 +45,6 @@ void AudioGraph::process(juce::AudioBuffer<float>& buffer, int numSamples)
     if (numSamples <= 0)
         return;
 
-    if (nodes.empty())
-        return;
-
     for (auto& node : nodes)
         node->process(buffer, numSamples);
 

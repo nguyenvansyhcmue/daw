@@ -7,6 +7,8 @@
 #include "AudioPeakMeter.h"
 #include "../Models/TrackDataModel.h"
 
+class PluginHostService;
+
 class AudioEngine;
 
 class FxSlotButton final : public juce::TextButton
@@ -63,20 +65,26 @@ private:
 class MixerPane final : public juce::Component, private juce::Timer
 {
 public:
-    explicit MixerPane(TrackDataModel* model = nullptr, AudioEngine* engine = nullptr);
+    explicit MixerPane(TrackDataModel* model = nullptr, AudioEngine* engine = nullptr,
+                       PluginHostService* pluginHost = nullptr);
 
     void paint(juce::Graphics& g) override;
     void resized() override;
+    void refreshFromModel();
 
 private:
     void timerCallback() override;
 
     TrackDataModel* trackModel = nullptr;
     AudioEngine* audioEngine = nullptr;
-    std::array<AudioPeakMeter, 8> meters;
-    std::array<juce::Slider, 8> faders;
-    std::array<juce::ToggleButton, 8> muteButtons;
-    std::array<std::array<FxSlotButton, TrackDataModel::maxFxSlots>, 8> fxButtons;
-    std::array<juce::Label, 8> labels;
+    PluginHostService* pluginHostService = nullptr;
+    std::unique_ptr<juce::FileChooser> pluginFileChooser;
+    std::array<AudioPeakMeter, TrackDataModel::maxTracks> meters;
+    std::array<juce::Slider, TrackDataModel::maxTracks> faders;
+    std::array<juce::Slider, TrackDataModel::maxTracks> panSliders;
+    std::array<juce::ToggleButton, TrackDataModel::maxTracks> muteButtons;
+    std::array<juce::ToggleButton, TrackDataModel::maxTracks> soloButtons;
+    std::array<std::array<FxSlotButton, TrackDataModel::maxFxSlots>, TrackDataModel::maxTracks> fxButtons;
+    std::array<juce::Label, TrackDataModel::maxTracks> labels;
     juce::Label titleLabel;
 };

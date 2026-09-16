@@ -21,6 +21,7 @@ ControlBar::ControlBar(TrackDataModel* model, AudioEngine* engine)
     addAndMakeVisible(mixerButton);
     addAndMakeVisible(pianoRollButton);
     addAndMakeVisible(browserButton);
+    addAndMakeVisible(addTrackButton);
     addAndMakeVisible(timecodeLabel);
     addAndMakeVisible(pointerTool);
     addAndMakeVisible(scissorsTool);
@@ -29,10 +30,22 @@ ControlBar::ControlBar(TrackDataModel* model, AudioEngine* engine)
     mixerButton.setClickingTogglesState(true);
     pianoRollButton.setClickingTogglesState(true);
     browserButton.setClickingTogglesState(true);
+    inspectorButton.setTooltip("Show or hide Inspector");
+    mixerButton.setTooltip("Show or hide Mixer");
+    pianoRollButton.setTooltip("Show or hide Piano Roll");
+    browserButton.setTooltip("Show or hide Media Browser");
+    addTrackButton.setTooltip("Create new track");
     inspectorButton.onClick = [this] { if (onInspectorToggle != nullptr) onInspectorToggle(); };
     mixerButton.onClick = [this] { if (onMixerToggle != nullptr) onMixerToggle(); };
     pianoRollButton.onClick = [this] { if (onPianoRollToggle != nullptr) onPianoRollToggle(); };
     browserButton.onClick = [this] { if (onBrowserToggle != nullptr) onBrowserToggle(); };
+    addTrackButton.onClick = [this]
+    {
+        // The modal owns type/count choices so the in-project command uses the
+        // same validated creation flow as a new empty project.
+        if (onCreateTrack != nullptr)
+            onCreateTrack(TrackType::audio);
+    };
     pointerTool.setClickingTogglesState(true);
     scissorsTool.setClickingTogglesState(true);
     eraserTool.setClickingTogglesState(true);
@@ -139,6 +152,12 @@ void ControlBar::stopPlayback() noexcept
 
 void ControlBar::toggleRecording()
 {
+    if (onRecordRequested != nullptr)
+    {
+        onRecordRequested();
+        return;
+    }
+
     if (audioEngine == nullptr)
         return;
 
@@ -148,6 +167,8 @@ void ControlBar::toggleRecording()
     }
     else
     {
+        if (trackModel == nullptr || trackModel->getTrackCount() == 0)
+            return;
         const auto armedTrack = trackModel != nullptr ? trackModel->getFirstArmedTrackIndex() : -1;
         const auto targetTrack = static_cast<size_t>(juce::jmax(0, armedTrack));
         audioEngine->startRecording(targetTrack, juce::File::getSpecialLocation(juce::File::tempDirectory)
@@ -155,6 +176,11 @@ void ControlBar::toggleRecording()
     }
 
     recordButton.setToggleState(audioEngine->isRecording(), juce::dontSendNotification);
+}
+
+void ControlBar::setRecordActive(bool active) noexcept
+{
+    recordButton.setToggleState(active, juce::dontSendNotification);
 }
 
 void ControlBar::timerCallback()
@@ -194,6 +220,7 @@ void ControlBar::resized()
     mixerButton.setBounds(bounds.getX() + 34, bounds.getY(), 30, buttonHeight);
     pianoRollButton.setBounds(bounds.getX() + 68, bounds.getY(), 30, buttonHeight);
     browserButton.setBounds(bounds.getX() + 102, bounds.getY(), 30, buttonHeight);
+    addTrackButton.setBounds(bounds.getX() + 136, bounds.getY(), 30, buttonHeight);
 
     const auto centre = bounds.getCentreX();
     const auto transportWidth = buttonWidth * 2 + 6;
@@ -206,7 +233,14 @@ void ControlBar::resized()
     metronomeButton.setBounds(bounds.getRight() - 198, bounds.getY(), 86, buttonHeight);
     bpmSlider.setBounds(bounds.getRight() - 108, bounds.getY() + 2, 62, 25);
     bpmLabel.setBounds(bounds.getRight() - 46, bounds.getY(), 46, buttonHeight);
-    pointerTool.setBounds(bounds.getX() + 140, bounds.getY(), 68, buttonHeight);
-    scissorsTool.setBounds(bounds.getX() + 212, bounds.getY(), 78, buttonHeight);
-    eraserTool.setBounds(bounds.getX() + 294, bounds.getY(), 64, buttonHeight);
+    pointerTool.setBounds(bounds.getX() + 174, bounds.getY(), 68, buttonHeight);
+    scissorsTool.setBounds(bounds.getX() + 246, bounds.getY(), 78, buttonHeight);
+    eraserTool.setBounds(bounds.getX() + 328, bounds.getY(), 64, buttonHeight);
+
+    // The transport has priority on compact windows; tools remain accessible
+    // through their shortcuts rather than overlapping its LCD and buttons.
+    const auto showToolStrip = getWidth() >= 1040;
+    pointerTool.setVisible(showToolStrip);
+    scissorsTool.setVisible(showToolStrip);
+    eraserTool.setVisible(showToolStrip);
 }

@@ -173,19 +173,23 @@ void TrackHeaderPanel::paint(juce::Graphics& g)
         g.setColour(index == selectedTrack ? juce::Colour(0xff435362) : (index % 2 == 0 ? panelAlt : panelBackground));
         g.fillRect(row);
 
-        const auto colour = juce::Colour::fromHSV(static_cast<float>(index) / juce::jmax(1, count), 0.55f, 0.85f, 1.0f);
+        const auto& track = trackModel->getTrack(static_cast<size_t>(index));
+        const auto colour = track.type == TrackType::instrument ? juce::Colour(0xff35a866)
+            : track.type == TrackType::externalMidi ? juce::Colour(0xff9167d4)
+            : juce::Colour(0xff3d8ed7);
         g.setColour(colour);
         g.fillRoundedRectangle(row.getX() + 10.0f, row.getY() + 12.0f, 28.0f, 28.0f, 4.0f);
-        g.setColour(juce::Colours::black.withAlpha(0.35f));
-        g.fillEllipse(row.getX() + 17.0f, row.getY() + 19.0f, 14.0f, 14.0f);
         g.setColour(juce::Colours::white.withAlpha(0.9f));
         g.setFont(juce::Font(juce::FontOptions(13.0f, juce::Font::bold)));
-        const auto& track = trackModel->getTrack(static_cast<size_t>(index));
+        g.drawText(track.type == TrackType::instrument ? "♪" : track.type == TrackType::externalMidi ? "M" : "~",
+                   row.getX() + 10.0f, row.getY() + 12.0f, 28.0f, 28.0f, juce::Justification::centred, false);
         g.drawText(track.name.isNotEmpty() ? track.name : "Track " + juce::String(index + 1),
                    row.getX() + 46.0f, row.getY() + 8.0f, 90.0f, 18.0f, juce::Justification::centredLeft, true);
         g.setColour(juce::Colours::white.withAlpha(0.42f));
         g.setFont(10.0f);
-        g.drawText("Audio", row.getX() + 46.0f, row.getY() + 27.0f, 55.0f, 15.0f, juce::Justification::centredLeft, false);
+        const auto typeName = track.type == TrackType::instrument ? "Instrument"
+            : track.type == TrackType::externalMidi ? "External MIDI" : "Audio";
+        g.drawText(typeName, row.getX() + 46.0f, row.getY() + 27.0f, 80.0f, 15.0f, juce::Justification::centredLeft, false);
 
         const auto arm = juce::Rectangle<float>(row.getRight() - 96.0f, row.getY() + 16.0f, 20.0f, 20.0f);
         const auto mute = arm.translated(24.0f, 0.0f);
@@ -334,6 +338,7 @@ void TimelineGrid::mouseDown(const juce::MouseEvent& event)
                 repaint();
                 return;
             }
+            if (onAudioClipSelected != nullptr) onAudioClipSelected(clip.id);
             trimmingLeft = std::abs(event.position.x - startX) <= 5.0;
             trimmingRight = std::abs(event.position.x - endX) <= 5.0;
             clipDragStartSample = clip.startSample;
@@ -593,8 +598,6 @@ ArrangeWindow::ArrangeWindow(TrackDataModel* model)
     addAndMakeVisible(horizontalZoomSlider);
     addAndMakeVisible(trackHeightSlider);
 
-    if (model != nullptr)
-        model->ensureTrackCount(TrackDataModel::maxTracks);
     trackHeaderPanel.onTrackSelected = [this](int track)
     {
         timelineGrid.setSelectedTrack(track);
@@ -608,6 +611,10 @@ ArrangeWindow::ArrangeWindow(TrackDataModel* model)
     timelineGrid.onMidiClipSelected = [this](MidiClipId clip)
     {
         if (onMidiClipSelected != nullptr) onMidiClipSelected(clip);
+    };
+    timelineGrid.onAudioClipSelected = [this](ClipId clip)
+    {
+        if (onAudioClipSelected != nullptr) onAudioClipSelected(clip);
     };
 }
 
@@ -690,6 +697,12 @@ void ArrangeWindow::filesDropped(const juce::StringArray& files, int x, int y)
         * trackModel->getSampleRate();
     const auto snappedSample = trackModel->getSnappedSamplePosition(rawSample, 0.25);
     importAudioFile(juce::File(files[0]), track, snappedSample);
+}
+
+void ArrangeWindow::setSelectedTrack(int trackIndex) noexcept
+{
+    trackHeaderPanel.setSelectedTrack(trackIndex);
+    timelineGrid.setSelectedTrack(trackIndex);
 }
 
 void ArrangeWindow::importAudioFile(const juce::File& file, int trackIndex, double startSample)

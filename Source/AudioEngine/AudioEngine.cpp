@@ -51,6 +51,9 @@ void AudioEngine::setTempo(double newTempo) noexcept
 juce::Result AudioEngine::startRecording(size_t trackIndex, const juce::File& destination)
 {
     if (recordingSession == nullptr) return juce::Result::fail("Audio engine has no project model");
+    if (trackIndex >= dataModel->getTrackCount()
+        || dataModel->getTrack(trackIndex).type != TrackType::audio)
+        return juce::Result::fail("Recording requires an audio track");
     auto* device = deviceManager.getCurrentAudioDevice();
     const auto sampleRate = device != nullptr ? device->getCurrentSampleRate() : dataModel->getSampleRate();
     const auto inputChannels = device != nullptr ? device->getActiveInputChannels().countNumberOfSetBits() : 2;
@@ -165,6 +168,11 @@ float AudioEngine::getTrackPeak(size_t trackIndex) const noexcept
     return trackIndex < trackPeaks.size() ? trackPeaks[trackIndex].load(std::memory_order_relaxed) : 0.0f;
 }
 
+float AudioEngine::getBusPeak(size_t busIndex) const noexcept
+{
+    return busIndex < busPeaks.size() ? busPeaks[busIndex].load(std::memory_order_relaxed) : 0.0f;
+}
+
 float AudioEngine::getMasterPeak() const noexcept
 {
     return masterPeak.load(std::memory_order_relaxed);
@@ -239,8 +247,19 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
 
     if (recordingSession != nullptr) recordingSession->capture(inputChannelData, numInputChannels, numSamples);
 
-    if (dataModel == nullptr || !dataModel->isPlaying()
-        || numSamples > processingBuffer.getNumSamples())
+    if (dataModel == nullptr || numSamples > processingBuffer.getNumSamples())
+        return;
+
+    const auto snapshots = dataModel->acquireRealtimeSnapshot();
+    const auto* clips = snapshots.getAudioClips();
+    const auto* structure = snapshots.getRenderStructure();
+    const auto* midiClips = snapshots.getMidiClips();
+    const auto playing = dataModel->isPlaying();
+    bool hasMonitoredAudio = false;
+    for (size_t index = 0; structure != nullptr && index < structure->trackCount; ++index)
+        hasMonitoredAudio = hasMonitoredAudio || (structure->tracks[index].type == TrackType::audio
+            && structure->tracks[index].inputMonitoring);
+    if (! playing && ! hasMonitoredAudio)
         return;
 
     processingBuffer.clear(0, numSamples);
@@ -248,19 +267,17 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
         buffer.clear(0, numSamples);
     for (auto& buffer : busBuffers)
         buffer.clear(0, numSamples);
+    for (auto& peak : busPeaks)
+        peak.store(0.0f, std::memory_order_relaxed);
 
-    const auto snapshots = dataModel->acquireRealtimeSnapshot();
-    const auto* clips = snapshots.getAudioClips();
-    const auto* structure = snapshots.getRenderStructure();
-    const auto* midiClips = snapshots.getMidiClips();
-    if (clips != nullptr && structure != nullptr)
+    scheduledMidiEvents.clear();
+    if (playing && clips != nullptr && structure != nullptr)
     {
         const auto cycleActive = dataModel->isCycleActive();
         const auto cycleStart = dataModel->getCycleStartSample();
         const auto cycleEnd = dataModel->getCycleEndSample();
         auto playhead = TransportUtils::normalisePlayhead(dataModel->getPlayheadPosition(), cycleActive,
                                                           cycleStart, cycleEnd);
-        scheduledMidiEvents.clear();
         int renderedSamples = 0;
         while (renderedSamples < numSamples)
         {
@@ -289,11 +306,12 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
     for (size_t trackIndex = 0; structure != nullptr && trackIndex < structure->trackCount; ++trackIndex)
         anyTrackSoloed = anyTrackSoloed || structure->tracks[trackIndex].solo;
 
-    if (structure != nullptr) renderInstrument(*structure, numSamples);
+    if (playing && structure != nullptr) renderInstrument(*structure, numSamples);
 
     for (auto& midi : trackMidiBuffers)
         midi.clear();
     if (structure != nullptr)
+    {
         for (size_t eventIndex = 0; eventIndex < scheduledMidiEvents.size(); ++eventIndex)
         {
             const auto& event = scheduledMidiEvents[eventIndex];
@@ -302,6 +320,21 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
             const auto message = event.noteOn ? juce::MidiMessage::noteOn(event.channel, event.pitch, event.velocity)
                                               : juce::MidiMessage::noteOff(event.channel, event.pitch);
             trackMidiBuffers[static_cast<size_t>(trackIndex)].addEvent(message, event.sampleOffset);
+        }
+    }
+
+    if (structure != nullptr && inputChannelData != nullptr && numInputChannels > 0)
+        for (size_t trackIndex = 0; trackIndex < structure->trackCount; ++trackIndex)
+        {
+            const auto& track = structure->tracks[trackIndex];
+            if (track.type != TrackType::audio || ! track.inputMonitoring) continue;
+            auto& destination = trackBuffers[trackIndex];
+            for (int channel = 0; channel < destination.getNumChannels(); ++channel)
+            {
+                const auto inputIndex = (track.inputChannel + channel) % numInputChannels;
+                if (const auto* input = inputChannelData[inputIndex]; input != nullptr)
+                    juce::FloatVectorOperations::add(destination.getWritePointer(channel), input, numSamples);
+            }
         }
 
     for (size_t trackIndex = 0; structure != nullptr && trackIndex < structure->trackCount; ++trackIndex)
@@ -339,6 +372,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
         const auto& bus = structure->buses[busIndex];
         if (bus.muted) busBuffers[busIndex].clear(0, numSamples);
         else busBuffers[busIndex].applyGain(0, 0, numSamples, bus.gain), busBuffers[busIndex].applyGain(1, 0, numSamples, bus.gain);
+        busPeaks[busIndex].store(TrackMixing::peak(busBuffers[busIndex], numSamples), std::memory_order_relaxed);
         for (int channel = 0; channel < juce::jmin(busBuffers[busIndex].getNumChannels(), processingBuffer.getNumChannels()); ++channel)
             juce::FloatVectorOperations::add(processingBuffer.getWritePointer(channel), busBuffers[busIndex].getReadPointer(channel), numSamples);
     }
@@ -367,6 +401,8 @@ void AudioEngine::renderInstrument(const TrackDataModel::RenderStructureSnapshot
         }
         for (size_t trackIndex = 0; trackIndex < structure.trackCount; ++trackIndex)
         {
+            if (structure.tracks[trackIndex].type != TrackType::instrument)
+                continue;
             auto& voice = instrumentVoices[trackIndex];
             if (! voice.active) continue;
             const auto frequency = 440.0 * std::pow(2.0, (voice.pitch - 69) / 12.0);

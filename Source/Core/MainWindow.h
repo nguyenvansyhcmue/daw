@@ -4,6 +4,7 @@
 #include <juce_opengl/juce_opengl.h>
 
 #include "UI/MainComponent.h"
+#include "Project/RecentProjectsStore.h"
 
 class MainWindow final : public juce::DocumentWindow,
                          public juce::MenuBarModel,
@@ -45,6 +46,7 @@ private:
     void chooseProjectToSave();
     void saveCurrentProject();
     void loadProjectFromFile(const juce::File& file);
+    void refreshRecentProjects();
     void confirmDiscardChanges(std::function<void()> continuation);
     void showProjectError(const juce::String& title, const juce::Result& result) const;
 
@@ -52,4 +54,5 @@ private:
     std::unique_ptr<juce::FileChooser> projectFileChooser;
     MainComponent* mainComponent = nullptr;
     juce::File currentProjectFile;
+    RecentProjectsStore recentProjects;
 };

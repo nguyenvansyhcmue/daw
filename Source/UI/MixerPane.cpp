@@ -32,7 +32,7 @@ MixerPane::MixerPane(TrackDataModel* model, AudioEngine* engine, PluginHostServi
         muteButtons[i].setButtonText("M");
         muteButtons[i].setColour(juce::ToggleButton::textColourId, juce::Colours::white);
         muteButtons[i].setColour(juce::ToggleButton::tickColourId, accentCyan);
-        muteButtons[i].setToggleState(trackModel != nullptr
+        muteButtons[i].setToggleState(trackModel != nullptr && static_cast<size_t>(i) < trackModel->getTrackCount()
                                           && trackModel->getTrack(static_cast<size_t>(i)).muted.load(),
                                       juce::dontSendNotification);
         muteButtons[i].onClick = [this, i]
@@ -45,7 +45,7 @@ MixerPane::MixerPane(TrackDataModel* model, AudioEngine* engine, PluginHostServi
         soloButtons[i].setButtonText("S");
         soloButtons[i].setColour(juce::ToggleButton::textColourId, juce::Colours::white);
         soloButtons[i].setColour(juce::ToggleButton::tickColourId, juce::Colour(0xffffd166));
-        soloButtons[i].setToggleState(trackModel != nullptr
+        soloButtons[i].setToggleState(trackModel != nullptr && static_cast<size_t>(i) < trackModel->getTrackCount()
                                           && trackModel->getTrack(static_cast<size_t>(i)).solo.load(),
                                       juce::dontSendNotification);
         soloButtons[i].onClick = [this, i]

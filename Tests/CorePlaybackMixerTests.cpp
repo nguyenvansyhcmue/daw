@@ -11,6 +11,7 @@
 #include "Midi/MidiCore.h"
 #include "Plugins/PluginHostService.h"
 #include "Project/ProjectSerializer.h"
+#include "Project/RecentProjectsStore.h"
 
 namespace
 {
@@ -189,6 +190,15 @@ bool testTrackCapacity()
                   "model rejects a track beyond the fixed realtime capacity");
 }
 
+bool testTrackReadDoesNotCreateTracks()
+{
+    TrackDataModel model;
+    static_cast<void>(model.getTrack(0));
+    static_cast<void>(model.getTrack(TrackDataModel::maxTracks - 1));
+    return expect(model.getTrackCount() == 0,
+                  "reading an empty project never creates default tracks");
+}
+
 bool testRealtimeSnapshotOwnership()
 {
     TrackDataModel model;
@@ -338,15 +348,19 @@ bool testProjectPersistence()
     sparseIdFile.deleteFile();
 
     TrackDataModel source;
-    const auto trackA = source.addTrack();
-    const auto trackB = source.addTrack();
-    const auto trackC = source.addTrack();
+    const auto trackA = source.addTrack(TrackType::audio);
+    const auto trackB = source.addTrack(TrackType::externalMidi);
+    const auto trackC = source.addTrack(TrackType::instrument);
     source.reorderTrack(trackC, 0);
     source.setTrackName(0, "Drums");
     source.setTrackVolume(0, 1.5f);
     source.setTrackPan(0, -0.25f);
     source.setTrackMuted(0, true);
     source.setTrackSolo(1, true);
+    source.setTrackInputMonitoring(static_cast<size_t>(source.getTrackIndex(trackA)), true, 1);
+    const auto bus = source.addBus();
+    source.setTrackOutputBus(trackA, bus);
+    source.setTrackSend(trackB, bus, 0.35f);
     source.setBpm(137.0);
     source.setTimeSignatureNumerator(7);
     source.clearTempoMap();
@@ -377,8 +391,20 @@ bool testProjectPersistence()
     if (! expect(after.tracks[0].id == trackC && after.tracks[1].id == trackA && after.tracks[2].id == trackB,
                  "track order and IDs round-trip")) return false;
     if (! expect(after.tracks[0].name == "Drums", "track name round-trips")) return false;
+    if (! expect(after.tracks[0].type == TrackType::instrument
+                 && after.tracks[1].type == TrackType::audio
+                 && after.tracks[2].type == TrackType::externalMidi,
+                 "track types round-trip with project order")) return false;
     if (! expect(after.tracks[0].volume == 1.5f && after.tracks[0].pan == -0.25f && after.tracks[0].muted
                  && after.tracks[1].solo, "mixer state round-trips")) return false;
+    if (! expect(after.tracks[1].inputMonitoring && after.tracks[1].inputChannel == 1,
+                 "track input-monitor routing round-trips")) return false;
+    if (! expect(after.buses.size() == 1 && after.buses[0].id == bus
+                 && after.tracks[1].outputBus == bus && after.tracks[2].sendBus == bus
+                 && approximatelyEqual(after.tracks[2].sendAmount, 0.35f),
+                 "bus and send routing round-trips")) return false;
+    if (! expect(loaded.clearTrackSend(trackB) && ! loaded.createProjectState().tracks[2].sendBus.isValid(),
+                 "track send can be disabled without changing track ownership")) return false;
     if (! expect(after.tracks[2].clips.size() == 2 && after.tracks[2].clips[0].id == clip
                  && after.tracks[2].clips[0].trackId == trackB
                  && after.tracks[2].clips[0].sourcePath == before.tracks[2].clips[0].sourcePath
@@ -432,6 +458,34 @@ bool testProjectPersistence()
     return true;
 }
 
+bool testRecentProjectsStore()
+{
+    const auto directory = juce::File::getSpecialLocation(juce::File::tempDirectory)
+        .getChildFile("StudioForgeRecentProjectsTest");
+    const auto first = directory.getChildFile("first.studioforge");
+    const auto second = directory.getChildFile("second.studioforge");
+    const auto storage = directory.getChildFile("recent-projects.txt");
+    directory.deleteRecursively();
+    if (! directory.createDirectory() || ! first.replaceWithText("first") || ! second.replaceWithText("second"))
+        return expect(false, "recent-project test files are created");
+
+    RecentProjectsStore store(storage);
+    store.add(first);
+    store.add(second);
+    store.add(first);
+    auto entries = store.load();
+    if (! expect(entries.size() == 2 && entries[0] == first.getFullPathName() && entries[1] == second.getFullPathName(),
+                 "recent projects are deduplicated and ordered by last open")) return false;
+    second.deleteFile();
+    entries = store.load();
+    if (! expect(entries.size() == 1 && entries[0] == first.getFullPathName(),
+                 "missing recent project paths are filtered")) return false;
+    store.clear();
+    const auto cleared = store.load();
+    directory.deleteRecursively();
+    return expect(cleared.isEmpty(), "recent projects can be cleared");
+}
+
 bool testMediaReloadAndRelink()
 {
     const auto tempDirectory = juce::File::getSpecialLocation(juce::File::tempDirectory);
@@ -439,11 +493,15 @@ bool testMediaReloadAndRelink()
     const auto mediaB = tempDirectory.getChildFile("StudioForgePhase5B.wav");
     const auto projectA = tempDirectory.getChildFile("StudioForgePhase5A.studioforge");
     const auto projectB = tempDirectory.getChildFile("StudioForgePhase5B.studioforge");
+    const auto portableMediaA = tempDirectory.getChildFile("StudioForgePhase5A Media").getChildFile("clip-1.wav");
+    const auto portableMediaB = tempDirectory.getChildFile("StudioForgePhase5B Media").getChildFile("clip-1.wav");
     const auto missingFile = tempDirectory.getChildFile("StudioForgePhase5Missing.wav");
     mediaA.deleteFile();
     mediaB.deleteFile();
     projectA.deleteFile();
     projectB.deleteFile();
+    portableMediaA.getParentDirectory().deleteRecursively();
+    portableMediaB.getParentDirectory().deleteRecursively();
     missingFile.deleteFile();
     if (! expect(writeTestWav(mediaA, 0.75f) && writeTestWav(mediaB, 0.25f), "test WAV files are written")) return false;
 
@@ -453,7 +511,8 @@ bool testMediaReloadAndRelink()
     sourceA.ensureTrackCount(1);
     const auto firstClip = sourceA.addClipToTrack(0, mediaA, 0.0, original);
     const auto secondClip = sourceA.addClipToTrack(0, mediaA, 4.0, original);
-    if (! expect(ProjectSerializer::save(sourceA, projectA).wasOk(), "media project A saves")) return false;
+    if (! expect(ProjectSerializer::save(sourceA, projectA).wasOk() && portableMediaA.existsAsFile(),
+                 "media project A saves a portable copy")) return false;
 
     TrackDataModel loaded;
     if (! expect(ProjectSerializer::load(loaded, projectA).wasOk(), "valid media reloads after project load")) return false;
@@ -478,7 +537,7 @@ bool testMediaReloadAndRelink()
     if (! expect(ProjectSerializer::save(sourceB, projectB).wasOk()
                  && ProjectSerializer::load(loaded, projectB).wasOk(), "project B replaces project A resources")) return false;
     const auto& projectBClip = loaded.getTrack(0).clips.front();
-    if (! expect(projectBClip.sourceFile == mediaB && projectBClip.cachedBuffer != nullptr
+    if (! expect(projectBClip.sourceFile == portableMediaB && projectBClip.cachedBuffer != nullptr
                  && approximatelyEqual(projectBClip.cachedBuffer->getSample(0, 0), 0.25f),
                  "project B decoded resource replaces old project resource")) return false;
 
@@ -503,6 +562,8 @@ bool testMediaReloadAndRelink()
     mediaB.deleteFile();
     projectA.deleteFile();
     projectB.deleteFile();
+    portableMediaA.getParentDirectory().deleteRecursively();
+    portableMediaB.getParentDirectory().deleteRecursively();
     return true;
 }
 
@@ -568,6 +629,10 @@ bool testRecordingFoundation()
     OfflineAudioDevice device;
     AudioEngine engine(&model);
     engine.audioDeviceAboutToStart(&device);
+    const auto externalMidi = model.addTrack(TrackType::externalMidi);
+    if (! expect(externalMidi.isValid()
+                 && engine.startRecording(1, recordingFile).failed(),
+                 "recording rejects non-audio tracks")) return false;
     if (! expect(engine.startRecording(0, recordingFile).wasOk() && engine.isRecording(),
                  "recording session starts with current input configuration")) return false;
     float inputLeft[4] { 0.1f, 0.2f, 0.3f, 0.4f };
@@ -589,6 +654,34 @@ bool testRecordingFoundation()
                  "empty recording finalizes without creating an invalid clip")) return false;
     recordingFile.deleteFile();
     return true;
+}
+
+bool testInputMonitoring()
+{
+    TrackDataModel model;
+    model.addTrack(TrackType::audio);
+    OfflineAudioDevice device;
+    AudioEngine engine(&model);
+    engine.audioDeviceAboutToStart(&device);
+    model.setTrackInputMonitoring(0, true);
+    float inputLeft[4] { 0.1f, 0.2f, 0.3f, 0.4f };
+    float inputRight[4] { 0.4f, 0.3f, 0.2f, 0.1f };
+    const float* inputs[] { inputLeft, inputRight };
+    float outputLeft[4] {}, outputRight[4] {};
+    float* outputs[] { outputLeft, outputRight };
+    engine.audioDeviceIOCallbackWithContext(inputs, 2, outputs, 2, 4, {});
+    if (! expect(approximatelyEqual(outputLeft[2], 0.3f) && approximatelyEqual(outputRight[2], 0.2f),
+                 "input monitoring passes selected device input")) return false;
+    if (! expect(model.getPlayheadPosition() == 0.0,
+                 "input monitoring does not move stopped transport")) return false;
+    model.setTrackMuted(0, true);
+    engine.audioDeviceIOCallbackWithContext(inputs, 2, outputs, 2, 4, {});
+    if (! expect(approximatelyEqual(outputLeft[0], 0.0f) && approximatelyEqual(outputRight[0], 0.0f),
+                 "mute suppresses monitored input through the normal mixer path")) return false;
+    model.setTrackInputMonitoring(0, false);
+    engine.audioDeviceIOCallbackWithContext(inputs, 2, outputs, 2, 4, {});
+    return expect(approximatelyEqual(outputLeft[0], 0.0f) && approximatelyEqual(outputRight[0], 0.0f),
+                  "disabled input monitoring produces no stopped-transport audio");
 }
 
 bool testOfflineBounce()
@@ -680,8 +773,19 @@ bool testBusAndSendRouting()
     model.setPlaying(true); model.setPlayheadPosition(0.0);
     float left[4] {}, right[4] {}; float* outputs[] { left, right };
     engine.audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, 4, {});
-    return expect(approximatelyEqual(left[0], 2.5f) && approximatelyEqual(right[0], 2.5f),
-                  "direct track, bus output and post-fader send mix exactly once");
+    if (! expect(approximatelyEqual(left[0], 2.5f) && approximatelyEqual(right[0], 2.5f)
+                 && approximatelyEqual(engine.getBusPeak(0), 1.5f),
+                 "direct track, bus output and post-fader send mix exactly once")) return false;
+    model.setBusGain(bus, 0.5f);
+    model.setPlayheadPosition(0.0);
+    engine.audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, 4, {});
+    if (! expect(approximatelyEqual(left[0], 1.75f) && approximatelyEqual(engine.getBusPeak(0), 0.75f),
+                 "bus gain changes the routed audio and bus meter")) return false;
+    model.setBusMuted(bus, true);
+    model.setPlayheadPosition(0.0);
+    engine.audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, 4, {});
+    return expect(approximatelyEqual(left[0], 1.0f) && approximatelyEqual(engine.getBusPeak(0), 0.0f),
+                  "bus mute removes only the bus return from the master");
 }
 
 bool testMidiCoreScheduling()
@@ -715,7 +819,7 @@ bool testMidiModelToEngineScheduling()
 bool testMidiInstrumentPath()
 {
     TrackDataModel model;
-    const auto track = model.addTrack();
+    const auto track = model.addTrack(TrackType::instrument);
     const auto clip = model.addMidiClip(track, 0.0);
     model.addMidiNote(clip, 69, 1.0f, 0.0, 4.0, 1);
     OfflineAudioDevice device;
@@ -725,6 +829,20 @@ bool testMidiInstrumentPath()
     engine.audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, 4, {});
     return expect(std::abs(left[1]) > 0.001f && approximatelyEqual(left[1], right[1]),
                   "MIDI event drives internal instrument through track mixer path");
+}
+
+bool testTrackTypeCreation()
+{
+    TrackDataModel model;
+    if (! expect(model.getTrackCount() == 0, "new model begins with no tracks")) return false;
+    const auto audio = model.addTrack(TrackType::audio);
+    const auto instrument = model.addTrack(TrackType::instrument);
+    const auto external = model.addTrack(TrackType::externalMidi);
+    return expect(audio.isValid() && instrument.isValid() && external.isValid()
+                  && model.getTrack(0).type == TrackType::audio
+                  && model.getTrack(1).type == TrackType::instrument
+                  && model.getTrack(2).type == TrackType::externalMidi,
+                  "track creation retains explicit audio, instrument, and external MIDI types");
 }
 
 bool testMidiReachesTrackProcessor()
@@ -906,14 +1024,17 @@ int main()
         && testTransportLoopBoundary()
         && testModelSampleRate()
         && testTrackCapacity()
+        && testTrackReadDoesNotCreateTracks()
         && testRealtimeSnapshotOwnership()
         && testRealtimeSnapshotReclaim()
         && testStableTrackAndClipIdentity()
         && testPlaybackStructuralSnapshots()
         && testProjectPersistence()
+        && testRecentProjectsStore()
         && testMediaReloadAndRelink()
         && testUndoRedoHistory()
         && testRecordingFoundation()
+        && testInputMonitoring()
         && testOfflineBounce()
         && testClipGainAndFades()
         && testClipDuplicate()
@@ -921,6 +1042,7 @@ int main()
         && testMidiCoreScheduling()
         && testMidiModelToEngineScheduling()
         && testMidiInstrumentPath()
+        && testTrackTypeCreation()
         && testMidiReachesTrackProcessor()
         && testPluginHostFoundation()
         && testVst3EffectIntegration()

@@ -12,39 +12,9 @@
 #include "InspectorPane.h"
 #include "AssetBrowserPane.h"
 #include "PerformanceFooter.h"
+#include "StartupWorkflowPane.h"
+#include "Theme/StudioForgeLookAndFeel.h"
 #include "../Plugins/PluginHostService.h"
-
-class LogicProLookAndFeel final : public juce::LookAndFeel_V4
-{
-public:
-    LogicProLookAndFeel();
-
-    void drawButtonBackground(juce::Graphics& g,
-                              juce::Button& button,
-                              const juce::Colour& backgroundColour,
-                              bool shouldDrawButtonAsHighlighted,
-                              bool shouldDrawButtonAsDown) override;
-    void drawRotarySlider(juce::Graphics& g,
-                          int x,
-                          int y,
-                          int width,
-                          int height,
-                          float sliderPos,
-                          float rotaryStartAngle,
-                          float rotaryEndAngle,
-                          juce::Slider& slider) override;
-    void drawLinearSlider(juce::Graphics& g,
-                          int x,
-                          int y,
-                          int width,
-                          int height,
-                          float sliderPos,
-                          float minSliderPos,
-                          float maxSliderPos,
-                          juce::Slider::SliderStyle style,
-                          juce::Slider& slider) override;
-    void drawToggleButton(juce::Graphics& g, juce::ToggleButton& button, bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override;
-};
 
 class MainComponent final : public juce::Component
 {
@@ -67,26 +37,39 @@ public:
     void setInspectorPanelVisible(bool visible);
     void setBrowserPanelVisible(bool visible);
     void setMixerPanelVisible(bool visible);
-    bool addTrackFromCommand();
+    bool addTrackFromCommand(TrackType type = TrackType::audio);
     void setWorkspaceTrackHeight(int height);
     bool isInspectorPanelVisible() const noexcept { return inspectorPane.isVisible(); }
     bool isBrowserPanelVisible() const noexcept { return assetBrowser.isVisible(); }
     bool isMixerPanelVisible() const noexcept { return mixerPane.isVisible(); }
+    void showWorkspace() noexcept { startupWorkflow.setVisible(false); }
+    void showInitialTrackCreation();
+    void setRecentProjects(juce::StringArray paths) { startupWorkflow.setRecentProjects(std::move(paths)); }
+    std::function<void()> onOpenProjectRequested;
+    std::function<void(const juce::File&)> onOpenRecentProjectRequested;
 
     TrackDataModel& getTrackDataModel() noexcept { return trackDataModel; }
 
 private:
-    LogicProLookAndFeel lookAndFeel;
+    void selectTrack(int trackIndex);
+    int getSelectedTrackIndex() const noexcept;
+    void configureTrackCreationDialog();
+    void toggleRecording();
+    juce::File createRecordingDestination() const;
+
+    StudioForgeLookAndFeel lookAndFeel;
     TrackDataModel trackDataModel;
     AudioEngine audioEngine { &trackDataModel };
     PluginHostService pluginHost;
     ControlBar controlBar { &trackDataModel, &audioEngine };
     ArrangeWindow arrangeWindow { &trackDataModel };
-    InspectorPane inspectorPane { &trackDataModel, &audioEngine };
+    InspectorPane inspectorPane { trackDataModel, audioEngine, pluginHost };
     AssetBrowserPane assetBrowser;
     PerformanceFooter performanceFooter { &audioEngine };
     MixerPane mixerPane { &trackDataModel, &audioEngine, &pluginHost };
     PianoRoll pianoRoll { &trackDataModel };
+    StartupWorkflowPane startupWorkflow;
     std::unique_ptr<juce::FileChooser> bounceFileChooser;
     uint64_t savedProjectRevision = 0;
+    TrackId selectedTrackId;
 };

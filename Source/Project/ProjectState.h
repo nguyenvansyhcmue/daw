@@ -6,6 +6,8 @@
 
 #include <vector>
 
+enum class TrackType : uint8_t { audio, instrument, externalMidi };
+
 struct PersistedClipState
 {
     ClipId id;
@@ -23,12 +25,25 @@ struct PersistedClipState
 struct PersistedTrackState
 {
     TrackId id;
+    TrackType type = TrackType::audio;
     juce::String name;
     float volume = 1.0f;
     float pan = 0.0f;
     bool muted = false;
     bool solo = false;
+    bool inputMonitoring = false;
+    int inputChannel = 0;
+    BusId outputBus;
+    BusId sendBus;
+    float sendAmount = 0.0f;
     std::vector<PersistedClipState> clips;
+};
+
+struct PersistedBusState
+{
+    BusId id;
+    float gain = 1.0f;
+    bool muted = false;
 };
 
 struct PersistedTempoEvent
@@ -57,7 +72,7 @@ struct PersistedMidiClipState
 
 struct ProjectState
 {
-    static constexpr int formatVersion = 4;
+    static constexpr int formatVersion = 7;
 
     double bpm = 120.0;
     int timeSignatureNumerator = 4;
@@ -65,6 +80,7 @@ struct ProjectState
     double cycleStartSample = 0.0;
     double cycleEndSample = 0.0;
     std::vector<PersistedTempoEvent> tempoMap;
+    std::vector<PersistedBusState> buses;
     std::vector<PersistedTrackState> tracks;
     std::vector<PersistedMidiClipState> midiClips;
 };

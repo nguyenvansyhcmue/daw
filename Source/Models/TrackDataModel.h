@@ -46,11 +46,14 @@ public:
     struct TrackState
     {
         TrackId id;
+        TrackType type = TrackType::audio;
         std::atomic<float> volume { 1.0f };
         std::atomic<float> pan { 0.0f };
         std::atomic<bool> muted { false };
         std::atomic<bool> solo { false };
         std::atomic<bool> armed { false };
+        std::atomic<bool> inputMonitoring { false };
+        std::atomic<int> inputChannel { 0 };
         juce::String name;
         std::vector<AudioClipState> clips;
         BusId outputBus;
@@ -59,24 +62,27 @@ public:
 
         TrackState() = default;
         TrackState(const TrackState& other) noexcept
-            : id(other.id),
+            : id(other.id), type(other.type),
               volume(other.volume.load()),
               pan(other.pan.load()),
               muted(other.muted.load()),
               solo(other.solo.load()),
-              armed(other.armed.load()), name(other.name),
+              armed(other.armed.load()), inputMonitoring(other.inputMonitoring.load()),
+              inputChannel(other.inputChannel.load()), name(other.name),
               clips(other.clips), outputBus(other.outputBus), sendBus(other.sendBus), sendAmount(other.sendAmount)
         {
         }
 
         TrackState& operator=(const TrackState& other) noexcept
         {
-            id = other.id;
+            id = other.id; type = other.type;
             volume.store(other.volume.load());
             pan.store(other.pan.load());
             muted.store(other.muted.load());
             solo.store(other.solo.load());
             armed.store(other.armed.load());
+            inputMonitoring.store(other.inputMonitoring.load());
+            inputChannel.store(other.inputChannel.load());
             name = other.name;
             clips = other.clips;
             outputBus = other.outputBus; sendBus = other.sendBus; sendAmount = other.sendAmount;
@@ -90,10 +96,13 @@ public:
     struct RenderTrack
     {
         TrackId id;
+        TrackType type = TrackType::audio;
         float volume = 1.0f;
         float pan = 0.0f;
         bool muted = false;
         bool solo = false;
+        bool inputMonitoring = false;
+        int inputChannel = 0;
         const FxRackSnapshot* fxRack = nullptr;
         BusId outputBus;
         BusId sendBus;
@@ -161,17 +170,20 @@ public:
 
     void ensureTrackCount(size_t count);
     size_t getTrackCount() const noexcept;
-    TrackState& getTrack(size_t index);
     const TrackState& getTrack(size_t index) const;
     TrackId getTrackId(size_t index) const noexcept;
     int getTrackIndex(TrackId id) const noexcept;
-    TrackId addTrack();
+    TrackId addTrack(TrackType type = TrackType::audio);
     bool removeTrack(TrackId id);
     bool reorderTrack(TrackId id, size_t destinationIndex);
     BusId addBus();
     bool removeBus(BusId id);
+    const std::vector<BusState>& getBuses() const noexcept { return busStates; }
+    bool setBusGain(BusId bus, float gain);
+    bool setBusMuted(BusId bus, bool muted);
     bool setTrackOutputBus(TrackId track, BusId bus);
     bool setTrackSend(TrackId track, BusId bus, float amount);
+    bool clearTrackSend(TrackId track);
     void setTrackVolume(size_t index, float volume) noexcept;
     void setTrackName(size_t index, const juce::String& name);
     void setTrackPan(size_t index, float pan) noexcept;
@@ -179,6 +191,8 @@ public:
     void setTrackSolo(size_t index, bool solo) noexcept;
     void setTrackArmed(size_t index, bool armed) noexcept;
     bool isTrackArmed(size_t index) const noexcept;
+    void setTrackInputMonitoring(size_t index, bool enabled, int inputChannel = 0) noexcept;
+    bool isTrackInputMonitoring(size_t index) const noexcept;
     int getFirstArmedTrackIndex() const noexcept;
     MidiClipId addMidiClip(TrackId track, double startSample);
     MidiEventId addMidiNote(MidiClipId clip, int pitch, float velocity, double startSample, double durationSamples, int channel);

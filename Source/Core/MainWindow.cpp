@@ -11,6 +11,18 @@ MainWindow::MainWindow(const juce::String& name)
     setContentOwned(new MainComponent(), true);
 
     mainComponent = dynamic_cast<MainComponent*>(getContentComponent());
+    if (mainComponent != nullptr)
+    {
+        mainComponent->onOpenProjectRequested = [this] { chooseProjectToOpen(); };
+        mainComponent->onOpenRecentProjectRequested = [this](const juce::File& file)
+        {
+            confirmDiscardChanges([safeWindow = juce::Component::SafePointer<MainWindow>(this), file]
+            {
+                if (safeWindow != nullptr) safeWindow->loadProjectFromFile(file);
+            });
+        };
+        refreshRecentProjects();
+    }
     setMenuBar(this, 24);
     centreWithSize(1600, 920);
     setVisible(true);
@@ -201,6 +213,8 @@ void MainWindow::chooseProjectToSave()
             else
             {
                 safeWindow->currentProjectFile = selected;
+                safeWindow->recentProjects.add(selected);
+                safeWindow->refreshRecentProjects();
                 safeWindow->setName("StudioForge DAW — " + selected.getFileNameWithoutExtension());
             }
         }
@@ -235,11 +249,19 @@ void MainWindow::loadProjectFromFile(const juce::File& file)
     }
 
     currentProjectFile = file;
+    recentProjects.add(file);
+    refreshRecentProjects();
     setName("StudioForge DAW — " + file.getFileNameWithoutExtension());
     if (! missingMedia.isEmpty())
         juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
                                                "Project Opened with Missing Media",
                                                "Some audio files could not be found:\n" + missingMedia.joinIntoString("\n"));
+}
+
+void MainWindow::refreshRecentProjects()
+{
+    if (mainComponent != nullptr)
+        mainComponent->setRecentProjects(recentProjects.load());
 }
 
 void MainWindow::confirmDiscardChanges(std::function<void()> continuation)

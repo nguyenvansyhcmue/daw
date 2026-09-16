@@ -37,19 +37,23 @@ target_sources(StudioForgeDAW PRIVATE
     Source/AudioEngine/AudioGraph.cpp
     Source/Models/TrackDataModel.cpp
     Source/Project/ProjectSerializer.cpp
+    Source/Project/RecentProjectsStore.cpp
     Source/Media/MediaReloadService.cpp
     Source/Recording/RecordingSession.cpp
     Source/Midi/MidiCore.cpp
     Source/Plugins/PluginHostService.cpp
     Source/UI/MainComponent.cpp
+    Source/UI/Theme/StudioForgeLookAndFeel.cpp
     Source/UI/ControlBar.cpp
     Source/UI/ArrangeWindow.cpp
     Source/UI/MixerPane.cpp
     Source/UI/PianoRoll.cpp
     Source/UI/InspectorPane.cpp
+    Source/UI/InspectorComponents.cpp
     Source/UI/AudioPeakMeter.cpp
     Source/UI/AssetBrowserPane.cpp
     Source/UI/PerformanceFooter.cpp
+    Source/UI/StartupWorkflowPane.cpp
 )
 
 target_include_directories(StudioForgeDAW PRIVATE
@@ -132,6 +136,7 @@ if (BUILD_TESTING)
         Source/AudioEngine/AudioGraph.cpp
         Source/Models/TrackDataModel.cpp
         Source/Project/ProjectSerializer.cpp
+        Source/Project/RecentProjectsStore.cpp
         Source/Media/MediaReloadService.cpp
         Source/Recording/RecordingSession.cpp
         Source/Midi/MidiCore.cpp

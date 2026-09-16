@@ -32,6 +32,7 @@ public:
 
     juce::AudioDeviceManager& getAudioDeviceManager() noexcept;
     float getTrackPeak(size_t trackIndex) const noexcept;
+    float getBusPeak(size_t busIndex) const noexcept;
     float getMasterPeak() const noexcept;
     void setFxProcessor(size_t trackIndex, size_t slot,
                         std::shared_ptr<AudioEffectProcessor> processor);
@@ -64,6 +65,7 @@ private:
     std::atomic<float> masterGain { 1.0f };
     juce::AudioBuffer<float> processingBuffer;
     std::array<std::atomic<float>, TrackDataModel::maxTracks> trackPeaks {};
+    std::array<std::atomic<float>, TrackDataModel::maxBuses> busPeaks {};
     std::atomic<float> masterPeak { 0.0f };
     std::array<juce::AudioBuffer<float>, TrackDataModel::maxTracks> trackBuffers;
     std::array<juce::AudioBuffer<float>, TrackDataModel::maxBuses> busBuffers;

@@ -2,38 +2,27 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
-#include "AudioPeakMeter.h"
+#include "InspectorComponents.h"
 
-class TrackDataModel;
 class AudioEngine;
+class PluginHostService;
 
-class InspectorPane final : public juce::Component, private juce::Timer
+class InspectorPane final : public juce::Component
 {
 public:
-    explicit InspectorPane(TrackDataModel* model = nullptr, AudioEngine* engine = nullptr);
-    void setSelectedTrack(int track) noexcept;
+    InspectorPane(TrackDataModel& model, AudioEngine& engine, PluginHostService& pluginHost);
+    void setSelectedTrack(int trackIndex);
+    void setSelectedAudioClip(ClipId clip);
+    void setSelectedMidiClip(MidiClipId clip);
     void paint(juce::Graphics&) override;
     void resized() override;
 
 private:
-    void refreshControls();
-    void timerCallback() override;
+    void layoutContextInspectors(juce::Rectangle<int> bounds);
+    void layoutChannelStrips(juce::Rectangle<int> bounds);
 
-    TrackDataModel* trackModel = nullptr;
-    AudioEngine* audioEngine = nullptr;
-    int selectedTrack = 0;
-    juce::Label title { {}, "Inspector" };
-    juce::Label selectedStripTitle { {}, "SELECTED TRACK" };
-    juce::Label masterStripTitle { {}, "STEREO OUT" };
-    juce::Label trackName;
-    juce::Label eqSlot { {}, "CHANNEL EQ" };
-    std::array<juce::TextButton, 4> insertSlots;
-    juce::Slider volume;
-    juce::Slider pan;
-    juce::Slider masterVolume;
-    AudioPeakMeter trackMeter;
-    AudioPeakMeter masterMeter;
-    juce::ToggleButton mute { "Mute" };
-    juce::ToggleButton solo { "Solo" };
-    juce::ToggleButton arm { "Record Enable" };
+    RegionInspectorComponent regionInspector;
+    TrackInspectorComponent trackInspector;
+    ChannelStripComponent selectedTrackChannel;
+    ChannelStripComponent stereoOutputChannel;
 };

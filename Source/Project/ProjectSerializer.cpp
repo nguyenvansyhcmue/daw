@@ -6,11 +6,52 @@
 
 #include <charconv>
 #include <cmath>
+#include <map>
 #include <system_error>
 
 namespace
 {
 constexpr auto rootTag = "StudioForgeProject";
+
+juce::File getProjectMediaDirectory(const juce::File& projectFile)
+{
+    return projectFile.getParentDirectory().getChildFile(projectFile.getFileNameWithoutExtension() + " Media");
+}
+
+juce::Result makeMediaPortable(ProjectState& state, const juce::File& projectFile)
+{
+    const auto mediaDirectory = getProjectMediaDirectory(projectFile);
+    std::map<juce::String, juce::String> portablePaths;
+    for (auto& track : state.tracks)
+        for (auto& clip : track.clips)
+        {
+            if (clip.sourcePath.isEmpty())
+                continue;
+
+            const auto source = juce::File(clip.sourcePath);
+            if (! source.existsAsFile())
+                continue; // Preserve a missing reference so it can be relinked later.
+
+            const auto sourcePath = source.getFullPathName();
+            if (const auto existing = portablePaths.find(sourcePath); existing != portablePaths.end())
+            {
+                clip.sourcePath = existing->second;
+                continue;
+            }
+
+            const auto destination = mediaDirectory.getChildFile("clip-" + juce::String(clip.id.value)
+                                                                  + source.getFileExtension());
+            if (source != destination)
+            {
+                if (! mediaDirectory.createDirectory() || ! source.copyFileTo(destination))
+                    return juce::Result::fail("Cannot copy project media: " + source.getFullPathName());
+            }
+
+            clip.sourcePath = mediaDirectory.getFileName() + "/" + destination.getFileName();
+            portablePaths.emplace(sourcePath, clip.sourcePath);
+        }
+    return juce::Result::ok();
+}
 
 bool readUnsigned(const juce::XmlElement& element, const char* name, uint64_t& value)
 {
@@ -86,6 +127,31 @@ juce::Result parseProject(const juce::File& file, ProjectState& state)
             || ! readBool(*track, "solo", parsedTrack.solo))
             return juce::Result::fail("Track state is malformed");
         parsedTrack.id = { trackId };
+        if (version >= 5)
+        {
+            int type = 0;
+            if (! readInt(*track, "type", type) || type < static_cast<int>(TrackType::audio)
+                || type > static_cast<int>(TrackType::externalMidi))
+                return juce::Result::fail("Track type is malformed");
+            parsedTrack.type = static_cast<TrackType>(type);
+        }
+        if (version >= 6)
+        {
+            if (! readBool(*track, "inputMonitoring", parsedTrack.inputMonitoring)
+                || ! readInt(*track, "inputChannel", parsedTrack.inputChannel))
+                return juce::Result::fail("Track input routing is malformed");
+        }
+        if (version >= 7)
+        {
+            uint64_t outputBus = 0, sendBus = 0;
+            double sendAmount = 0.0;
+            if (! readUnsigned(*track, "outputBus", outputBus) || ! readUnsigned(*track, "sendBus", sendBus)
+                || ! readDouble(*track, "sendAmount", sendAmount))
+                return juce::Result::fail("Track bus routing is malformed");
+            parsedTrack.outputBus = { outputBus };
+            parsedTrack.sendBus = { sendBus };
+            parsedTrack.sendAmount = static_cast<float>(sendAmount);
+        }
         if (version >= 4)
         {
             if (! track->hasAttribute("name")) return juce::Result::fail("Track name is missing");
@@ -118,10 +184,31 @@ juce::Result parseProject(const juce::File& file, ProjectState& state)
             parsedClip.id = { clipId };
             parsedClip.trackId = { clipTrackId };
             parsedClip.sourcePath = clip->getStringAttribute("sourcePath");
+            if (parsedClip.sourcePath.isNotEmpty() && ! juce::File::isAbsolutePath(parsedClip.sourcePath))
+                parsedClip.sourcePath = file.getParentDirectory().getChildFile(parsedClip.sourcePath).getFullPathName();
             parsedClip.clipName = clip->getStringAttribute("clipName");
             parsedTrack.clips.push_back(std::move(parsedClip));
         }
         state.tracks.push_back(std::move(parsedTrack));
+    }
+
+    if (version >= 7)
+    {
+        const auto* buses = root->getChildByName("Buses");
+        if (buses == nullptr) return juce::Result::fail("Project is missing Buses");
+        for (const auto* bus : buses->getChildIterator())
+        {
+            if (! bus->hasTagName("Bus")) return juce::Result::fail("Buses has an unknown element");
+            PersistedBusState parsedBus;
+            uint64_t busId = 0;
+            double gain = 0.0;
+            if (! readUnsigned(*bus, "id", busId) || ! readDouble(*bus, "gain", gain)
+                || ! readBool(*bus, "muted", parsedBus.muted))
+                return juce::Result::fail("Bus state is malformed");
+            parsedBus.id = { busId };
+            parsedBus.gain = static_cast<float>(gain);
+            state.buses.push_back(parsedBus);
+        }
     }
 
     if (version >= 3)
@@ -162,7 +249,8 @@ juce::Result parseProject(const juce::File& file, ProjectState& state)
 
 juce::Result ProjectSerializer::save(const TrackDataModel& model, const juce::File& file)
 {
-    const auto state = model.createProjectState();
+    auto state = model.createProjectState();
+    if (const auto result = makeMediaPortable(state, file); result.failed()) return result;
     juce::XmlElement root(rootTag);
     root.setAttribute("formatVersion", ProjectState::formatVersion);
     root.setAttribute("bpm", state.bpm);
@@ -183,11 +271,17 @@ juce::Result ProjectSerializer::save(const TrackDataModel& model, const juce::Fi
     {
         auto* element = tracks->createNewChildElement("Track");
         element->setAttribute("id", juce::String(track.id.value));
+        element->setAttribute("type", static_cast<int>(track.type));
         element->setAttribute("name", track.name);
         element->setAttribute("volume", static_cast<double>(track.volume));
         element->setAttribute("pan", static_cast<double>(track.pan));
         element->setAttribute("muted", track.muted ? 1 : 0);
         element->setAttribute("solo", track.solo ? 1 : 0);
+        element->setAttribute("inputMonitoring", track.inputMonitoring ? 1 : 0);
+        element->setAttribute("inputChannel", track.inputChannel);
+        element->setAttribute("outputBus", juce::String(track.outputBus.value));
+        element->setAttribute("sendBus", juce::String(track.sendBus.value));
+        element->setAttribute("sendAmount", static_cast<double>(track.sendAmount));
         auto* clips = element->createNewChildElement("Clips");
         for (const auto& clip : track.clips)
         {
@@ -203,6 +297,14 @@ juce::Result ProjectSerializer::save(const TrackDataModel& model, const juce::Fi
             savedClip->setAttribute("fadeInSamples", clip.fadeInSamples);
             savedClip->setAttribute("fadeOutSamples", clip.fadeOutSamples);
         }
+    }
+    auto* buses = root.createNewChildElement("Buses");
+    for (const auto& bus : state.buses)
+    {
+        auto* element = buses->createNewChildElement("Bus");
+        element->setAttribute("id", juce::String(bus.id.value));
+        element->setAttribute("gain", static_cast<double>(bus.gain));
+        element->setAttribute("muted", bus.muted ? 1 : 0);
     }
     auto* midiClips = root.createNewChildElement("MidiClips");
     for (const auto& clip : state.midiClips)

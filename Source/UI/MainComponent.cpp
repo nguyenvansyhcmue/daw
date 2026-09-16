@@ -2,105 +2,6 @@
 #include "../Project/ProjectSerializer.h"
 #include "../Project/ProjectState.h"
 
-#include <cmath>
-
-#include <juce_gui_basics/juce_gui_basics.h>
-
-namespace
-{
-const auto darkBackground = juce::Colour(0xff252526);
-const auto panelBackground = juce::Colour(0xff343434);
-const auto accentBlue = juce::Colour(0xff6f88a8);
-const auto accentCyan = juce::Colour(0xffa7c5df);
-}
-
-LogicProLookAndFeel::LogicProLookAndFeel()
-{
-    setColour(juce::TextButton::buttonOnColourId, accentCyan);
-    setColour(juce::ComboBox::backgroundColourId, panelBackground);
-    setColour(juce::Slider::backgroundColourId, panelBackground);
-    setColour(juce::Slider::trackColourId, accentBlue);
-    setColour(juce::Slider::thumbColourId, accentCyan);
-}
-
-void LogicProLookAndFeel::drawButtonBackground(juce::Graphics& g,
-                                               juce::Button& button,
-                                               const juce::Colour& backgroundColour,
-                                               bool shouldDrawButtonAsHighlighted,
-                                               bool shouldDrawButtonAsDown)
-{
-    const auto base = button.getToggleState() ? accentCyan.withAlpha(0.85f) : backgroundColour;
-    const auto bounds = button.getLocalBounds().toFloat();
-    auto gradient = juce::ColourGradient(base, bounds.getX(), bounds.getY(), accentBlue, bounds.getRight(), bounds.getBottom(), false);
-
-    g.setGradientFill(gradient);
-    g.fillRoundedRectangle(bounds.reduced(2.0f), 8.0f);
-
-}
-
-void LogicProLookAndFeel::drawRotarySlider(juce::Graphics& g,
-                                          int x,
-                                          int y,
-                                          int width,
-                                          int height,
-                                          float sliderPos,
-                                          float rotaryStartAngle,
-                                          float rotaryEndAngle,
-                                          juce::Slider& slider)
-{
-    auto bounds = juce::Rectangle<float>(static_cast<float>(x), static_cast<float>(y), static_cast<float>(width), static_cast<float>(height));
-    const auto radius = juce::jmin(bounds.getWidth(), bounds.getHeight()) * 0.5f - 10.0f;
-    const auto centre = bounds.getCentre();
-    const auto angle = rotaryStartAngle + (rotaryEndAngle - rotaryStartAngle) * sliderPos;
-
-    g.setColour(juce::Colour(0xff2b2b2b));
-    g.fillEllipse(centre.x - radius, centre.y - radius, radius * 2.0f, radius * 2.0f);
-
-    juce::Path arc;
-    arc.addCentredArc(centre.x, centre.y, radius, radius, 0.0, rotaryStartAngle, angle, true);
-    g.setColour(accentCyan);
-    g.strokePath(arc, juce::PathStrokeType(3.0f));
-
-    const auto knobCentre = juce::Point<float>(centre.x + std::cos(angle) * (radius * 0.75f), centre.y + std::sin(angle) * (radius * 0.75f));
-    g.setColour(juce::Colour(0xff00a8ff));
-    g.fillEllipse(knobCentre.x - 5.0f, knobCentre.y - 5.0f, 10.0f, 10.0f);
-}
-
-void LogicProLookAndFeel::drawLinearSlider(juce::Graphics& g,
-                                          int x,
-                                          int y,
-                                          int width,
-                                          int height,
-                                          float sliderPos,
-                                          float minSliderPos,
-                                          float maxSliderPos,
-                                          juce::Slider::SliderStyle style,
-                                          juce::Slider& slider)
-{
-    auto area = juce::Rectangle<float>(static_cast<float>(x), static_cast<float>(y), static_cast<float>(width), static_cast<float>(height));
-    g.setColour(panelBackground);
-    g.fillRoundedRectangle(area.reduced(2.0f), 6.0f);
-
-    g.setColour(accentBlue);
-    const float trackWidth = area.getWidth() * 0.75f;
-    const float trackX = area.getX() + area.getWidth() * 0.125f;
-    const float trackY = area.getCentreY() - 2.0f;
-    g.fillRect(trackX, trackY, trackWidth, 4.0f);
-
-    const float knobX = juce::jlimit(trackX, trackX + trackWidth, trackX + trackWidth * sliderPos);
-    g.setColour(accentCyan);
-    g.fillEllipse(knobX - 8.0f, area.getCentreY() - 8.0f, 16.0f, 16.0f);
-}
-
-void LogicProLookAndFeel::drawToggleButton(juce::Graphics& g, juce::ToggleButton& button, bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown)
-{
-    const auto area = button.getLocalBounds().toFloat();
-    g.setColour(button.getToggleState() ? accentCyan : juce::Colour(0xff565656));
-    g.fillRoundedRectangle(area.reduced(2.0f), 6.0f);
-    g.setColour(juce::Colours::white);
-    g.drawText(button.getButtonText(), area.reduced(4.0f), juce::Justification::centred, true);
-}
-
 MainComponent::MainComponent()
 {
     audioEngine.initialise();
@@ -112,6 +13,7 @@ MainComponent::MainComponent()
     addAndMakeVisible(performanceFooter);
     addChildComponent(mixerPane);
     addChildComponent(pianoRoll);
+    addAndMakeVisible(startupWorkflow);
 
     // Keep the selected channel's controls in view by default, matching the
     // arrangement-first workflow rather than starting with a blank left rail.
@@ -148,9 +50,44 @@ MainComponent::MainComponent()
         controlBar.setBrowserVisible(visible);
         resized();
     };
-    arrangeWindow.onTrackSelected = [this](int track) { inspectorPane.setSelectedTrack(track); };
+    controlBar.onCreateTrack = [this](TrackType)
+    {
+        configureTrackCreationDialog();
+        startupWorkflow.setVisible(true);
+        startupWorkflow.showTrackCreation(true);
+    };
+    controlBar.onRecordRequested = [this] { toggleRecording(); };
+    startupWorkflow.onEmptyProject = [this] { createNewProject(); };
+    startupWorkflow.onOpenProject = [this]
+    {
+        if (onOpenProjectRequested != nullptr)
+            onOpenProjectRequested();
+    };
+    startupWorkflow.onOpenRecentProject = [this](const juce::File& file)
+    {
+        if (onOpenRecentProjectRequested != nullptr)
+            onOpenRecentProjectRequested(file);
+    };
+    startupWorkflow.onCreateTracks = [this](TrackType type, int count)
+    {
+        const auto firstNewTrack = static_cast<int>(trackDataModel.getTrackCount());
+        auto created = 0;
+        for (int index = 0; index < count; ++index)
+        {
+            if (! addTrackFromCommand(type))
+                break;
+            ++created;
+        }
+        configureTrackCreationDialog();
+        if (created > 0)
+            selectTrack(firstNewTrack);
+        return created;
+    };
+    arrangeWindow.onTrackSelected = [this](int track) { selectTrack(track); };
+    arrangeWindow.onAudioClipSelected = [this](ClipId clip) { inspectorPane.setSelectedAudioClip(clip); };
     arrangeWindow.onMidiClipSelected = [this](MidiClipId clip)
     {
+        inspectorPane.setSelectedMidiClip(clip);
         pianoRoll.setActiveClip(clip);
         pianoRoll.setVisible(true);
         controlBar.setPianoRollVisible(true);
@@ -158,7 +95,9 @@ MainComponent::MainComponent()
     };
     assetBrowser.onAudioFileActivated = [this](const juce::File& file)
     {
-        arrangeWindow.importAudioFile(file, 0, trackDataModel.getPlayheadPosition());
+        const auto trackIndex = getSelectedTrackIndex();
+        if (trackIndex >= 0)
+            arrangeWindow.importAudioFile(file, trackIndex, trackDataModel.getPlayheadPosition());
     };
     performanceFooter.onBounceRequested = [this]
     {
@@ -174,9 +113,26 @@ MainComponent::MainComponent()
             });
     };
 
-    trackDataModel.ensureTrackCount(TrackDataModel::maxTracks);
-    inspectorPane.setSelectedTrack(0);
+    // A project starts empty; tracks are created through the explicit New Track workflow.
     markProjectSaved();
+}
+
+void MainComponent::showInitialTrackCreation()
+{
+    configureTrackCreationDialog();
+    startupWorkflow.setVisible(true);
+    startupWorkflow.showTrackCreation(false);
+}
+
+void MainComponent::configureTrackCreationDialog()
+{
+    const auto remaining = static_cast<int>(TrackDataModel::maxTracks - trackDataModel.getTrackCount());
+    startupWorkflow.setAvailableTrackSlots(remaining);
+
+    const auto* device = audioEngine.getAudioDeviceManager().getCurrentAudioDevice();
+    const auto inputs = device != nullptr ? device->getActiveInputChannels().countNumberOfSetBits() : 0;
+    const auto outputs = device != nullptr ? device->getActiveOutputChannels().countNumberOfSetBits() : 0;
+    startupWorkflow.setAudioDeviceChannels(inputs, outputs);
 }
 
 MainComponent::~MainComponent()
@@ -228,11 +184,15 @@ juce::Result MainComponent::loadProject(const juce::File& file, juce::StringArra
     const auto result = ProjectSerializer::load(trackDataModel, file, missingMediaReferences);
     if (result.wasOk())
     {
-        inspectorPane.setSelectedTrack(0);
+        selectTrack(0);
         mixerPane.refreshFromModel();
         arrangeWindow.repaint();
         pianoRoll.repaint();
         markProjectSaved();
+        if (trackDataModel.getTrackCount() == 0)
+            showInitialTrackCreation();
+        else
+            showWorkspace();
     }
     return result;
 }
@@ -242,17 +202,16 @@ juce::Result MainComponent::createNewProject()
     audioEngine.setPlaybackState(false);
     ProjectState state;
     state.tempoMap.push_back({ 0.0, 120.0 });
-    for (uint64_t id = 1; id <= TrackDataModel::maxTracks; ++id)
-        state.tracks.push_back({ { id } });
 
     const auto result = trackDataModel.applyProjectState(state);
     if (result.wasOk())
     {
-        inspectorPane.setSelectedTrack(0);
+        selectTrack(0);
         mixerPane.refreshFromModel();
         arrangeWindow.repaint();
         pianoRoll.repaint();
         markProjectSaved();
+        showInitialTrackCreation();
     }
     return result;
 }
@@ -296,13 +255,67 @@ void MainComponent::setMixerPanelVisible(bool visible)
     mixerPane.setVisible(visible); controlBar.setMixerVisible(visible); resized();
 }
 
-bool MainComponent::addTrackFromCommand()
+bool MainComponent::addTrackFromCommand(TrackType type)
 {
-    if (! trackDataModel.addTrack().isValid())
+    const auto id = trackDataModel.addTrack(type);
+    if (! id.isValid())
         return false;
+    selectTrack(trackDataModel.getTrackIndex(id));
     arrangeWindow.repaint();
     mixerPane.refreshFromModel();
     return true;
+}
+
+void MainComponent::selectTrack(int trackIndex)
+{
+    const auto count = static_cast<int>(trackDataModel.getTrackCount());
+    if (count <= 0)
+    {
+        selectedTrackId = {};
+        arrangeWindow.setSelectedTrack(-1);
+        return;
+    }
+    const auto resolvedIndex = juce::jlimit(0, count - 1, trackIndex);
+    selectedTrackId = trackDataModel.getTrackId(static_cast<size_t>(resolvedIndex));
+    inspectorPane.setSelectedTrack(resolvedIndex);
+    arrangeWindow.setSelectedTrack(resolvedIndex);
+}
+
+int MainComponent::getSelectedTrackIndex() const noexcept
+{
+    return selectedTrackId.isValid() ? trackDataModel.getTrackIndex(selectedTrackId) : -1;
+}
+
+juce::File MainComponent::createRecordingDestination() const
+{
+    auto directory = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
+        .getChildFile("StudioForge Recordings");
+    if (! directory.exists() && ! directory.createDirectory())
+        return {};
+    return directory.getNonexistentChildFile("Recording", ".wav", true);
+}
+
+void MainComponent::toggleRecording()
+{
+    if (audioEngine.isRecording())
+    {
+        audioEngine.stopRecording();
+        controlBar.setRecordActive(false);
+        arrangeWindow.repaint();
+        return;
+    }
+
+    const auto armedTrack = trackDataModel.getFirstArmedTrackIndex();
+    const auto target = armedTrack >= 0 ? armedTrack : getSelectedTrackIndex();
+    if (target < 0 || target >= static_cast<int>(trackDataModel.getTrackCount())
+        || trackDataModel.getTrack(static_cast<size_t>(target)).type != TrackType::audio)
+        return;
+
+    const auto destination = createRecordingDestination();
+    if (destination == juce::File {})
+        return;
+    if (audioEngine.startRecording(static_cast<size_t>(target), destination).wasOk())
+        controlBar.setRecordActive(true);
 }
 
 void MainComponent::setWorkspaceTrackHeight(int height)
@@ -313,8 +326,9 @@ void MainComponent::setWorkspaceTrackHeight(int height)
 
 void MainComponent::paint(juce::Graphics& g)
 {
-    g.fillAll(darkBackground);
-    auto glow = juce::ColourGradient(accentBlue, 0.0f, 0.0f, accentCyan, getWidth(), 0.0f, false);
+    g.fillAll(StudioForgeTheme::workspaceBackground);
+    auto glow = juce::ColourGradient(StudioForgeTheme::accentBlue, 0.0f, 0.0f,
+                                     StudioForgeTheme::accentCyan, getWidth(), 0.0f, false);
     g.setGradientFill(glow);
     g.fillRect(0.0f, 0.0f, static_cast<float>(getWidth()), 2.0f);
 }
@@ -325,16 +339,28 @@ void MainComponent::resized()
     controlBar.setBounds(area.removeFromTop(54));
     performanceFooter.setBounds(area.removeFromBottom(38));
 
-    // Reserve bottom panes before assigning the arrange area.  Giving ArrangeWindow
-    // the full bounds first made these panes overlay its tracks instead of docking.
+    // Dock panes from a bounded budget so opening both lower editors never
+    // collapses the arrange workspace or overlaps controls on smaller screens.
+    const auto dockBudget = juce::jmax(0, area.getHeight() - 220);
+    const auto requestedDockHeight = (mixerPane.isVisible() ? 210 : 0)
+                                   + (pianoRoll.isVisible() ? 250 : 0);
+    const auto dockScale = requestedDockHeight > 0
+        ? juce::jmin(1.0f, static_cast<float>(dockBudget) / static_cast<float>(requestedDockHeight)) : 0.0f;
     if (mixerPane.isVisible())
-        mixerPane.setBounds(area.removeFromBottom(210));
+        mixerPane.setBounds(area.removeFromBottom(juce::roundToInt(210.0f * dockScale)));
     if (pianoRoll.isVisible())
-        pianoRoll.setBounds(area.removeFromBottom(250));
+        pianoRoll.setBounds(area.removeFromBottom(juce::roundToInt(250.0f * dockScale)));
+
+    const auto sideBudget = juce::jmax(0, area.getWidth() - 360);
+    const auto requestedSideWidth = (inspectorPane.isVisible() ? 250 : 0)
+                                  + (assetBrowser.isVisible() ? 250 : 0);
+    const auto sideScale = requestedSideWidth > 0
+        ? juce::jmin(1.0f, static_cast<float>(sideBudget) / static_cast<float>(requestedSideWidth)) : 0.0f;
     if (inspectorPane.isVisible())
-        inspectorPane.setBounds(area.removeFromLeft(230));
+        inspectorPane.setBounds(area.removeFromLeft(juce::roundToInt(250.0f * sideScale)));
     if (assetBrowser.isVisible())
-        assetBrowser.setBounds(area.removeFromRight(250));
+        assetBrowser.setBounds(area.removeFromRight(juce::roundToInt(250.0f * sideScale)));
 
     arrangeWindow.setBounds(area);
+    startupWorkflow.setBounds(getLocalBounds());
 }

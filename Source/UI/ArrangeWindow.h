@@ -34,7 +34,9 @@ public:
     void mouseUp(const juce::MouseEvent& event) override;
     bool keyPressed(const juce::KeyPress& key) override;
     std::function<void(int)> onTrackSelected;
+    std::function<void(ClipId)> onAudioClipSelected;
     std::function<void(MidiClipId)> onMidiClipSelected;
+
     void setSelectedTrack(int track) noexcept { selectedTrack = track; selectedClip = -1; repaint(); }
     void resized() override {}
 
@@ -77,7 +79,12 @@ public:
     explicit ArrangeWindow(TrackDataModel* model = nullptr);
 
     std::function<void(int)> onTrackSelected;
+    std::function<void(ClipId)> onAudioClipSelected;
     std::function<void(MidiClipId)> onMidiClipSelected;
+
+    // Selection ownership stays above this view; this method only synchronises
+    // its two visual subviews with the resolved display index.
+    void setSelectedTrack(int trackIndex) noexcept;
 
     void paint(juce::Graphics& g) override;
     void resized() override;

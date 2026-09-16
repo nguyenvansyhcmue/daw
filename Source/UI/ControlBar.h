@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
+#include "../Project/ProjectState.h"
 
 class TrackDataModel;
 class AudioEngine;
@@ -14,6 +15,8 @@ public:
     std::function<void()> onMixerToggle;
     std::function<void()> onPianoRollToggle;
     std::function<void()> onBrowserToggle;
+    std::function<void(TrackType)> onCreateTrack;
+    std::function<void()> onRecordRequested;
 
     void setInspectorVisible(bool visible) noexcept;
     void setMixerVisible(bool visible) noexcept;
@@ -22,6 +25,7 @@ public:
     void togglePlayback() noexcept;
     void stopPlayback() noexcept;
     void toggleRecording();
+    void setRecordActive(bool active) noexcept;
 
     void paint(juce::Graphics& g) override;
     void resized() override;
@@ -33,6 +37,7 @@ private:
     juce::TextButton mixerButton { "X" };
     juce::TextButton pianoRollButton { "P" };
     juce::TextButton browserButton { "B" };
+    juce::TextButton addTrackButton { "+" };
     juce::TextButton playButton { "Play" };
     juce::TextButton stopButton { "Stop" };
     juce::TextButton recordButton { "Record" };

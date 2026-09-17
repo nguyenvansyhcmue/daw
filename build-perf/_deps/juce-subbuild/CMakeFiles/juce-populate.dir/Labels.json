@@ -1,0 +1,46 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "D:/Stu/build-perf/_deps/juce-subbuild/CMakeFiles/juce-populate"
+		},
+		{
+			"file" : "D:/Stu/build-perf/_deps/juce-subbuild/CMakeFiles/88416bcc92fa213df0f128598d758b89/juce-populate.rule"
+		},
+		{
+			"file" : "D:/Stu/build-perf/_deps/juce-subbuild/CMakeFiles/245c316c54ca38b67a7942c7dd0f1964/juce-populate-complete.rule"
+		},
+		{
+			"file" : "D:/Stu/build-perf/_deps/juce-subbuild/CMakeFiles/fb44a17eb7f5db656fc512795a429d91/juce-populate-build.rule"
+		},
+		{
+			"file" : "D:/Stu/build-perf/_deps/juce-subbuild/CMakeFiles/fb44a17eb7f5db656fc512795a429d91/juce-populate-configure.rule"
+		},
+		{
+			"file" : "D:/Stu/build-perf/_deps/juce-subbuild/CMakeFiles/fb44a17eb7f5db656fc512795a429d91/juce-populate-download.rule"
+		},
+		{
+			"file" : "D:/Stu/build-perf/_deps/juce-subbuild/CMakeFiles/fb44a17eb7f5db656fc512795a429d91/juce-populate-install.rule"
+		},
+		{
+			"file" : "D:/Stu/build-perf/_deps/juce-subbuild/CMakeFiles/fb44a17eb7f5db656fc512795a429d91/juce-populate-mkdir.rule"
+		},
+		{
+			"file" : "D:/Stu/build-perf/_deps/juce-subbuild/CMakeFiles/fb44a17eb7f5db656fc512795a429d91/juce-populate-patch.rule"
+		},
+		{
+			"file" : "D:/Stu/build-perf/_deps/juce-subbuild/CMakeFiles/fb44a17eb7f5db656fc512795a429d91/juce-populate-test.rule"
+		},
+		{
+			"file" : "D:/Stu/build-perf/_deps/juce-subbuild/CMakeFiles/fb44a17eb7f5db656fc512795a429d91/juce-populate-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"juce-populate"
+		],
+		"name" : "juce-populate"
+	}
+}

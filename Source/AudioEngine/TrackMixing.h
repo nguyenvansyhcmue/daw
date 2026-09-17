@@ -29,8 +29,9 @@ public:
 
         const auto gain = juce::jmax(0.0f, settings.gain);
         const auto pan = juce::jlimit(-1.0f, 1.0f, settings.pan);
-        const auto leftGain = gain * (pan > 0.0f ? 1.0f - pan : 1.0f);
-        const auto rightGain = gain * (pan < 0.0f ? 1.0f + pan : 1.0f);
+        const auto angle = (pan + 1.0f) * (juce::MathConstants<float>::pi * 0.25f);
+        const auto leftGain = gain * std::cos(angle);
+        const auto rightGain = gain * std::sin(angle);
 
         if (buffer.getNumChannels() == 1)
         {

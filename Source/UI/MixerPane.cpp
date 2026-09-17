@@ -14,7 +14,7 @@ const auto accentCyan = juce::Colour(0xff00ffe0);
 MixerPane::MixerPane(TrackDataModel* model, AudioEngine* engine, PluginHostService* pluginHost)
     : trackModel(model), audioEngine(engine), pluginHostService(pluginHost)
 {
-    startTimerHz(60);
+    startTimerHz(30);
     titleLabel.setText("Mixer", juce::dontSendNotification);
     titleLabel.setJustificationType(juce::Justification::centredLeft);
     titleLabel.setColour(juce::Label::textColourId, juce::Colours::white);
@@ -185,6 +185,8 @@ void MixerPane::timerCallback()
 {
     if (audioEngine == nullptr)
         return;
+
+    refreshFromModel();
 
     for (size_t i = 0; i < meters.size(); ++i)
     {

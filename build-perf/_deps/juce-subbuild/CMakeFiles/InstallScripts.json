@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"D:/Stu/build-perf/_deps/juce-subbuild/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

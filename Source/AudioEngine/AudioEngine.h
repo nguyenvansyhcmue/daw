@@ -4,6 +4,8 @@
 
 #include <atomic>
 #include <array>
+#include <memory>
+#include <vector>
 
 #include "AudioGraph.h"
 #include "AudioEffectProcessor.h"
@@ -34,9 +36,14 @@ public:
     float getTrackPeak(size_t trackIndex) const noexcept;
     float getBusPeak(size_t busIndex) const noexcept;
     float getMasterPeak() const noexcept;
+    float getMasterLeftPeak() const noexcept;
+    float getMasterRightPeak() const noexcept;
     void setFxProcessor(size_t trackIndex, size_t slot,
                         std::shared_ptr<AudioEffectProcessor> processor);
     void setFxBypassed(size_t trackIndex, size_t slot, bool bypassed) noexcept;
+    const TrackDataModel::FxRackSnapshot* getMasterFxRackSnapshot() const noexcept;
+    void setMasterFxProcessor(size_t slot, std::shared_ptr<AudioEffectProcessor> processor);
+    void setMasterFxBypassed(size_t slot, bool bypassed);
     juce::Result startRecording(size_t trackIndex, const juce::File& destination);
     juce::Result stopRecording();
     bool isRecording() const noexcept;
@@ -59,6 +66,7 @@ private:
                            double segmentStartSample, int destinationOffset,
                            int numSamples) noexcept;
     void renderInstrument(const TrackDataModel::RenderStructureSnapshot& structure, int numSamples) noexcept;
+    void publishMasterFxRack(std::unique_ptr<const TrackDataModel::FxRackSnapshot> snapshot);
 
     juce::AudioDeviceManager deviceManager;
     AudioGraph graph;
@@ -67,6 +75,11 @@ private:
     std::array<std::atomic<float>, TrackDataModel::maxTracks> trackPeaks {};
     std::array<std::atomic<float>, TrackDataModel::maxBuses> busPeaks {};
     std::atomic<float> masterPeak { 0.0f };
+    std::atomic<float> masterLeftPeak { 0.0f };
+    std::atomic<float> masterRightPeak { 0.0f };
+    std::unique_ptr<const TrackDataModel::FxRackSnapshot> masterFxRack;
+    std::atomic<const TrackDataModel::FxRackSnapshot*> publishedMasterFxRack { nullptr };
+    std::vector<std::unique_ptr<const TrackDataModel::FxRackSnapshot>> retiredMasterFxRacks;
     std::array<juce::AudioBuffer<float>, TrackDataModel::maxTracks> trackBuffers;
     std::array<juce::AudioBuffer<float>, TrackDataModel::maxBuses> busBuffers;
     std::array<juce::MidiBuffer, TrackDataModel::maxTracks> trackMidiBuffers;

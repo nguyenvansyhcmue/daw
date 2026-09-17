@@ -4,6 +4,7 @@
 #include <juce_events/juce_events.h>
 
 #include "AudioClipState.h"
+#include "../Media/AudioMediaPool.h"
 #include "../AudioEngine/AudioEffectProcessor.h"
 #include "../Project/ProjectState.h"
 #include "../Midi/MidiCore.h"
@@ -21,6 +22,7 @@ public:
     static constexpr size_t maxTracks = 14;
     static constexpr size_t maxBuses = 8;
     static constexpr size_t maxFxSlots = 4;
+    static constexpr size_t maxSendsPerTrack = 8;
     enum class EditTool { Pointer, Scissors, Eraser };
 
     struct FxRackSnapshot
@@ -45,6 +47,7 @@ public:
 
     struct TrackState
     {
+        struct SendRoute { BusId targetBus; float level = 1.0f; bool preFader = false; };
         TrackId id;
         TrackType type = TrackType::audio;
         std::atomic<float> volume { 1.0f };
@@ -57,8 +60,8 @@ public:
         juce::String name;
         std::vector<AudioClipState> clips;
         BusId outputBus;
-        BusId sendBus;
-        float sendAmount = 0.0f;
+        std::array<SendRoute, maxSendsPerTrack> sends {};
+        uint8_t activeSendCount = 0;
 
         TrackState() = default;
         TrackState(const TrackState& other) noexcept
@@ -69,7 +72,7 @@ public:
               solo(other.solo.load()),
               armed(other.armed.load()), inputMonitoring(other.inputMonitoring.load()),
               inputChannel(other.inputChannel.load()), name(other.name),
-              clips(other.clips), outputBus(other.outputBus), sendBus(other.sendBus), sendAmount(other.sendAmount)
+              clips(other.clips), outputBus(other.outputBus), sends(other.sends), activeSendCount(other.activeSendCount)
         {
         }
 
@@ -85,7 +88,7 @@ public:
             inputChannel.store(other.inputChannel.load());
             name = other.name;
             clips = other.clips;
-            outputBus = other.outputBus; sendBus = other.sendBus; sendAmount = other.sendAmount;
+            outputBus = other.outputBus; sends = other.sends; activeSendCount = other.activeSendCount;
             return *this;
         }
 
@@ -95,6 +98,7 @@ public:
 
     struct RenderTrack
     {
+        struct SendRouteSnapshot { BusId targetBus; float level = 1.0f; bool preFader = false; };
         TrackId id;
         TrackType type = TrackType::audio;
         float volume = 1.0f;
@@ -105,11 +109,11 @@ public:
         int inputChannel = 0;
         const FxRackSnapshot* fxRack = nullptr;
         BusId outputBus;
-        BusId sendBus;
-        float sendAmount = 0.0f;
+        std::array<SendRouteSnapshot, maxSendsPerTrack> sends {};
+        uint8_t activeSendCount = 0;
     };
     struct BusState { BusId id; float gain = 1.0f; bool muted = false; };
-    struct RenderBus { BusId id; float gain = 1.0f; bool muted = false; };
+    struct RenderBus { BusId id; float gain = 1.0f; bool muted = false; const FxRackSnapshot* fxRack = nullptr; };
 
     struct RenderStructureSnapshot
     {
@@ -179,10 +183,14 @@ public:
     BusId addBus();
     bool removeBus(BusId id);
     const std::vector<BusState>& getBuses() const noexcept { return busStates; }
+    const FxRackSnapshot* getBusFxRackSnapshot(BusId bus) const noexcept;
+    void setBusFxProcessor(BusId bus, size_t slot, std::shared_ptr<AudioEffectProcessor> processor);
+    void setBusFxBypassed(BusId bus, size_t slot, bool bypassed) noexcept;
     bool setBusGain(BusId bus, float gain);
     bool setBusMuted(BusId bus, bool muted);
     bool setTrackOutputBus(TrackId track, BusId bus);
     bool setTrackSend(TrackId track, BusId bus, float amount);
+    bool setTrackSendRoute(TrackId track, size_t route, BusId bus, float amount, bool preFader);
     bool clearTrackSend(TrackId track);
     void setTrackVolume(size_t index, float volume) noexcept;
     void setTrackName(size_t index, const juce::String& name);
@@ -232,6 +240,8 @@ public:
     bool setClipMediaResource(ClipId clipId, const juce::File& sourceFile,
                               std::shared_ptr<juce::AudioBuffer<float>> decodedBuffer);
     bool setClipMediaStatus(ClipId clipId, AudioMediaStatus status);
+    std::shared_ptr<juce::AudioBuffer<float>> findDecodedAudioSource(const juce::File& sourceFile) const;
+    size_t getAudioMediaSourceCount() const noexcept { return audioMediaPool.size(); }
     AudioMediaStatus getClipMediaStatus(ClipId clipId) const noexcept;
     bool canUndo() const noexcept;
     bool canRedo() const noexcept;
@@ -274,6 +284,7 @@ private:
     void publishAudioClipSnapshot();
     void publishMidiClipSnapshot();
     void publishFxRackSnapshot(size_t trackIndex, std::unique_ptr<const FxRackSnapshot> snapshot);
+    void publishBusFxRackSnapshot(size_t busIndex, std::unique_ptr<const FxRackSnapshot> snapshot);
     void publishRenderStructureSnapshot();
     int getFxRackSlot(TrackId trackId) const noexcept;
     bool canChangeTrackStructure() const noexcept;
@@ -281,6 +292,7 @@ private:
     std::vector<TrackState> trackStates;
     std::vector<MidiClipState> midiClips;
     std::vector<BusState> busStates;
+    AudioMediaPool audioMediaPool;
     std::unique_ptr<const std::vector<AudioClipState>> audioClipSnapshot;
     std::atomic<const std::vector<AudioClipState>*> publishedAudioClipSnapshot { nullptr };
     std::vector<std::unique_ptr<const std::vector<AudioClipState>>> retiredAudioClipSnapshots;
@@ -291,6 +303,9 @@ private:
     std::array<std::atomic<const FxRackSnapshot*>, maxTracks> publishedFxRacks {};
     std::array<std::vector<std::unique_ptr<const FxRackSnapshot>>, maxTracks> retiredFxRackSnapshots;
     std::array<TrackId, maxTracks> fxRackTrackIds {};
+    std::array<std::unique_ptr<const FxRackSnapshot>, maxBuses> busFxRacks;
+    std::array<std::atomic<const FxRackSnapshot*>, maxBuses> publishedBusFxRacks {};
+    std::array<std::vector<std::unique_ptr<const FxRackSnapshot>>, maxBuses> retiredBusFxRacks;
     std::unique_ptr<const RenderStructureSnapshot> renderStructureSnapshot;
     std::atomic<const RenderStructureSnapshot*> publishedRenderStructure { nullptr };
     std::vector<std::unique_ptr<const RenderStructureSnapshot>> retiredRenderStructures;

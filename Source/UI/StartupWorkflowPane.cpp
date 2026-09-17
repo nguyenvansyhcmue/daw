@@ -139,6 +139,7 @@ StartupWorkflowPane::StartupWorkflowPane()
         cardButton->setButtonText({});
         cardButton->setColour(juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
         cardButton->setColour(juce::TextButton::textColourOffId, juce::Colours::transparentBlack);
+        cardButton->onStateChange = [this] { repaint(); };
     }
     emptyProject.onClick = [this] { repaint(); };
     chooseProject.onClick = [this] { if (onEmptyProject) onEmptyProject(); };
@@ -317,9 +318,11 @@ void StartupWorkflowPane::paint(juce::Graphics& g)
     {
         const auto layout = getTrackCreationLayout(getDialogBounds());
         const auto midiActive = selectedType == TrackType::instrument || selectedType == TrackType::externalMidi;
-        drawTrackTypeCard(g, layout.midiCard.toFloat(), "MIDI", juce::Colour(0xff32a56a), midiActive, false);
+        const auto midiHovered = midi.isMouseOver(true);
+        const auto audioHovered = audio.isMouseOver(true);
+        drawTrackTypeCard(g, layout.midiCard.toFloat(), "MIDI", juce::Colour(0xff32a56a), midiActive || midiHovered, false);
         drawTrackTypeCard(g, layout.audioCard.toFloat(), "Audio", juce::Colour(0xff3f82d3),
-                          selectedType == TrackType::audio, true);
+                          selectedType == TrackType::audio || audioHovered, true);
 
         const auto details = layout.details.toFloat();
         g.setColour(juce::Colour(0xffe6e9ed));
@@ -447,8 +450,12 @@ void StartupWorkflowPane::resized()
     else
     {
         const auto layout = getTrackCreationLayout(getDialogBounds());
-        midi.setBounds(layout.midiTitle);
-        audio.setBounds(layout.audioTitle);
+        // The family selectors deliberately cover each complete card.  The
+        // option buttons were added after them and remain on top, so a click
+        // on an option chooses that detail while any other card click selects
+        // the MIDI or Audio family.
+        midi.setBounds(layout.midiCard);
+        audio.setBounds(layout.audioCard);
         softwareInstrument.setBounds(layout.softwareInstrument);
         externalMidi.setBounds(layout.externalMidi);
         micOrLine.setBounds(layout.micOrLine);

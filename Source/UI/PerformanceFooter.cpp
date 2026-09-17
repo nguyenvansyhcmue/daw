@@ -33,6 +33,8 @@ PerformanceFooter::PerformanceFooter(AudioEngine* engine) : audioEngine(engine)
 
 void PerformanceFooter::timerCallback()
 {
+    if (audioEngine != nullptr)
+        masterGain.setValue(audioEngine->getMasterGain(), juce::dontSendNotification);
     cpuLoad = audioEngine != nullptr ? juce::jlimit(0.0, 1.0, audioEngine->getAudioDeviceManager().getCpuUsage()) : 0.0;
     cpuLabel.setText("CPU " + juce::String(juce::roundToInt(cpuLoad * 100.0)) + "%", juce::dontSendNotification);
     repaint(cpuMeter.getBounds());

@@ -28,7 +28,7 @@ private:
     juce::Label context;
 };
 
-class TrackInspectorComponent final : public juce::Component
+class TrackInspectorComponent final : public juce::Component, private juce::Timer
 {
 public:
     explicit TrackInspectorComponent(TrackDataModel& model);
@@ -37,6 +37,7 @@ public:
     void resized() override;
 
 private:
+    void timerCallback() override;
     void refresh();
 
     TrackDataModel& trackModel;
@@ -59,6 +60,7 @@ public:
 
 private:
     void timerCallback() override;
+    void synchroniseControlsFromState();
     void refreshAudioFx();
     void refreshRouting();
     void showAudioFxMenu(size_t slot);

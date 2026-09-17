@@ -72,6 +72,11 @@ bool MainWindow::keyPressed(const juce::KeyPress& key)
                 saveCurrentProject();
             return true;
         }
+        if (key.getKeyCode() == 'i' || key.getKeyCode() == 'I')
+        {
+            chooseAudioToImport();
+            return true;
+        }
     }
 
     if (mainComponent != nullptr && mainComponent->handleGlobalKeyPress(key))
@@ -98,6 +103,7 @@ juce::PopupMenu MainWindow::getMenuForIndex(int topLevelMenuIndex, const juce::S
     if (topLevelMenuIndex == 0)
     {
         addItem(newProject, "New Project", "Ctrl+N"); addItem(openProject, "Open...", "Ctrl+O");
+        menu.addSeparator(); addItem(importAudio, "Import Audio...", "Ctrl+I");
         menu.addSeparator(); addItem(saveProject, "Save", "Ctrl+S"); addItem(saveProjectAs, "Save As...", "Ctrl+Shift+S");
         menu.addSeparator(); menu.addItem(quitApplication, "Quit");
     }
@@ -159,6 +165,7 @@ void MainWindow::menuItemSelected(int menuItemID, int)
         }
         case saveProject: saveCurrentProject(); break;
         case saveProjectAs: chooseProjectToSave(); break;
+        case importAudio: chooseAudioToImport(); break;
         case quitApplication: closeButtonPressed(); break;
         case undoEdit: if (mainComponent != nullptr) mainComponent->undoEdit(); break;
         case redoEdit: if (mainComponent != nullptr) mainComponent->redoEdit(); break;
@@ -218,6 +225,22 @@ void MainWindow::chooseProjectToSave()
                 safeWindow->setName("StudioForge DAW — " + selected.getFileNameWithoutExtension());
             }
         }
+    });
+}
+
+void MainWindow::chooseAudioToImport()
+{
+    audioFileChooser = std::make_unique<juce::FileChooser>("Import Audio", juce::File {}, "*.wav;*.aif;*.aiff;*.mp3");
+    const auto safeWindow = juce::Component::SafePointer<MainWindow>(this);
+    audioFileChooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                                  [safeWindow](const juce::FileChooser& chooser)
+    {
+        if (safeWindow == nullptr)
+            return;
+        const auto selected = chooser.getResult();
+        safeWindow->audioFileChooser.reset();
+        if (selected.existsAsFile() && safeWindow->mainComponent != nullptr)
+            safeWindow->mainComponent->importAudioFile(selected);
     });
 }
 

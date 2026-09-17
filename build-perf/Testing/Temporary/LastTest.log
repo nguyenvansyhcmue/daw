@@ -1,0 +1,19 @@
+Start testing: Sep 17 17:04 SE Asia Standard Time
+----------------------------------------------------------
+1/1 Testing: StudioForgeCoreTests
+1/1 Test: StudioForgeCoreTests
+Command: "D:/Stu/build-perf/Release/StudioForgeCoreTests.exe"
+Directory: D:/Stu/build-perf
+"StudioForgeCoreTests" start time: Sep 17 17:04 SE Asia Standard Time
+Output:
+----------------------------------------------------------
+StudioForge host benchmark: 0.0065894 ms/block, headroom 99.5057%, allocations 0
+<end of output>
+Test time =   0.20 sec
+----------------------------------------------------------
+Test Passed.
+"StudioForgeCoreTests" end time: Sep 17 17:04 SE Asia Standard Time
+"StudioForgeCoreTests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Sep 17 17:04 SE Asia Standard Time

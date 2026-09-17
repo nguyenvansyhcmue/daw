@@ -17,6 +17,7 @@ enum class AudioMediaStatus : uint8_t
 struct AudioClipState
 {
     ClipId id;
+    AudioSourceId sourceId;
     juce::File sourceFile;
     double startSample { 0.0 };
     double durationSamples { 0.0 };

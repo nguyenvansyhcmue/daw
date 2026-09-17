@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 
 project(StudioForgeDAW VERSION 1.0.0 LANGUAGES CXX)
+option(STUDIOFORGE_PERF_BENCHMARK "Enable deterministic host audio benchmark" OFF)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -39,6 +40,8 @@ target_sources(StudioForgeDAW PRIVATE
     Source/Project/ProjectSerializer.cpp
     Source/Project/RecentProjectsStore.cpp
     Source/Media/MediaReloadService.cpp
+    Source/Media/AudioMediaPool.cpp
+    Source/Media/WaveformThumbnailCache.cpp
     Source/Recording/RecordingSession.cpp
     Source/Midi/MidiCore.cpp
     Source/Plugins/PluginHostService.cpp
@@ -138,6 +141,8 @@ if (BUILD_TESTING)
         Source/Project/ProjectSerializer.cpp
         Source/Project/RecentProjectsStore.cpp
         Source/Media/MediaReloadService.cpp
+        Source/Media/AudioMediaPool.cpp
+        Source/Media/WaveformThumbnailCache.cpp
         Source/Recording/RecordingSession.cpp
         Source/Midi/MidiCore.cpp
         Source/Plugins/PluginHostService.cpp
@@ -161,6 +166,7 @@ if (BUILD_TESTING)
         JUCE_USE_CURL=0
         JUCE_PLUGINHOST_VST3=1
         STUDIOFORGE_TEST_VST3_PATH="$<TARGET_FILE:StudioForgeVst3TestEffect_VST3>"
+        $<$<BOOL:${STUDIOFORGE_PERF_BENCHMARK}>:STUDIOFORGE_PERF_BENCHMARK=1>
     )
 
     if (MSVC)

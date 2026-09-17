@@ -13,10 +13,13 @@ public:
     void resized() override {}
 
     void updatePeak(float newLevel) noexcept;
+    void updateStereoPeak(float leftLevel, float rightLevel) noexcept;
 
 private:
     void timerCallback() override;
 
     std::atomic<float> currentPeak { 0.0f };
+    std::atomic<float> currentRightPeak { 0.0f };
     float displayedPeak = 0.0f;
+    float displayedRightPeak = 0.0f;
 };

@@ -59,6 +59,11 @@ TrackDataModel::TrackDataModel()
         fxRacks[index] = std::make_unique<const FxRackSnapshot>();
         publishedFxRacks[index].store(fxRacks[index].get(), std::memory_order_seq_cst);
     }
+    for (size_t index = 0; index < maxBuses; ++index)
+    {
+        busFxRacks[index] = std::make_unique<const FxRackSnapshot>();
+        publishedBusFxRacks[index].store(busFxRacks[index].get(), std::memory_order_seq_cst);
+    }
     publishRenderStructureSnapshot();
     startTimerHz(30);
 }
@@ -235,7 +240,7 @@ bool TrackDataModel::removeBus(BusId id)
     const auto found = std::find_if(busStates.begin(), busStates.end(), [id] (const BusState& bus) { return bus.id == id; });
     if (found == busStates.end()) return false;
     busStates.erase(found);
-    for (auto& track : trackStates) { if (track.outputBus == id) track.outputBus = {}; if (track.sendBus == id) { track.sendBus = {}; track.sendAmount = 0.0f; } }
+    for (auto& track : trackStates) { if (track.outputBus == id) track.outputBus = {}; for (size_t i = 0; i < track.activeSendCount;) { if (track.sends[i].targetBus == id) { for (size_t j = i + 1; j < track.activeSendCount; ++j) track.sends[j - 1] = track.sends[j]; --track.activeSendCount; } else ++i; } }
     publishRenderStructureSnapshot();
     markProjectModified();
     return true;
@@ -261,6 +266,36 @@ bool TrackDataModel::setBusMuted(BusId id, bool muted)
     markProjectModified();
     return true;
 }
+const TrackDataModel::FxRackSnapshot* TrackDataModel::getBusFxRackSnapshot(BusId bus) const noexcept
+{
+    const auto index = std::find_if(busStates.begin(), busStates.end(), [bus] (const BusState& state) { return state.id == bus; });
+    if (index == busStates.end()) return nullptr;
+    return publishedBusFxRacks[static_cast<size_t>(std::distance(busStates.begin(), index))].load(std::memory_order_acquire);
+}
+void TrackDataModel::setBusFxProcessor(BusId bus, size_t slot, std::shared_ptr<AudioEffectProcessor> processor)
+{
+    if (slot >= maxFxSlots) return;
+    const auto found = std::find_if(busStates.begin(), busStates.end(), [bus] (const BusState& state) { return state.id == bus; });
+    if (found == busStates.end()) return;
+    const auto index = static_cast<size_t>(std::distance(busStates.begin(), found));
+    auto updated = std::make_unique<FxRackSnapshot>();
+    if (const auto* current = getBusFxRackSnapshot(bus); current != nullptr) *updated = *current;
+    updated->processors[slot] = std::move(processor);
+    publishBusFxRackSnapshot(index, std::move(updated));
+    publishRenderStructureSnapshot();
+}
+void TrackDataModel::setBusFxBypassed(BusId bus, size_t slot, bool bypassed) noexcept
+{
+    if (slot >= maxFxSlots) return;
+    const auto found = std::find_if(busStates.begin(), busStates.end(), [bus] (const BusState& state) { return state.id == bus; });
+    if (found == busStates.end()) return;
+    const auto index = static_cast<size_t>(std::distance(busStates.begin(), found));
+    auto updated = std::make_unique<FxRackSnapshot>();
+    if (const auto* current = getBusFxRackSnapshot(bus); current != nullptr) *updated = *current;
+    updated->bypass[slot] = bypassed;
+    publishBusFxRackSnapshot(index, std::move(updated));
+    publishRenderStructureSnapshot();
+}
 bool TrackDataModel::setTrackOutputBus(TrackId trackId, BusId bus)
 {
     if (bus.isValid() && std::none_of(busStates.begin(), busStates.end(), [bus] (const BusState& state) { return state.id == bus; })) return false;
@@ -271,15 +306,23 @@ bool TrackDataModel::setTrackSend(TrackId trackId, BusId bus, float amount)
 {
     if (! bus.isValid() || std::none_of(busStates.begin(), busStates.end(), [bus] (const BusState& state) { return state.id == bus; })) return false;
     const auto index = getTrackIndex(trackId); if (index < 0) return false;
-    auto& track = trackStates[static_cast<size_t>(index)]; track.sendBus = bus; track.sendAmount = juce::jlimit(0.0f, 1.0f, amount); publishRenderStructureSnapshot(); markProjectModified(); return true;
+    return setTrackSendRoute(trackId, 0, bus, amount, false);
+}
+bool TrackDataModel::setTrackSendRoute(TrackId trackId, size_t route, BusId bus, float amount, bool preFader)
+{
+    if (route >= maxSendsPerTrack || ! bus.isValid() || std::none_of(busStates.begin(), busStates.end(), [bus] (const BusState& state) { return state.id == bus; })) return false;
+    const auto index = getTrackIndex(trackId); if (index < 0) return false;
+    auto& track = trackStates[static_cast<size_t>(index)];
+    track.sends[route] = { bus, juce::jlimit(0.0f, 1.0f, amount), preFader };
+    track.activeSendCount = static_cast<uint8_t>(juce::jmax<int>(track.activeSendCount, static_cast<int>(route + 1)));
+    publishRenderStructureSnapshot(); markProjectModified(); return true;
 }
 bool TrackDataModel::clearTrackSend(TrackId trackId)
 {
     const auto index = getTrackIndex(trackId); if (index < 0) return false;
     auto& track = trackStates[static_cast<size_t>(index)];
-    if (! track.sendBus.isValid() && track.sendAmount == 0.0f) return true;
-    track.sendBus = {};
-    track.sendAmount = 0.0f;
+    if (track.activeSendCount == 0) return true;
+    track.activeSendCount = 0;
     publishRenderStructureSnapshot();
     markProjectModified();
     return true;
@@ -437,12 +480,14 @@ ClipId TrackDataModel::addClipToTrack(int trackIndex, const juce::File& file, do
 
     AudioClipState clip;
     clip.id = { nextClipId++ };
-    clip.sourceFile = file;
+    const auto& source = audioMediaPool.registerDecodedSource(file, std::move(loadedBuffer));
+    clip.sourceId = source.id;
+    clip.sourceFile = source.sourceFile;
     clip.startSample = std::max(0.0, startSample);
-    clip.durationSamples = loadedBuffer->getNumSamples();
+    clip.durationSamples = source.playbackData->getNumSamples();
     clip.trackId = trackStates[static_cast<size_t>(trackIndex)].id;
     clip.clipName = file.getFileNameWithoutExtension();
-    clip.cachedBuffer = std::move(loadedBuffer);
+    clip.cachedBuffer = source.playbackData;
     clip.mediaStatus = AudioMediaStatus::Ready;
     trackStates[static_cast<size_t>(trackIndex)].clips.push_back(clip);
     publishAudioClipSnapshot();
@@ -656,8 +701,10 @@ bool TrackDataModel::setClipMediaResource(ClipId clipId, const juce::File& file,
         for (auto& clip : track.clips)
             if (clip.id == clipId)
             {
-                clip.sourceFile = file;
-                clip.cachedBuffer = std::move(decodedBuffer);
+                const auto& source = audioMediaPool.registerDecodedSource(file, std::move(decodedBuffer));
+                clip.sourceId = source.id;
+                clip.sourceFile = source.sourceFile;
+                clip.cachedBuffer = source.playbackData;
                 clip.mediaStatus = AudioMediaStatus::Ready;
                 publishAudioClipSnapshot();
                 publishRenderStructureSnapshot();
@@ -665,6 +712,11 @@ bool TrackDataModel::setClipMediaResource(ClipId clipId, const juce::File& file,
                 return true;
             }
     return false;
+}
+
+std::shared_ptr<juce::AudioBuffer<float>> TrackDataModel::findDecodedAudioSource(const juce::File& sourceFile) const
+{
+    return audioMediaPool.findPlaybackData(sourceFile);
 }
 
 bool TrackDataModel::setClipMediaStatus(ClipId clipId, AudioMediaStatus status)
@@ -796,8 +848,8 @@ ProjectState TrackDataModel::createProjectState() const
         savedTrack.inputMonitoring = track.inputMonitoring.load(std::memory_order_relaxed);
         savedTrack.inputChannel = track.inputChannel.load(std::memory_order_relaxed);
         savedTrack.outputBus = track.outputBus;
-        savedTrack.sendBus = track.sendBus;
-        savedTrack.sendAmount = track.sendAmount;
+        savedTrack.activeSendCount = track.activeSendCount;
+        for (size_t i = 0; i < track.activeSendCount; ++i) savedTrack.sends[i] = { track.sends[i].targetBus, track.sends[i].level, track.sends[i].preFader };
         savedTrack.clips.reserve(track.clips.size());
         for (const auto& clip : track.clips)
             savedTrack.clips.push_back({ clip.id, clip.trackId, clip.sourceFile.getFullPathName(), clip.clipName,
@@ -868,9 +920,12 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
         if (track.inputChannel < 0 || track.inputChannel > 255)
             return juce::Result::fail("Project input routing is invalid");
         if ((track.outputBus.isValid() && std::find(busIds.begin(), busIds.end(), track.outputBus) == busIds.end())
-            || (track.sendBus.isValid() && std::find(busIds.begin(), busIds.end(), track.sendBus) == busIds.end())
-            || ! std::isfinite(track.sendAmount) || track.sendAmount < 0.0f || track.sendAmount > 1.0f)
+            || track.activeSendCount > maxSendsPerTrack)
             return juce::Result::fail("Project track bus routing is invalid");
+        for (size_t i = 0; i < track.activeSendCount; ++i)
+            if (! track.sends[i].targetBus.isValid() || std::find(busIds.begin(), busIds.end(), track.sends[i].targetBus) == busIds.end()
+                || ! std::isfinite(track.sends[i].level) || track.sends[i].level < 0.0f || track.sends[i].level > 1.0f)
+                return juce::Result::fail("Project track send routing is invalid");
         trackIds.push_back(track.id);
         largestTrackId = std::max(largestTrackId, track.id.value);
         for (const auto& clip : track.clips)
@@ -941,8 +996,8 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
         restored.inputMonitoring.store(track.inputMonitoring, std::memory_order_relaxed);
         restored.inputChannel.store(track.inputChannel, std::memory_order_relaxed);
         restored.outputBus = track.outputBus;
-        restored.sendBus = track.sendBus;
-        restored.sendAmount = track.sendAmount;
+        restored.activeSendCount = track.activeSendCount;
+        for (size_t i = 0; i < track.activeSendCount; ++i) restored.sends[i] = { track.sends[i].targetBus, track.sends[i].level, track.sends[i].preFader };
         restored.clips.reserve(track.clips.size());
         for (const auto& clip : track.clips)
         {
@@ -981,6 +1036,7 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
     for (const auto& bus : state.buses)
         restoredBuses.push_back({ bus.id, bus.gain, bus.muted });
 
+    audioMediaPool.clear();
     trackStates = std::move(restoredTracks);
     midiClips = std::move(restoredMidiClips);
     busStates = std::move(restoredBuses);
@@ -1063,6 +1119,14 @@ void TrackDataModel::publishFxRackSnapshot(size_t trackIndex, std::unique_ptr<co
     publishedFxRacks[trackIndex].store(fxRacks[trackIndex].get(), std::memory_order_seq_cst);
     if (previous != nullptr) retiredFxRackSnapshots[trackIndex].push_back(std::move(previous));
 }
+void TrackDataModel::publishBusFxRackSnapshot(size_t busIndex, std::unique_ptr<const FxRackSnapshot> snapshot)
+{
+    if (busIndex >= maxBuses || snapshot == nullptr) return;
+    auto previous = std::move(busFxRacks[busIndex]);
+    busFxRacks[busIndex] = std::move(snapshot);
+    publishedBusFxRacks[busIndex].store(busFxRacks[busIndex].get(), std::memory_order_release);
+    if (previous != nullptr) retiredBusFxRacks[busIndex].push_back(std::move(previous));
+}
 
 void TrackDataModel::publishRenderStructureSnapshot()
 {
@@ -1070,7 +1134,8 @@ void TrackDataModel::publishRenderStructureSnapshot()
     next->trackCount = trackStates.size();
     next->busCount = busStates.size();
     for (size_t index = 0; index < next->busCount; ++index)
-        next->buses[index] = { busStates[index].id, busStates[index].gain, busStates[index].muted };
+        next->buses[index] = { busStates[index].id, busStates[index].gain, busStates[index].muted,
+                               publishedBusFxRacks[index].load(std::memory_order_acquire) };
     for (size_t index = 0; index < next->trackCount; ++index)
     {
         const auto& track = trackStates[index];
@@ -1086,8 +1151,8 @@ void TrackDataModel::publishRenderStructureSnapshot()
         const auto rackSlot = getFxRackSlot(track.id);
         renderTrack.fxRack = rackSlot >= 0 ? publishedFxRacks[static_cast<size_t>(rackSlot)].load(std::memory_order_acquire) : nullptr;
         renderTrack.outputBus = track.outputBus;
-        renderTrack.sendBus = track.sendBus;
-        renderTrack.sendAmount = track.sendAmount;
+        renderTrack.activeSendCount = track.activeSendCount;
+        for (size_t i = 0; i < track.activeSendCount; ++i) renderTrack.sends[i] = { track.sends[i].targetBus, track.sends[i].level, track.sends[i].preFader };
     }
     std::unique_ptr<const RenderStructureSnapshot> snapshot = std::move(next);
     auto previous = std::move(renderStructureSnapshot);
@@ -1110,6 +1175,7 @@ void TrackDataModel::reclaimRetiredRealtimeSnapshots()
     retiredAudioClipSnapshots.clear();
     retiredMidiClipSnapshots.clear();
     for (auto& retiredRacks : retiredFxRackSnapshots) retiredRacks.clear();
+    for (auto& retiredRacks : retiredBusFxRacks) retiredRacks.clear();
     retiredRenderStructures.clear();
 }
 
@@ -1118,6 +1184,7 @@ size_t TrackDataModel::getRetiredRealtimeSnapshotCount() const noexcept
     size_t count = retiredAudioClipSnapshots.size();
     count += retiredMidiClipSnapshots.size();
     for (const auto& retiredRacks : retiredFxRackSnapshots) count += retiredRacks.size();
+    for (const auto& retiredRacks : retiredBusFxRacks) count += retiredRacks.size();
     count += retiredRenderStructures.size();
     return count;
 }

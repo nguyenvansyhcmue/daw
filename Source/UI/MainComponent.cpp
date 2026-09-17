@@ -95,9 +95,7 @@ MainComponent::MainComponent()
     };
     assetBrowser.onAudioFileActivated = [this](const juce::File& file)
     {
-        const auto trackIndex = getSelectedTrackIndex();
-        if (trackIndex >= 0)
-            arrangeWindow.importAudioFile(file, trackIndex, trackDataModel.getPlayheadPosition());
+        importAudioFile(file);
     };
     performanceFooter.onBounceRequested = [this]
     {
@@ -187,6 +185,7 @@ juce::Result MainComponent::loadProject(const juce::File& file, juce::StringArra
         selectTrack(0);
         mixerPane.refreshFromModel();
         arrangeWindow.repaint();
+        arrangeWindow.requestWaveformPreparation();
         pianoRoll.repaint();
         markProjectSaved();
         if (trackDataModel.getTrackCount() == 0)
@@ -264,6 +263,11 @@ bool MainComponent::addTrackFromCommand(TrackType type)
     arrangeWindow.repaint();
     mixerPane.refreshFromModel();
     return true;
+}
+
+void MainComponent::importAudioFile(const juce::File& file)
+{
+    arrangeWindow.importAudioFile(file, getSelectedTrackIndex(), trackDataModel.getPlayheadPosition());
 }
 
 void MainComponent::selectTrack(int trackIndex)

@@ -38,6 +38,7 @@ public:
     void setBrowserPanelVisible(bool visible);
     void setMixerPanelVisible(bool visible);
     bool addTrackFromCommand(TrackType type = TrackType::audio);
+    void importAudioFile(const juce::File& file);
     void setWorkspaceTrackHeight(int height);
     bool isInspectorPanelVisible() const noexcept { return inspectorPane.isVisible(); }
     bool isBrowserPanelVisible() const noexcept { return assetBrowser.isVisible(); }

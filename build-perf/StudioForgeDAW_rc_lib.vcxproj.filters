@@ -1,0 +1,22 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="D:\Stu\build-perf\CMakeFiles\e3cead98f15590c33a80c54357931ba8\StudioForgeDAW_resources.rc.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="D:\Stu\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="D:\Stu\build-perf\StudioForgeDAW_artefacts\JuceLibraryCode\StudioForgeDAW_resources.rc">
+      <Filter>Source Files</Filter>
+    </ResourceCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{4049CD04-7539-3469-AC85-60E62973F004}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{E4338BBD-708B-3279-B75F-8518CB1CED72}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

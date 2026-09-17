@@ -1,0 +1,45 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="D:\Stu\build\_deps\juce-src\modules\juce_audio_plugin_client\juce_audio_plugin_client_AAX.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Stu\build\_deps\juce-src\modules\juce_audio_plugin_client\juce_audio_plugin_client_AAX_utils.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Stu\build\_deps\juce-src\modules\juce_audio_plugin_client\juce_audio_plugin_client_ARA.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Stu\build\_deps\juce-src\modules\juce_audio_plugin_client\juce_audio_plugin_client_LV2.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Stu\build\_deps\juce-src\modules\juce_audio_plugin_client\juce_audio_plugin_client_Standalone.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Stu\build\_deps\juce-src\modules\juce_audio_plugin_client\juce_audio_plugin_client_Unity.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Stu\build\_deps\juce-src\modules\juce_audio_plugin_client\juce_audio_plugin_client_VST2.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\Stu\build\_deps\juce-src\modules\juce_audio_plugin_client\juce_audio_plugin_client_VST3.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="D:\Stu\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Object Include="D:\Stu\build-perf\StudioForgeVst3TestEffect_rc_lib.dir\$(Configuration)\StudioForgeVst3TestEffect_resources.res">
+      <Filter>Object Libraries</Filter>
+    </Object>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Object Libraries">
+      <UniqueIdentifier>{2C1AB3F2-2993-3D8F-A219-C76FEA9CB4E4}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{E4338BBD-708B-3279-B75F-8518CB1CED72}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

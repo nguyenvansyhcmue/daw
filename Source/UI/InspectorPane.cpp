@@ -21,6 +21,7 @@ InspectorPane::InspectorPane(TrackDataModel& model, AudioEngine& engine, PluginH
     addAndMakeVisible(trackInspector);
     addAndMakeVisible(selectedTrackChannel);
     addAndMakeVisible(stereoOutputChannel);
+    stereoOutputChannel.refresh();
 }
 
 void InspectorPane::setSelectedTrack(int trackIndex)

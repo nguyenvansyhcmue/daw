@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Solution>
+	<Configurations>
+		<BuildType Name="Debug"/>
+		<BuildType Name="Release"/>
+		<BuildType Name="MinSizeRel"/>
+		<BuildType Name="RelWithDebInfo"/>
+		<Platform Name="x64"/>
+	</Configurations>
+	<Folder Name="/CMakePredefinedTargets/">
+		<Project Path="ALL_BUILD.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="b44837c9-df81-3c44-adf3-66c08d1c02f1" DefaultStartup="true">
+			<BuildDependency Project="../../ZERO_CHECK.vcxproj"/>
+		</Project>
+		<Project Path="INSTALL.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="450ad5f4-1521-3ec2-b7d8-8ee2f63c967d">
+			<BuildDependency Project="ALL_BUILD.vcxproj"/>
+			<BuildDependency Project="../../ZERO_CHECK.vcxproj"/>
+			<Build Solution="Debug|*" Project="false"/>
+			<Build Solution="Release|*" Project="false"/>
+			<Build Solution="MinSizeRel|*" Project="false"/>
+			<Build Solution="RelWithDebInfo|*" Project="false"/>
+		</Project>
+		<Project Path="RUN_TESTS.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="56f03ed8-c004-35a4-a4d7-f96cba051be7">
+			<BuildDependency Project="../../ZERO_CHECK.vcxproj"/>
+			<Build Solution="Debug|*" Project="false"/>
+			<Build Solution="Release|*" Project="false"/>
+			<Build Solution="MinSizeRel|*" Project="false"/>
+			<Build Solution="RelWithDebInfo|*" Project="false"/>
+		</Project>
+		<Project Path="../../ZERO_CHECK.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="9ad9cbe9-7427-346d-ab36-86bc45bd861b"/>
+	</Folder>
+</Solution>

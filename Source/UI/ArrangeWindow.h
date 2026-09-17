@@ -2,9 +2,13 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
-#include "../Models/TrackDataModel.h"
+#include <map>
+#include <vector>
 
-class TrackHeaderPanel final : public juce::Component
+#include "../Models/TrackDataModel.h"
+#include "../Media/WaveformThumbnailCache.h"
+
+class TrackHeaderPanel final : public juce::Component, private juce::Timer
 {
 public:
     explicit TrackHeaderPanel(TrackDataModel* model = nullptr);
@@ -18,6 +22,8 @@ public:
     void setTrackModel(TrackDataModel* model) noexcept { trackModel = model; }
 
 private:
+    void timerCallback() override;
+
     TrackDataModel* trackModel = nullptr;
     int selectedTrack = 0;
 };
@@ -41,11 +47,13 @@ public:
     void resized() override {}
 
     void setTrackModel(TrackDataModel* model) noexcept { trackModel = model; }
+    void setWaveformCache(const WaveformThumbnailCache* cache) noexcept { waveformCache = cache; }
 
 private:
     void timerCallback() override;
 
     TrackDataModel* trackModel = nullptr;
+    const WaveformThumbnailCache* waveformCache = nullptr;
     double viewStartSample = 0.0;
     double zoomFactor = 1.0;
     int selectedTrack = -1;
@@ -94,8 +102,20 @@ public:
     void fileDragExit(const juce::StringArray& files) override;
     void filesDropped(const juce::StringArray& files, int x, int y) override;
     void importAudioFile(const juce::File& file, int trackIndex, double startSample);
+    void requestWaveformPreparation();
 
 private:
+    struct PendingAudioImport
+    {
+        TrackId trackId;
+        double startSample = 0.0;
+    };
+
+    void completeAudioImport(const juce::File& sourceFile,
+                             std::shared_ptr<juce::AudioBuffer<float>> decodedBuffer);
+    int resolveAudioImportTrack(int requestedTrackIndex);
+
+    WaveformThumbnailCache waveformCache;
     juce::ThreadPool loader { 2 };
     TrackHeaderPanel trackHeaderPanel;
     TimelineRuler timelineRuler;
@@ -105,4 +125,5 @@ private:
     TrackDataModel* trackModel = nullptr;
     bool isDraggingOver = false;
     int draggedTrack = 0;
+    std::map<juce::String, std::vector<PendingAudioImport>> pendingImportsBySource;
 };

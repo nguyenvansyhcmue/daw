@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Solution>
+	<Configurations>
+		<BuildType Name="Custom"/>
+		<Platform Name="x64"/>
+	</Configurations>
+	<Project Path="extras/Build/juceaide/juceaide.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="51769ec1-f67d-35c6-a37e-5440bc6bf7a2">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+	</Project>
+	<Folder Name="/CMakePredefinedTargets/">
+		<Project Path="ALL_BUILD.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="2b7c9027-b320-380e-8dad-958598552de6" DefaultStartup="true">
+			<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+			<BuildDependency Project="extras/Build/juceaide/juceaide.vcxproj"/>
+		</Project>
+		<Project Path="INSTALL.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="07719135-522c-3c4e-897c-ab98fa823bf7">
+			<BuildDependency Project="ALL_BUILD.vcxproj"/>
+			<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+			<Build Solution="Custom|*" Project="false"/>
+		</Project>
+		<Project Path="ZERO_CHECK.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="05a59742-3479-31ed-86b3-0dc408b2d61e"/>
+	</Folder>
+</Solution>

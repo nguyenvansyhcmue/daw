@@ -31,6 +31,7 @@ private:
         openProject,
         saveProject,
         saveProjectAs,
+        importAudio,
         quitApplication,
         undoEdit,
         redoEdit,
@@ -44,6 +45,7 @@ private:
 
     void chooseProjectToOpen();
     void chooseProjectToSave();
+    void chooseAudioToImport();
     void saveCurrentProject();
     void loadProjectFromFile(const juce::File& file);
     void refreshRecentProjects();
@@ -52,6 +54,7 @@ private:
 
     std::unique_ptr<juce::OpenGLContext> openGLContext;
     std::unique_ptr<juce::FileChooser> projectFileChooser;
+    std::unique_ptr<juce::FileChooser> audioFileChooser;
     MainComponent* mainComponent = nullptr;
     juce::File currentProjectFile;
     RecentProjectsStore recentProjects;

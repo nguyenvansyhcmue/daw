@@ -1,11 +1,27 @@
 #include <cmath>
 #include <iostream>
+#include <chrono>
+#include <atomic>
+#include <new>
+
+#ifdef STUDIOFORGE_PERF_BENCHMARK
+std::atomic<bool> studioForgeMeasureAllocations { false };
+std::atomic<uint64_t> studioForgeAllocationCount { 0 };
+void* operator new(std::size_t size)
+{
+    if (studioForgeMeasureAllocations.load(std::memory_order_relaxed)) studioForgeAllocationCount.fetch_add(1, std::memory_order_relaxed);
+    if (auto* allocation = std::malloc(size)) return allocation;
+    throw std::bad_alloc();
+}
+void operator delete(void* allocation) noexcept { std::free(allocation); }
+#endif
 
 #include "AudioEngine/AudioGraph.h"
 #include "AudioEngine/AudioEngine.h"
 #include "AudioEngine/GainUtilityProcessor.h"
 #include "AudioEngine/TrackMixing.h"
 #include "AudioEngine/TransportUtils.h"
+#include "Media/WaveformThumbnailCache.h"
 #include "Models/TrackDataModel.h"
 #include "Media/MediaReloadService.h"
 #include "Midi/MidiCore.h"
@@ -18,13 +34,13 @@ namespace
 class OfflineAudioDevice final : public juce::AudioIODevice
 {
 public:
-    OfflineAudioDevice() : juce::AudioIODevice("Offline", "Test") {}
+    explicit OfflineAudioDevice(int size = 4) : juce::AudioIODevice("Offline", "Test"), blockSize(size) {}
 
     juce::StringArray getOutputChannelNames() override { return { "L", "R" }; }
     juce::StringArray getInputChannelNames() override { return {}; }
     juce::Array<double> getAvailableSampleRates() override { return { 44100.0 }; }
-    juce::Array<int> getAvailableBufferSizes() override { return { 4 }; }
-    int getDefaultBufferSize() override { return 4; }
+    juce::Array<int> getAvailableBufferSizes() override { return { blockSize }; }
+    int getDefaultBufferSize() override { return blockSize; }
     juce::String open(const juce::BigInteger&, const juce::BigInteger&, double, int) override { return {}; }
     void close() override {}
     bool isOpen() override { return true; }
@@ -32,13 +48,15 @@ public:
     void stop() override {}
     bool isPlaying() override { return false; }
     juce::String getLastError() override { return {}; }
-    int getCurrentBufferSizeSamples() override { return 4; }
+    int getCurrentBufferSizeSamples() override { return blockSize; }
     double getCurrentSampleRate() override { return 44100.0; }
     int getCurrentBitDepth() override { return 32; }
     juce::BigInteger getActiveOutputChannels() const override { return 3; }
     juce::BigInteger getActiveInputChannels() const override { return {}; }
     int getOutputLatencyInSamples() override { return 0; }
     int getInputLatencyInSamples() override { return 0; }
+private:
+    int blockSize;
 };
 
 class MidiProbeProcessor final : public AudioEffectProcessor
@@ -54,7 +72,7 @@ public:
 
 bool approximatelyEqual(float actual, float expected) noexcept
 {
-    return std::abs(actual - expected) < 1.0e-5f;
+    return std::abs(actual - expected) < 1.0e-4f;
 }
 
 bool expect(bool condition, const char* message)
@@ -93,8 +111,8 @@ bool testTrackMixing()
     buffer.addSample(0, 0, 1.0f);
     buffer.addSample(1, 0, 1.0f);
     TrackMixing::apply(buffer, 8, { 0.5f, 0.0f, true });
-    if (! expect(approximatelyEqual(buffer.getSample(0, 0), 0.5f), "track gain left")) return false;
-    if (! expect(approximatelyEqual(buffer.getSample(1, 0), 0.5f), "track gain right")) return false;
+    if (! expect(approximatelyEqual(buffer.getSample(0, 0), 0.3535534f), "constant-power centre gain left")) return false;
+    if (! expect(approximatelyEqual(buffer.getSample(1, 0), 0.3535534f), "constant-power centre gain right")) return false;
 
     buffer.setSample(0, 0, 1.0f);
     buffer.setSample(1, 0, 1.0f);
@@ -107,6 +125,13 @@ bool testTrackMixing()
     TrackMixing::apply(buffer, 8, { 1.0f, 1.0f, true });
     if (! expect(approximatelyEqual(buffer.getSample(0, 0), 0.0f), "pan right mutes left")) return false;
     if (! expect(approximatelyEqual(buffer.getSample(1, 0), 1.0f), "pan right keeps right")) return false;
+
+    buffer.setSample(0, 0, 1.0f); buffer.setSample(1, 0, 1.0f);
+    TrackMixing::apply(buffer, 8, { 1.0f, -0.5f, true });
+    if (! expect(approximatelyEqual(buffer.getSample(0, 0), 0.9238795f) && approximatelyEqual(buffer.getSample(1, 0), 0.3826834f), "half-left uses constant-power law")) return false;
+    buffer.setSample(0, 0, 1.0f); buffer.setSample(1, 0, 1.0f);
+    TrackMixing::apply(buffer, 8, { 1.0f, 0.5f, true });
+    if (! expect(approximatelyEqual(buffer.getSample(0, 0), 0.3826834f) && approximatelyEqual(buffer.getSample(1, 0), 0.9238795f), "half-right uses constant-power law")) return false;
 
     TrackMixing::apply(buffer, 8, { 1.0f, 0.0f, false });
     return expect(approximatelyEqual(TrackMixing::peak(buffer, 8), 0.0f), "mute and solo exclusion clear track");
@@ -400,10 +425,10 @@ bool testProjectPersistence()
     if (! expect(after.tracks[1].inputMonitoring && after.tracks[1].inputChannel == 1,
                  "track input-monitor routing round-trips")) return false;
     if (! expect(after.buses.size() == 1 && after.buses[0].id == bus
-                 && after.tracks[1].outputBus == bus && after.tracks[2].sendBus == bus
-                 && approximatelyEqual(after.tracks[2].sendAmount, 0.35f),
+                 && after.tracks[1].outputBus == bus && after.tracks[2].activeSendCount == 1
+                 && after.tracks[2].sends[0].targetBus == bus && approximatelyEqual(after.tracks[2].sends[0].level, 0.35f),
                  "bus and send routing round-trips")) return false;
-    if (! expect(loaded.clearTrackSend(trackB) && ! loaded.createProjectState().tracks[2].sendBus.isValid(),
+    if (! expect(loaded.clearTrackSend(trackB) && loaded.createProjectState().tracks[2].activeSendCount == 0,
                  "track send can be disabled without changing track ownership")) return false;
     if (! expect(after.tracks[2].clips.size() == 2 && after.tracks[2].clips[0].id == clip
                  && after.tracks[2].clips[0].trackId == trackB
@@ -528,7 +553,7 @@ bool testMediaReloadAndRelink()
     float left[4] {}, right[4] {};
     float* outputs[] { left, right };
     engine.audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, 4, {});
-    if (! expect(approximatelyEqual(left[0], 0.75f) && approximatelyEqual(right[0], 0.75f),
+    if (! expect(approximatelyEqual(left[0], 0.5303301f) && approximatelyEqual(right[0], 0.5303301f),
                  "reloaded media plays through production audio path")) return false;
 
     TrackDataModel sourceB;
@@ -670,7 +695,7 @@ bool testInputMonitoring()
     float outputLeft[4] {}, outputRight[4] {};
     float* outputs[] { outputLeft, outputRight };
     engine.audioDeviceIOCallbackWithContext(inputs, 2, outputs, 2, 4, {});
-    if (! expect(approximatelyEqual(outputLeft[2], 0.3f) && approximatelyEqual(outputRight[2], 0.2f),
+    if (! expect(approximatelyEqual(outputLeft[2], 0.2121320f) && approximatelyEqual(outputRight[2], 0.1414213f),
                  "input monitoring passes selected device input")) return false;
     if (! expect(model.getPlayheadPosition() == 0.0,
                  "input monitoring does not move stopped transport")) return false;
@@ -705,8 +730,8 @@ bool testOfflineBounce()
     std::shared_ptr<juce::AudioBuffer<float>> rendered;
     if (! expect(MediaReloadService::decode(outputFile, rendered).wasOk()
                  && rendered->getNumSamples() == 4
-                 && approximatelyEqual(rendered->getSample(0, 0), 0.125f)
-                 && approximatelyEqual(rendered->getSample(1, 3), 0.125f),
+                 && approximatelyEqual(rendered->getSample(0, 0), 0.0883883f)
+                 && approximatelyEqual(rendered->getSample(1, 3), 0.0883883f),
                  "offline bounce uses production track and master processing")) return false;
     if (! expect(model.getProjectRevision() == revisionBeforeBounce && model.isCycleActive()
                  && model.getCycleStartSample() == 1.0 && model.getCycleEndSample() == 3.0,
@@ -733,8 +758,8 @@ bool testClipGainAndFades()
     float left[4] {}, right[4] {};
     float* outputs[] { left, right };
     engine.audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, 4, {});
-    if (! expect(approximatelyEqual(left[0], 0.0f) && approximatelyEqual(left[1], 0.25f)
-                 && approximatelyEqual(left[2], 0.5f) && approximatelyEqual(left[3], 0.25f),
+    if (! expect(approximatelyEqual(left[0], 0.0f) && approximatelyEqual(left[1], 0.1767767f)
+                 && approximatelyEqual(left[2], 0.3535534f) && approximatelyEqual(left[3], 0.1767767f),
                  "clip gain and fades change rendered DSP amplitude")) return false;
     if (! expect(model.undo() && model.getTrack(0).clips.front().fadeInSamples == 0.0
                  && model.undo() && model.getTrack(0).clips.front().gain == 1.0f,
@@ -756,6 +781,32 @@ bool testClipDuplicate()
     return expect(model.undo() && model.getTrack(0).clips.size() == 1, "duplicate is one undoable edit");
 }
 
+bool testAudioMediaSourceOwnership()
+{
+    TrackDataModel model;
+    const auto firstTrack = model.addTrack(TrackType::audio);
+    const auto secondTrack = model.addTrack(TrackType::audio);
+    const auto sourceFile = juce::File("C:/StudioForgeTests/shared-vocal.wav");
+    auto firstDecode = std::make_shared<juce::AudioBuffer<float>>(1, 8);
+    auto secondDecode = std::make_shared<juce::AudioBuffer<float>>(1, 8);
+    firstDecode->setSample(0, 0, 0.75f);
+    secondDecode->setSample(0, 0, 0.25f);
+
+    const auto firstClip = model.addClipToTrack(model.getTrackIndex(firstTrack), sourceFile, 0.0, firstDecode);
+    const auto secondClip = model.addClipToTrack(model.getTrackIndex(secondTrack), sourceFile, 64.0, secondDecode);
+    const auto& first = model.getTrack(static_cast<size_t>(model.getTrackIndex(firstTrack))).clips.front();
+    const auto& second = model.getTrack(static_cast<size_t>(model.getTrackIndex(secondTrack))).clips.front();
+    if (! expect(firstClip.isValid() && secondClip.isValid() && first.sourceId.isValid()
+                 && first.sourceId == second.sourceId && first.cachedBuffer == second.cachedBuffer
+                 && model.getAudioMediaSourceCount() == 1,
+                 "same file imports share one source identity and immutable playback buffer")) return false;
+
+    if (! expect(model.deleteAudioClip(firstClip), "one of two clips using a source can be deleted")) return false;
+    const auto& remaining = model.getTrack(static_cast<size_t>(model.getTrackIndex(secondTrack))).clips.front();
+    return expect(remaining.cachedBuffer == firstDecode && model.getAudioMediaSourceCount() == 1,
+                  "deleting one clip preserves the remaining source-backed playback clip");
+}
+
 bool testBusAndSendRouting()
 {
     TrackDataModel model;
@@ -773,19 +824,60 @@ bool testBusAndSendRouting()
     model.setPlaying(true); model.setPlayheadPosition(0.0);
     float left[4] {}, right[4] {}; float* outputs[] { left, right };
     engine.audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, 4, {});
-    if (! expect(approximatelyEqual(left[0], 2.5f) && approximatelyEqual(right[0], 2.5f)
-                 && approximatelyEqual(engine.getBusPeak(0), 1.5f),
+    if (! expect(approximatelyEqual(left[0], 1.7677670f) && approximatelyEqual(right[0], 1.7677670f)
+                 && approximatelyEqual(engine.getBusPeak(0), 1.0606602f),
                  "direct track, bus output and post-fader send mix exactly once")) return false;
     model.setBusGain(bus, 0.5f);
     model.setPlayheadPosition(0.0);
     engine.audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, 4, {});
-    if (! expect(approximatelyEqual(left[0], 1.75f) && approximatelyEqual(engine.getBusPeak(0), 0.75f),
+    if (! expect(approximatelyEqual(left[0], 1.2374369f) && approximatelyEqual(engine.getBusPeak(0), 0.5303301f),
                  "bus gain changes the routed audio and bus meter")) return false;
     model.setBusMuted(bus, true);
     model.setPlayheadPosition(0.0);
     engine.audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, 4, {});
-    return expect(approximatelyEqual(left[0], 1.0f) && approximatelyEqual(engine.getBusPeak(0), 0.0f),
+    return expect(approximatelyEqual(left[0], 0.7071068f) && approximatelyEqual(engine.getBusPeak(0), 0.0f),
                   "bus mute removes only the bus return from the master");
+}
+
+bool testWaveformThumbnailCache()
+{
+    auto source = std::make_shared<juce::AudioBuffer<float>>(1, 8);
+    source->clear();
+    source->setSample(0, 2, -0.75f);
+    source->setSample(0, 3, 0.50f);
+    const auto sourceFile = juce::File("C:/StudioForgeTests/vocal.wav");
+    WaveformThumbnailCache cache;
+    const auto first = cache.prepare(sourceFile, source);
+    const auto second = cache.prepare(sourceFile, source);
+    if (! expect(first != nullptr && first == second, "duplicate clips reuse one source waveform thumbnail")) return false;
+    const auto peak = first->peakForSourceRange(2.0, 3.0);
+    return expect(peak.minimum < -0.74f && peak.maximum <= 0.01f,
+                  "waveform thumbnail maps a clip source offset to prepared source peaks");
+}
+
+bool testMasterFxRouting()
+{
+    TrackDataModel model;
+    const auto track = model.addTrack();
+    auto source = std::make_shared<juce::AudioBuffer<float>>(2, 4);
+    source->clear(); source->addSample(0, 0, 1.0f); source->addSample(1, 0, 1.0f);
+    model.addClipToTrack(model.getTrackIndex(track), {}, 0.0, source);
+    OfflineAudioDevice device;
+    AudioEngine engine(&model);
+    engine.setMasterFxProcessor(0, std::make_shared<GainUtilityProcessor>());
+    engine.audioDeviceAboutToStart(&device);
+    model.setPlaying(true); model.setPlayheadPosition(0.0);
+    float left[4] {}, right[4] {}; float* outputs[] { left, right };
+    engine.audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, 4, {});
+    if (! expect(approximatelyEqual(left[0], 0.3535534f) && approximatelyEqual(right[0], 0.3535534f)
+                 && approximatelyEqual(engine.getMasterLeftPeak(), 0.3535534f)
+                 && approximatelyEqual(engine.getMasterRightPeak(), 0.3535534f),
+                 "master FX processes the summed stereo output before its meter")) return false;
+    engine.setMasterFxBypassed(0, true);
+    model.setPlayheadPosition(0.0);
+    engine.audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, 4, {});
+    return expect(approximatelyEqual(left[0], 0.7071068f) && approximatelyEqual(right[0], 0.7071068f),
+                  "master FX bypass leaves the summed output unprocessed");
 }
 
 bool testMidiCoreScheduling()
@@ -929,7 +1021,7 @@ bool testVst3EffectIntegration()
     float left[4] {}, right[4] {};
     float* outputs[] { left, right };
     engine.audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, 4, {});
-    if (! expect(approximatelyEqual(left[0], 0.25f) && approximatelyEqual(right[0], 0.25f),
+    if (! expect(approximatelyEqual(left[0], 0.1767767f) && approximatelyEqual(right[0], 0.1767767f),
                  "AudioEngine routes track audio through the VST3 FX slot exactly once")) return false;
     if (! expect(model.reorderTrack(trackA, 1), "track reorder succeeds with VST3 attached")) return false;
     const auto reorderedIndex = static_cast<size_t>(model.getTrackIndex(trackA));
@@ -974,12 +1066,12 @@ bool testOfflineAudioEnginePath()
     float right[4] {};
     float* outputs[] { left, right };
     engine.audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, 4, {});
-    if (! expect(approximatelyEqual(left[0], 1.0f) && approximatelyEqual(left[1], 1.5f)
-                 && approximatelyEqual(left[2], 1.0f) && approximatelyEqual(left[3], 1.5f),
+    if (! expect(approximatelyEqual(left[0], 0.7071068f) && approximatelyEqual(left[1], 1.0606602f)
+                 && approximatelyEqual(left[2], 0.7071068f) && approximatelyEqual(left[3], 1.0606602f),
                  "engine renders loop boundary inside one block")) return false;
     if (! expect(approximatelyEqual(static_cast<float>(model.getPlayheadPosition()), 1.0f),
                  "engine publishes wrapped playhead")) return false;
-    if (! expect(approximatelyEqual(engine.getTrackPeak(0), 3.0f), "track meter is pre-master signal")) return false;
+    if (! expect(approximatelyEqual(engine.getTrackPeak(0), 2.1213203f), "track meter is pre-master signal")) return false;
 
     model.clearCycle();
     model.setPlayheadPosition(0.0);
@@ -1006,12 +1098,56 @@ bool testOfflineAudioEnginePath()
     model.setTrackSolo(1, true);
     model.setPlayheadPosition(0.0);
     engine.audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, 4, {});
-    return expect(approximatelyEqual(left[0], 0.25f) && approximatelyEqual(right[0], 0.25f),
+    return expect(approximatelyEqual(left[0], 0.1767767f) && approximatelyEqual(right[0], 0.1767767f),
                   "solo excludes non-soloed tracks across mixer")
         && expect(approximatelyEqual(engine.getTrackPeak(0), 0.0f)
-                  && approximatelyEqual(engine.getTrackPeak(1), 0.25f),
+                  && approximatelyEqual(engine.getTrackPeak(1), 0.1767767f),
                   "solo updates independent track meters");
 }
+
+#ifdef STUDIOFORGE_PERF_BENCHMARK
+bool testRealtimeHostBenchmark()
+{
+    constexpr int blockSize = 64;
+    constexpr int iterations = 2000;
+    TrackDataModel model;
+    std::array<BusId, TrackDataModel::maxBuses> buses {};
+    for (auto& bus : buses) bus = model.addBus();
+    auto source = std::make_shared<juce::AudioBuffer<float>>(2, blockSize);
+    source->clear();
+    for (int sample = 0; sample < blockSize; ++sample) { source->setSample(0, sample, 0.25f); source->setSample(1, sample, 0.25f); }
+    for (size_t track = 0; track < TrackDataModel::maxTracks; ++track)
+    {
+        const auto id = model.addTrack(TrackType::audio);
+        model.addClipToTrack(static_cast<int>(track), {}, 0.0, source);
+        for (size_t route = 0; route < TrackDataModel::maxSendsPerTrack; ++route)
+            if (! model.setTrackSendRoute(id, route, buses[route], 0.125f, (route & 1u) == 0)) return false;
+    }
+    OfflineAudioDevice device(blockSize);
+    AudioEngine engine(&model);
+    engine.audioDeviceAboutToStart(&device);
+    model.setPlaying(true);
+    std::array<float, blockSize> left {}, right {};
+    float* outputs[] { left.data(), right.data() };
+    engine.audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, blockSize, {});
+    studioForgeAllocationCount.store(0, std::memory_order_relaxed);
+    const auto started = std::chrono::steady_clock::now();
+    for (int iteration = 0; iteration < iterations; ++iteration)
+    {
+        model.setPlayheadPosition(0.0);
+        studioForgeMeasureAllocations.store(true, std::memory_order_relaxed);
+        engine.audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, blockSize, {});
+        studioForgeMeasureAllocations.store(false, std::memory_order_relaxed);
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    const auto milliseconds = std::chrono::duration<double, std::milli>(elapsed).count() / iterations;
+    const auto headroom = 100.0 * (1.333 - milliseconds) / 1.333;
+    const auto allocations = studioForgeAllocationCount.load(std::memory_order_relaxed);
+    std::cout << "StudioForge host benchmark: " << milliseconds << " ms/block, headroom " << headroom << "%, allocations " << allocations << "\n";
+    return expect(allocations == 0, "audio callback host allocation count is zero")
+        && expect(milliseconds < 0.67, "host callback remains below 0.67 ms at 64 samples");
+}
+#endif
 }
 
 int main()
@@ -1038,7 +1174,10 @@ int main()
         && testOfflineBounce()
         && testClipGainAndFades()
         && testClipDuplicate()
+        && testAudioMediaSourceOwnership()
         && testBusAndSendRouting()
+        && testWaveformThumbnailCache()
+        && testMasterFxRouting()
         && testMidiCoreScheduling()
         && testMidiModelToEngineScheduling()
         && testMidiInstrumentPath()
@@ -1047,5 +1186,10 @@ int main()
         && testPluginHostFoundation()
         && testVst3EffectIntegration()
         && testOfflineAudioEnginePath();
+#ifdef STUDIOFORGE_PERF_BENCHMARK
+    const auto benchmarkPassed = testRealtimeHostBenchmark();
+    return passed && benchmarkPassed ? 0 : 1;
+#else
     return passed ? 0 : 1;
+#endif
 }

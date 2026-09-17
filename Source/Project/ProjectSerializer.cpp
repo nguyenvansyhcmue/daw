@@ -149,8 +149,25 @@ juce::Result parseProject(const juce::File& file, ProjectState& state)
                 || ! readDouble(*track, "sendAmount", sendAmount))
                 return juce::Result::fail("Track bus routing is malformed");
             parsedTrack.outputBus = { outputBus };
-            parsedTrack.sendBus = { sendBus };
-            parsedTrack.sendAmount = static_cast<float>(sendAmount);
+            if (sendBus != 0 && sendAmount > 0.0)
+            {
+                parsedTrack.sends[0] = { { sendBus }, static_cast<float>(sendAmount), false };
+                parsedTrack.activeSendCount = 1;
+            }
+        }
+        if (version >= 8)
+        {
+            const auto* sends = track->getChildByName("Sends");
+            if (sends == nullptr) return juce::Result::fail("Track is missing Sends");
+            for (const auto* send : sends->getChildIterator())
+            {
+                if (! send->hasTagName("Send") || parsedTrack.activeSendCount >= PersistedTrackState::maxSends)
+                    return juce::Result::fail("Track send matrix is malformed");
+                uint64_t bus = 0; double level = 0.0; bool pre = false;
+                if (! readUnsigned(*send, "bus", bus) || ! readDouble(*send, "level", level) || ! readBool(*send, "preFader", pre))
+                    return juce::Result::fail("Track send route is malformed");
+                parsedTrack.sends[parsedTrack.activeSendCount++] = { { bus }, static_cast<float>(level), pre };
+            }
         }
         if (version >= 4)
         {
@@ -280,8 +297,16 @@ juce::Result ProjectSerializer::save(const TrackDataModel& model, const juce::Fi
         element->setAttribute("inputMonitoring", track.inputMonitoring ? 1 : 0);
         element->setAttribute("inputChannel", track.inputChannel);
         element->setAttribute("outputBus", juce::String(track.outputBus.value));
-        element->setAttribute("sendBus", juce::String(track.sendBus.value));
-        element->setAttribute("sendAmount", static_cast<double>(track.sendAmount));
+        element->setAttribute("sendBus", "0");
+        element->setAttribute("sendAmount", 0.0);
+        auto* sends = element->createNewChildElement("Sends");
+        for (size_t i = 0; i < track.activeSendCount; ++i)
+        {
+            auto* send = sends->createNewChildElement("Send");
+            send->setAttribute("bus", juce::String(track.sends[i].targetBus.value));
+            send->setAttribute("level", static_cast<double>(track.sends[i].level));
+            send->setAttribute("preFader", track.sends[i].preFader ? 1 : 0);
+        }
         auto* clips = element->createNewChildElement("Clips");
         for (const auto& clip : track.clips)
         {

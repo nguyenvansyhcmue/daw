@@ -12,7 +12,7 @@ const auto accentBlue = juce::Colour(0xff8098b5);
 const auto accentCyan = juce::Colour(0xffb7cbe0);
 
 void drawPremiumWaveform(juce::Graphics& g, const AudioClipState& clip,
-                         juce::Rectangle<float> clipBounds)
+                         const WaveformThumbnail* thumbnail, juce::Rectangle<float> clipBounds)
 {
     juce::Graphics::ScopedSaveState savedState(g);
     g.setImageResamplingQuality(juce::Graphics::highResamplingQuality);
@@ -26,32 +26,20 @@ void drawPremiumWaveform(juce::Graphics& g, const AudioClipState& clip,
     const auto waveformBounds = body.reduced(4.0f, 2.0f);
     const auto centreY = waveformBounds.getCentreY();
     const auto halfHeight = waveformBounds.getHeight() * 0.46f;
-    const auto sampleCount = clip.cachedBuffer != nullptr ? clip.cachedBuffer->getNumSamples() : 0;
-    const auto channelCount = clip.cachedBuffer != nullptr ? clip.cachedBuffer->getNumChannels() : 0;
-
-    if (sampleCount > 0 && channelCount > 0 && waveformBounds.getWidth() > 2.0f)
+    if (thumbnail != nullptr && ! thumbnail->isEmpty() && waveformBounds.getWidth() > 2.0f)
     {
         juce::Path waveform;
         const auto pixelCount = juce::jmax(1, juce::roundToInt(waveformBounds.getWidth()));
+        const auto sourceStart = clip.sourceOffsetSamples;
+        const auto sourceEnd = sourceStart + clip.durationSamples;
         waveform.startNewSubPath(waveformBounds.getX(), centreY);
 
         for (int pixel = 0; pixel <= pixelCount; ++pixel)
         {
-            const auto firstSample = juce::jmin(sampleCount - 1, static_cast<int>(
-                (static_cast<double>(pixel) / pixelCount) * sampleCount));
-            const auto lastSample = juce::jmax(firstSample + 1,
-                                               static_cast<int>(
-                                                   (static_cast<double>(pixel + 1) / pixelCount)
-                                                   * sampleCount));
-            const auto count = juce::jmin(sampleCount, lastSample) - firstSample;
-            auto peak = 0.0f;
-            for (int channel = 0; channel < channelCount; ++channel)
-            {
-                const auto range = juce::FloatVectorOperations::findMinAndMax(
-                    clip.cachedBuffer->getReadPointer(channel, firstSample), count);
-                peak = juce::jmax(peak, juce::jmax(std::abs(range.getStart()),
-                                                   std::abs(range.getEnd())));
-            }
+            const auto firstSample = sourceStart + (sourceEnd - sourceStart) * pixel / pixelCount;
+            const auto lastSample = sourceStart + (sourceEnd - sourceStart) * (pixel + 1) / pixelCount;
+            const auto peakRange = thumbnail->peakForSourceRange(firstSample, lastSample);
+            const auto peak = juce::jmax(std::abs(peakRange.minimum), std::abs(peakRange.maximum));
 
             const auto x = waveformBounds.getX()
                 + waveformBounds.getWidth() * static_cast<float>(pixel) / pixelCount;
@@ -60,21 +48,10 @@ void drawPremiumWaveform(juce::Graphics& g, const AudioClipState& clip,
 
         for (int pixel = pixelCount; pixel >= 0; --pixel)
         {
-            const auto firstSample = juce::jmin(sampleCount - 1, static_cast<int>(
-                (static_cast<double>(pixel) / pixelCount) * sampleCount));
-            const auto lastSample = juce::jmax(firstSample + 1,
-                                               static_cast<int>(
-                                                   (static_cast<double>(pixel + 1) / pixelCount)
-                                                   * sampleCount));
-            const auto count = juce::jmin(sampleCount, lastSample) - firstSample;
-            auto peak = 0.0f;
-            for (int channel = 0; channel < channelCount; ++channel)
-            {
-                const auto range = juce::FloatVectorOperations::findMinAndMax(
-                    clip.cachedBuffer->getReadPointer(channel, firstSample), count);
-                peak = juce::jmax(peak, juce::jmax(std::abs(range.getStart()),
-                                                   std::abs(range.getEnd())));
-            }
+            const auto firstSample = sourceStart + (sourceEnd - sourceStart) * pixel / pixelCount;
+            const auto lastSample = sourceStart + (sourceEnd - sourceStart) * (pixel + 1) / pixelCount;
+            const auto peakRange = thumbnail->peakForSourceRange(firstSample, lastSample);
+            const auto peak = juce::jmax(std::abs(peakRange.minimum), std::abs(peakRange.maximum));
 
             const auto x = waveformBounds.getX()
                 + waveformBounds.getWidth() * static_cast<float>(pixel) / pixelCount;
@@ -99,6 +76,14 @@ void drawPremiumWaveform(juce::Graphics& g, const AudioClipState& clip,
                                        waveformBounds.getRight(), centreY),
                      dashLengths, 2, 1.0f);
 
+    if (thumbnail == nullptr && clip.mediaStatus != AudioMediaStatus::Ready)
+    {
+        g.setColour(juce::Colours::white.withAlpha(0.45f));
+        g.setFont(10.0f);
+        g.drawText(clip.mediaStatus == AudioMediaStatus::DecodeFailed ? "Media unavailable" : "Preparing waveform…",
+                   waveformBounds, juce::Justification::centred, false);
+    }
+
     const auto label = clip.clipName.isEmpty() ? clip.sourceFile.getFileName() : clip.clipName;
     const auto labelBounds = juce::Rectangle<float>(body.getX() + 5.0f, body.getY() + 4.0f,
                                                     juce::jmin(body.getWidth() - 10.0f, 150.0f), 18.0f);
@@ -112,32 +97,54 @@ void drawPremiumWaveform(juce::Graphics& g, const AudioClipState& clip,
 class AudioLoadJob final : public juce::ThreadPoolJob
 {
 public:
-    AudioLoadJob(juce::Component::SafePointer<ArrangeWindow> owner,
-                 TrackDataModel* model, juce::File file, int trackIndex, double startSample)
+    AudioLoadJob(WaveformThumbnailCache* thumbnails, juce::File file,
+                 std::function<void(const juce::File&, std::shared_ptr<juce::AudioBuffer<float>>)> completion)
         : juce::ThreadPoolJob("Audio file loader"),
-          safeOwner(owner),
-          trackModel(model),
+          waveformCache(thumbnails),
           sourceFile(std::move(file)),
-          targetTrack(trackIndex),
-          targetSample(startSample)
+          onCompletion(std::move(completion))
     {
     }
 
     JobStatus runJob() override
     {
         std::shared_ptr<juce::AudioBuffer<float>> buffer;
-        if (MediaReloadService::decode(sourceFile, buffer).failed())
-            return jobHasFinished;
+        const auto decoded = MediaReloadService::decode(sourceFile, buffer).wasOk();
+        if (decoded && waveformCache != nullptr)
+            waveformCache->prepare(sourceFile, buffer);
 
-        auto owner = safeOwner;
-        auto* model = trackModel;
         auto file = sourceFile;
-        const auto track = targetTrack;
-        const auto start = targetSample;
-        juce::MessageManager::callAsync([owner, model, file, track, start, buffer]
+        juce::MessageManager::callAsync([completion = onCompletion, file, buffer]
         {
-            if (owner != nullptr && model != nullptr)
-                model->addClipToTrack(track, file, start, buffer);
+            if (completion != nullptr)
+                completion(file, buffer);
+        });
+        return jobHasFinished;
+    }
+
+private:
+    WaveformThumbnailCache* waveformCache = nullptr;
+    juce::File sourceFile;
+    std::function<void(const juce::File&, std::shared_ptr<juce::AudioBuffer<float>>)> onCompletion;
+};
+
+class WaveformPreparationJob final : public juce::ThreadPoolJob
+{
+public:
+    WaveformPreparationJob(juce::Component::SafePointer<ArrangeWindow> owner,
+                           WaveformThumbnailCache* thumbnails, juce::File file,
+                           std::shared_ptr<juce::AudioBuffer<float>> buffer)
+        : juce::ThreadPoolJob("Waveform thumbnail preparation"), safeOwner(owner),
+          waveformCache(thumbnails), sourceFile(std::move(file)), decodedBuffer(std::move(buffer))
+    {
+    }
+
+    JobStatus runJob() override
+    {
+        if (waveformCache != nullptr)
+            waveformCache->prepare(sourceFile, decodedBuffer);
+        juce::MessageManager::callAsync([owner = safeOwner]
+        {
             if (owner != nullptr)
                 owner->repaint();
         });
@@ -146,16 +153,21 @@ public:
 
 private:
     juce::Component::SafePointer<ArrangeWindow> safeOwner;
-    TrackDataModel* trackModel = nullptr;
+    WaveformThumbnailCache* waveformCache = nullptr;
     juce::File sourceFile;
-    int targetTrack = 0;
-    double targetSample = 0.0;
+    std::shared_ptr<juce::AudioBuffer<float>> decodedBuffer;
 };
 }
 
 TrackHeaderPanel::TrackHeaderPanel(TrackDataModel* model)
     : trackModel(model)
 {
+    startTimerHz(30);
+}
+
+void TrackHeaderPanel::timerCallback()
+{
+    repaint();
 }
 
 void TrackHeaderPanel::paint(juce::Graphics& g)
@@ -516,7 +528,8 @@ void TimelineGrid::paint(juce::Graphics& g)
             if (rect.getWidth() <= 0.0f)
                 continue;
 
-            drawPremiumWaveform(g, clip, rect);
+            const auto thumbnail = waveformCache != nullptr ? waveformCache->find(clip.sourceFile) : nullptr;
+            drawPremiumWaveform(g, clip, thumbnail.get(), rect);
             if (track == selectedTrack && static_cast<int>(&clip - state.clips.data()) == selectedClip)
             {
                 g.setColour(juce::Colour(0xffc9e5ff));
@@ -570,6 +583,7 @@ ArrangeWindow::ArrangeWindow(TrackDataModel* model)
       timelineGrid(model)
 {
     trackModel = model;
+    timelineGrid.setWaveformCache(&waveformCache);
     addAndMakeVisible(trackHeaderPanel);
     addAndMakeVisible(timelineRuler);
     addAndMakeVisible(timelineGrid);
@@ -669,7 +683,7 @@ void ArrangeWindow::fileDragMove(const juce::StringArray&, int, int y)
         return;
 
     const auto count = static_cast<int>(trackModel->getTrackCount());
-    draggedTrack = juce::jlimit(0, juce::jmax(0, count - 1),
+    draggedTrack = juce::jlimit(0, count,
                                  (y - 29) / juce::jmax(1, trackModel->getTrackHeight()));
     isDraggingOver = true;
     repaint();
@@ -689,8 +703,10 @@ void ArrangeWindow::filesDropped(const juce::StringArray& files, int x, int y)
         return;
 
     const auto trackCount = static_cast<int>(trackModel->getTrackCount());
-    const auto track = juce::jlimit(0, juce::jmax(0, trackCount - 1),
-                                    (y - 29) / juce::jmax(1, trackModel->getTrackHeight()));
+    const auto candidateTrack = (y - 29) / juce::jmax(1, trackModel->getTrackHeight());
+    const auto track = candidateTrack >= 0 && candidateTrack < trackCount
+        && trackModel->getTrack(static_cast<size_t>(candidateTrack)).type == TrackType::audio
+            ? candidateTrack : -1;
     const auto timelineX = juce::jmax(0, x - 210);
     const auto pixelsPerSecond = 80.0 * trackModel->getHorizontalZoom();
     const auto rawSample = (static_cast<double>(timelineX) / pixelsPerSecond)
@@ -710,8 +726,79 @@ void ArrangeWindow::importAudioFile(const juce::File& file, int trackIndex, doub
     if (trackModel == nullptr || ! file.existsAsFile())
         return;
 
-    const auto clampedTrack = juce::jlimit(0, juce::jmax(0, static_cast<int>(trackModel->getTrackCount()) - 1), trackIndex);
-    loader.addJob(new AudioLoadJob(juce::Component::SafePointer<ArrangeWindow>(this),
-                                   trackModel, file, clampedTrack,
-                                   trackModel->getSnappedSamplePosition(startSample, 0.25)), true);
+    const auto resolvedTrack = resolveAudioImportTrack(trackIndex);
+    if (resolvedTrack < 0)
+        return;
+    const auto trackId = trackModel->getTrackId(static_cast<size_t>(resolvedTrack));
+    if (! trackId.isValid())
+        return;
+    if (onTrackSelected != nullptr)
+        onTrackSelected(resolvedTrack);
+
+    const auto snappedStart = trackModel->getSnappedSamplePosition(startSample, 0.25);
+    if (const auto cachedSource = trackModel->findDecodedAudioSource(file); cachedSource != nullptr)
+    {
+        trackModel->addClipToTrack(resolvedTrack, file, snappedStart, cachedSource);
+        repaint();
+        return;
+    }
+
+    const auto sourceKey = AudioMediaPool::canonicalPath(file);
+    auto& pending = pendingImportsBySource[sourceKey];
+    const auto shouldStartDecode = pending.empty();
+    pending.push_back({ trackId, snappedStart });
+    if (! shouldStartDecode)
+        return;
+
+    const auto safeOwner = juce::Component::SafePointer<ArrangeWindow>(this);
+    loader.addJob(new AudioLoadJob(&waveformCache, file,
+                                   [safeOwner](const juce::File& sourceFile,
+                                               std::shared_ptr<juce::AudioBuffer<float>> decodedBuffer)
+    {
+        if (safeOwner != nullptr)
+            safeOwner->completeAudioImport(sourceFile, std::move(decodedBuffer));
+    }), true);
+}
+
+void ArrangeWindow::completeAudioImport(const juce::File& sourceFile,
+                                        std::shared_ptr<juce::AudioBuffer<float>> decodedBuffer)
+{
+    const auto sourceKey = AudioMediaPool::canonicalPath(sourceFile);
+    const auto pending = std::move(pendingImportsBySource[sourceKey]);
+    pendingImportsBySource.erase(sourceKey);
+    if (trackModel == nullptr || decodedBuffer == nullptr)
+    {
+        repaint();
+        return;
+    }
+
+    for (const auto& request : pending)
+        if (const auto trackIndex = trackModel->getTrackIndex(request.trackId); trackIndex >= 0)
+            trackModel->addClipToTrack(trackIndex, sourceFile, request.startSample, decodedBuffer);
+    repaint();
+}
+
+void ArrangeWindow::requestWaveformPreparation()
+{
+    if (trackModel == nullptr)
+        return;
+
+    for (size_t trackIndex = 0; trackIndex < trackModel->getTrackCount(); ++trackIndex)
+        for (const auto& clip : trackModel->getTrack(trackIndex).clips)
+            if (clip.cachedBuffer != nullptr && waveformCache.find(clip.sourceFile) == nullptr)
+                loader.addJob(new WaveformPreparationJob(juce::Component::SafePointer<ArrangeWindow>(this),
+                                                         &waveformCache, clip.sourceFile, clip.cachedBuffer), true);
+}
+
+int ArrangeWindow::resolveAudioImportTrack(int requestedTrackIndex)
+{
+    if (trackModel == nullptr)
+        return -1;
+
+    if (requestedTrackIndex >= 0 && requestedTrackIndex < static_cast<int>(trackModel->getTrackCount())
+        && trackModel->getTrack(static_cast<size_t>(requestedTrackIndex)).type == TrackType::audio)
+        return requestedTrackIndex;
+
+    const auto id = trackModel->addTrack(TrackType::audio);
+    return id.isValid() ? trackModel->getTrackIndex(id) : -1;
 }

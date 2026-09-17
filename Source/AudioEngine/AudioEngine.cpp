@@ -4,10 +4,24 @@
 #include <algorithm>
 #include <cmath>
 
+namespace
+{
+float peakForChannel(const juce::AudioBuffer<float>& buffer, int channel, int numSamples) noexcept
+{
+    if (channel >= buffer.getNumChannels()) return 0.0f;
+    auto peak = 0.0f;
+    const auto* samples = buffer.getReadPointer(channel);
+    for (int sample = 0; sample < numSamples; ++sample)
+        peak = juce::jmax(peak, std::abs(samples[sample]));
+    return peak;
+}
+}
+
 AudioEngine::AudioEngine(TrackDataModel* model)
     : dataModel(model)
 {
     graph.addNode(std::make_unique<GainNode>(1.0f));
+    publishMasterFxRack(std::make_unique<TrackDataModel::FxRackSnapshot>());
     if (dataModel != nullptr) recordingSession = std::make_unique<RecordingSession>(*dataModel);
 }
 
@@ -178,6 +192,16 @@ float AudioEngine::getMasterPeak() const noexcept
     return masterPeak.load(std::memory_order_relaxed);
 }
 
+float AudioEngine::getMasterLeftPeak() const noexcept
+{
+    return masterLeftPeak.load(std::memory_order_relaxed);
+}
+
+float AudioEngine::getMasterRightPeak() const noexcept
+{
+    return masterRightPeak.load(std::memory_order_relaxed);
+}
+
 void AudioEngine::setFxProcessor(size_t trackIndex, size_t slot,
                                  std::shared_ptr<AudioEffectProcessor> processor)
 {
@@ -197,6 +221,43 @@ void AudioEngine::setFxBypassed(size_t trackIndex, size_t slot, bool bypassed) n
 {
     if (dataModel != nullptr)
         dataModel->setFxBypassed(trackIndex, slot, bypassed);
+}
+
+const TrackDataModel::FxRackSnapshot* AudioEngine::getMasterFxRackSnapshot() const noexcept
+{
+    return publishedMasterFxRack.load(std::memory_order_acquire);
+}
+
+void AudioEngine::setMasterFxProcessor(size_t slot, std::shared_ptr<AudioEffectProcessor> processor)
+{
+    if (slot >= TrackDataModel::maxFxSlots) return;
+    auto* device = deviceManager.getCurrentAudioDevice();
+    const auto sampleRate = device != nullptr ? device->getCurrentSampleRate()
+                                              : (dataModel != nullptr ? dataModel->getSampleRate() : 44100.0);
+    const auto blockSize = device != nullptr ? device->getCurrentBufferSizeSamples() : 512;
+    if (processor != nullptr) processor->prepareToPlay(sampleRate, blockSize, 2);
+
+    auto updated = std::make_unique<TrackDataModel::FxRackSnapshot>();
+    if (const auto* current = getMasterFxRackSnapshot(); current != nullptr) *updated = *current;
+    updated->processors[slot] = std::move(processor);
+    publishMasterFxRack(std::move(updated));
+}
+
+void AudioEngine::setMasterFxBypassed(size_t slot, bool bypassed)
+{
+    if (slot >= TrackDataModel::maxFxSlots) return;
+    auto updated = std::make_unique<TrackDataModel::FxRackSnapshot>();
+    if (const auto* current = getMasterFxRackSnapshot(); current != nullptr) *updated = *current;
+    updated->bypass[slot] = bypassed;
+    publishMasterFxRack(std::move(updated));
+}
+
+void AudioEngine::publishMasterFxRack(std::unique_ptr<const TrackDataModel::FxRackSnapshot> snapshot)
+{
+    auto previous = std::move(masterFxRack);
+    masterFxRack = std::move(snapshot);
+    publishedMasterFxRack.store(masterFxRack.get(), std::memory_order_release);
+    if (previous != nullptr) retiredMasterFxRacks.push_back(std::move(previous));
 }
 
 void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
@@ -225,6 +286,12 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
                     processor->prepareToPlay(device->getCurrentSampleRate(), processingBuffer.getNumSamples(), 2);
         }
     }
+
+    if (device != nullptr && device->getCurrentSampleRate() > 0.0)
+        if (const auto* rack = getMasterFxRackSnapshot(); rack != nullptr)
+            for (const auto& processor : rack->processors)
+                if (processor != nullptr)
+                    processor->prepareToPlay(device->getCurrentSampleRate(), processingBuffer.getNumSamples(), 2);
 }
 
 void AudioEngine::audioDeviceStopped()
@@ -352,6 +419,11 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
         }
 
         const auto& track = structure->tracks[trackIndex];
+        for (size_t route = 0; route < track.activeSendCount; ++route)
+            if (track.sends[route].preFader)
+                if (const auto bus = structure->getBusIndex(track.sends[route].targetBus); bus >= 0 && track.sends[route].level > 0.0f)
+                    for (int channel = 0; channel < juce::jmin(trackBuffer.getNumChannels(), busBuffers[static_cast<size_t>(bus)].getNumChannels()); ++channel)
+                        juce::FloatVectorOperations::addWithMultiply(busBuffers[static_cast<size_t>(bus)].getWritePointer(channel), trackBuffer.getReadPointer(channel), track.sends[route].level, numSamples);
         TrackMixing::apply(trackBuffer, numSamples,
                            { track.volume, track.pan,
                              !track.muted && (!anyTrackSoloed || track.solo) });
@@ -361,24 +433,40 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
         auto& destination = outputBusIndex >= 0 ? busBuffers[static_cast<size_t>(outputBusIndex)] : processingBuffer;
         for (int channel = 0; channel < juce::jmin(trackBuffer.getNumChannels(), destination.getNumChannels()); ++channel)
             juce::FloatVectorOperations::add(destination.getWritePointer(channel), trackBuffer.getReadPointer(channel), numSamples);
-        const auto sendBusIndex = structure->getBusIndex(track.sendBus);
-        if (sendBusIndex >= 0 && track.sendAmount > 0.0f)
-            for (int channel = 0; channel < juce::jmin(trackBuffer.getNumChannels(), busBuffers[static_cast<size_t>(sendBusIndex)].getNumChannels()); ++channel)
-                busBuffers[static_cast<size_t>(sendBusIndex)].addFrom(channel, 0, trackBuffer, channel, 0, numSamples, track.sendAmount);
+        for (size_t route = 0; route < track.activeSendCount; ++route)
+            if (! track.sends[route].preFader)
+                if (const auto bus = structure->getBusIndex(track.sends[route].targetBus); bus >= 0 && track.sends[route].level > 0.0f)
+                for (int channel = 0; channel < juce::jmin(trackBuffer.getNumChannels(), busBuffers[static_cast<size_t>(bus)].getNumChannels()); ++channel)
+                    juce::FloatVectorOperations::addWithMultiply(busBuffers[static_cast<size_t>(bus)].getWritePointer(channel), trackBuffer.getReadPointer(channel), track.sends[route].level, numSamples);
     }
 
     for (size_t busIndex = 0; busIndex < structure->busCount; ++busIndex)
     {
         const auto& bus = structure->buses[busIndex];
+        if (bus.fxRack != nullptr)
+            for (size_t slot = 0; slot < TrackDataModel::maxFxSlots; ++slot)
+                if (const auto& processor = bus.fxRack->processors[slot]; processor != nullptr && ! bus.fxRack->bypass[slot])
+                    processor->processBlock(busBuffers[busIndex]);
         if (bus.muted) busBuffers[busIndex].clear(0, numSamples);
-        else busBuffers[busIndex].applyGain(0, 0, numSamples, bus.gain), busBuffers[busIndex].applyGain(1, 0, numSamples, bus.gain);
+        else
+        {
+            for (int channel = 0; channel < busBuffers[busIndex].getNumChannels(); ++channel)
+                busBuffers[busIndex].applyGain(channel, 0, numSamples, bus.gain);
+        }
         busPeaks[busIndex].store(TrackMixing::peak(busBuffers[busIndex], numSamples), std::memory_order_relaxed);
         for (int channel = 0; channel < juce::jmin(busBuffers[busIndex].getNumChannels(), processingBuffer.getNumChannels()); ++channel)
             juce::FloatVectorOperations::add(processingBuffer.getWritePointer(channel), busBuffers[busIndex].getReadPointer(channel), numSamples);
     }
 
+    if (const auto* rack = publishedMasterFxRack.load(std::memory_order_acquire); rack != nullptr)
+        for (size_t slot = 0; slot < TrackDataModel::maxFxSlots; ++slot)
+            if (const auto& processor = rack->processors[slot]; processor != nullptr && !rack->bypass[slot])
+                processor->processBlock(processingBuffer);
+
     graph.process(processingBuffer, numSamples);
     masterPeak.store(TrackMixing::peak(processingBuffer, numSamples), std::memory_order_relaxed);
+    masterLeftPeak.store(peakForChannel(processingBuffer, 0, numSamples), std::memory_order_relaxed);
+    masterRightPeak.store(peakForChannel(processingBuffer, 1, numSamples), std::memory_order_relaxed);
 
     for (int channel = 0; channel < juce::jmin(numOutputChannels, processingBuffer.getNumChannels()); ++channel)
         juce::FloatVectorOperations::copy(outputChannelData[channel], processingBuffer.getReadPointer(channel), numSamples);

@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Solution>
+	<Configurations>
+		<BuildType Name="Debug"/>
+		<BuildType Name="Release"/>
+		<BuildType Name="MinSizeRel"/>
+		<BuildType Name="RelWithDebInfo"/>
+		<Platform Name="x64"/>
+	</Configurations>
+	<Project Path="StudioForgeCoreTests.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="c1bd8031-5f4b-3f5d-ab29-34d5ea83c759">
+		<BuildDependency Project="StudioForgeVst3TestEffect_VST3.vcxproj"/>
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+	</Project>
+	<Project Path="StudioForgeDAW.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="6068df89-0e58-3f93-81e5-64696be5c689">
+		<BuildDependency Project="StudioForgeDAW_rc_lib.vcxproj"/>
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+	</Project>
+	<Project Path="StudioForgeDAW_rc_lib.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="1ff045d4-d8ae-3db0-a789-adf1557ee586">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+	</Project>
+	<Project Path="StudioForgeVst3TestEffect_rc_lib.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="7d0ce619-7a1c-3fa6-9b3f-d0f077fa2941">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+	</Project>
+	<Project Path="juce_vst3_helper.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="bdcddff8-33d5-3249-8a61-941b4363735c">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+	</Project>
+	<Folder Name="/CMakePredefinedTargets/">
+		<Project Path="ALL_BUILD.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="b44837c9-df81-3c44-adf3-66c08d1c02f1" DefaultStartup="true">
+			<BuildDependency Project="StudioForgeCoreTests.vcxproj"/>
+			<BuildDependency Project="StudioForgeDAW.vcxproj"/>
+			<BuildDependency Project="StudioForgeDAW_rc_lib.vcxproj"/>
+			<BuildDependency Project="StudioForgeVst3TestEffect.vcxproj"/>
+			<BuildDependency Project="StudioForgeVst3TestEffect_VST3.vcxproj"/>
+			<BuildDependency Project="StudioForgeVst3TestEffect_rc_lib.vcxproj"/>
+			<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+			<BuildDependency Project="juce_vst3_helper.vcxproj"/>
+		</Project>
+		<Project Path="INSTALL.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="450ad5f4-1521-3ec2-b7d8-8ee2f63c967d">
+			<BuildDependency Project="ALL_BUILD.vcxproj"/>
+			<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+			<Build Solution="Debug|*" Project="false"/>
+			<Build Solution="Release|*" Project="false"/>
+			<Build Solution="MinSizeRel|*" Project="false"/>
+			<Build Solution="RelWithDebInfo|*" Project="false"/>
+		</Project>
+		<Project Path="RUN_TESTS.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="56f03ed8-c004-35a4-a4d7-f96cba051be7">
+			<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+			<Build Solution="Debug|*" Project="false"/>
+			<Build Solution="Release|*" Project="false"/>
+			<Build Solution="MinSizeRel|*" Project="false"/>
+			<Build Solution="RelWithDebInfo|*" Project="false"/>
+		</Project>
+		<Project Path="ZERO_CHECK.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="9ad9cbe9-7427-346d-ab36-86bc45bd861b"/>
+	</Folder>
+	<Folder Name="/CTestDashboardTargets/">
+		<Project Path="Continuous.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="8f62dd26-7695-3105-9303-44dbef117ae1">
+			<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+			<Build Solution="Debug|*" Project="false"/>
+			<Build Solution="Release|*" Project="false"/>
+			<Build Solution="MinSizeRel|*" Project="false"/>
+			<Build Solution="RelWithDebInfo|*" Project="false"/>
+		</Project>
+		<Project Path="Experimental.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="b44247ce-b8c5-3fd0-8ac2-414bc4f37fee">
+			<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+			<Build Solution="Debug|*" Project="false"/>
+			<Build Solution="Release|*" Project="false"/>
+			<Build Solution="MinSizeRel|*" Project="false"/>
+			<Build Solution="RelWithDebInfo|*" Project="false"/>
+		</Project>
+		<Project Path="Nightly.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="0e12055d-a265-3d42-879a-8c63b82789d5">
+			<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+			<Build Solution="Debug|*" Project="false"/>
+			<Build Solution="Release|*" Project="false"/>
+			<Build Solution="MinSizeRel|*" Project="false"/>
+			<Build Solution="RelWithDebInfo|*" Project="false"/>
+		</Project>
+		<Project Path="NightlyMemoryCheck.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="5eba0617-cab1-3778-9762-03356495140d">
+			<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+			<Build Solution="Debug|*" Project="false"/>
+			<Build Solution="Release|*" Project="false"/>
+			<Build Solution="MinSizeRel|*" Project="false"/>
+			<Build Solution="RelWithDebInfo|*" Project="false"/>
+		</Project>
+	</Folder>
+	<Folder Name="/StudioForgeVst3TestEffect/">
+		<Project Path="StudioForgeVst3TestEffect.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="2c95b23c-25ba-37c8-b40d-e1f8189d82a8">
+			<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		</Project>
+		<Project Path="StudioForgeVst3TestEffect_All.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="3e807744-e74c-3fe9-b324-5214b8495f7c">
+			<BuildDependency Project="StudioForgeVst3TestEffect_VST3.vcxproj"/>
+			<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+			<Build Solution="Debug|*" Project="false"/>
+			<Build Solution="Release|*" Project="false"/>
+			<Build Solution="MinSizeRel|*" Project="false"/>
+			<Build Solution="RelWithDebInfo|*" Project="false"/>
+		</Project>
+		<Project Path="StudioForgeVst3TestEffect_VST3.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="f9bcb6bb-1237-341f-9760-e419c942a236">
+			<BuildDependency Project="StudioForgeVst3TestEffect.vcxproj"/>
+			<BuildDependency Project="StudioForgeVst3TestEffect_rc_lib.vcxproj"/>
+			<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+			<BuildDependency Project="juce_vst3_helper.vcxproj"/>
+		</Project>
+	</Folder>
+</Solution>

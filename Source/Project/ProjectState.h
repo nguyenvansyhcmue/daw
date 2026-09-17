@@ -5,6 +5,7 @@
 #include "../Models/ProjectIdentifiers.h"
 
 #include <vector>
+#include <array>
 
 enum class TrackType : uint8_t { audio, instrument, externalMidi };
 
@@ -24,6 +25,8 @@ struct PersistedClipState
 
 struct PersistedTrackState
 {
+    struct SendRoute { BusId targetBus; float level = 1.0f; bool preFader = false; };
+    static constexpr size_t maxSends = 8;
     TrackId id;
     TrackType type = TrackType::audio;
     juce::String name;
@@ -34,8 +37,8 @@ struct PersistedTrackState
     bool inputMonitoring = false;
     int inputChannel = 0;
     BusId outputBus;
-    BusId sendBus;
-    float sendAmount = 0.0f;
+    std::array<SendRoute, maxSends> sends {};
+    uint8_t activeSendCount = 0;
     std::vector<PersistedClipState> clips;
 };
 
@@ -72,7 +75,7 @@ struct PersistedMidiClipState
 
 struct ProjectState
 {
-    static constexpr int formatVersion = 7;
+    static constexpr int formatVersion = 8;
 
     double bpm = 120.0;
     int timeSignatureNumerator = 4;

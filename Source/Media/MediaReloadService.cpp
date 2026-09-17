@@ -1,5 +1,6 @@
 #include "MediaReloadService.h"
 
+#include "AudioMediaPool.h"
 #include "../Models/TrackDataModel.h"
 
 #include <limits>
@@ -42,7 +43,7 @@ MediaReloadReport MediaReloadService::reloadProjectMedia(TrackDataModel& model)
                 if (clip.sourcePath.isNotEmpty()) report.missingMediaReferences.addIfNotAlreadyThere(clip.sourcePath);
                 continue;
             }
-            const auto path = file.getFullPathName();
+            const auto path = AudioMediaPool::canonicalPath(file);
             auto decoded = decodedByPath.find(path);
             if (decoded == decodedByPath.end())
             {

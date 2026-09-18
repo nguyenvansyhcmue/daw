@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 
 TrackDataModel::RealtimeSnapshotRead::RealtimeSnapshotRead(const TrackDataModel& owner) noexcept
     : model(owner)
@@ -239,8 +240,35 @@ bool TrackDataModel::removeBus(BusId id)
 {
     const auto found = std::find_if(busStates.begin(), busStates.end(), [id] (const BusState& bus) { return bus.id == id; });
     if (found == busStates.end()) return false;
+    const auto removedIndex = static_cast<size_t>(std::distance(busStates.begin(), found));
+    if (busFxRacks[removedIndex] != nullptr)
+        retiredBusFxRacks[0].push_back(std::move(busFxRacks[removedIndex]));
+    for (size_t index = removedIndex; index + 1 < maxBuses; ++index)
+    {
+        busFxRacks[index] = std::move(busFxRacks[index + 1]);
+        publishedBusFxRacks[index].store(publishedBusFxRacks[index + 1].load(std::memory_order_acquire),
+                                         std::memory_order_release);
+        for (auto& retired : retiredBusFxRacks[index + 1])
+            retiredBusFxRacks[index].push_back(std::move(retired));
+        retiredBusFxRacks[index + 1].clear();
+    }
+    busFxRacks[maxBuses - 1] = std::make_unique<FxRackSnapshot>();
+    publishedBusFxRacks[maxBuses - 1].store(busFxRacks[maxBuses - 1].get(), std::memory_order_release);
     busStates.erase(found);
-    for (auto& track : trackStates) { if (track.outputBus == id) track.outputBus = {}; for (size_t i = 0; i < track.activeSendCount;) { if (track.sends[i].targetBus == id) { for (size_t j = i + 1; j < track.activeSendCount; ++j) track.sends[j - 1] = track.sends[j]; --track.activeSendCount; } else ++i; } }
+    for (auto& track : trackStates)
+    {
+        if (track.outputBus == id)
+            track.outputBus = {};
+        uint8_t activeRoutes = 0;
+        for (auto& send : track.sends)
+        {
+            if (send.targetBus == id)
+                send = {};
+            if (send.targetBus.isValid())
+                ++activeRoutes;
+        }
+        track.activeSendCount = activeRoutes;
+    }
     publishRenderStructureSnapshot();
     markProjectModified();
     return true;
@@ -283,8 +311,9 @@ void TrackDataModel::setBusFxProcessor(BusId bus, size_t slot, std::shared_ptr<A
     updated->processors[slot] = std::move(processor);
     publishBusFxRackSnapshot(index, std::move(updated));
     publishRenderStructureSnapshot();
+    markProjectModified();
 }
-void TrackDataModel::setBusFxBypassed(BusId bus, size_t slot, bool bypassed) noexcept
+void TrackDataModel::setBusFxBypassed(BusId bus, size_t slot, bool bypassed)
 {
     if (slot >= maxFxSlots) return;
     const auto found = std::find_if(busStates.begin(), busStates.end(), [bus] (const BusState& state) { return state.id == bus; });
@@ -295,6 +324,7 @@ void TrackDataModel::setBusFxBypassed(BusId bus, size_t slot, bool bypassed) noe
     updated->bypass[slot] = bypassed;
     publishBusFxRackSnapshot(index, std::move(updated));
     publishRenderStructureSnapshot();
+    markProjectModified();
 }
 bool TrackDataModel::setTrackOutputBus(TrackId trackId, BusId bus)
 {
@@ -313,31 +343,64 @@ bool TrackDataModel::setTrackSendRoute(TrackId trackId, size_t route, BusId bus,
     if (route >= maxSendsPerTrack || ! bus.isValid() || std::none_of(busStates.begin(), busStates.end(), [bus] (const BusState& state) { return state.id == bus; })) return false;
     const auto index = getTrackIndex(trackId); if (index < 0) return false;
     auto& track = trackStates[static_cast<size_t>(index)];
-    track.sends[route] = { bus, juce::jlimit(0.0f, 1.0f, amount), preFader };
-    track.activeSendCount = static_cast<uint8_t>(juce::jmax<int>(track.activeSendCount, static_cast<int>(route + 1)));
+    const auto constrainedAmount = juce::jlimit(0.0f, 1.0f, amount);
+    track.sends[route] = { bus, constrainedAmount, preFader };
+    if (isPlaying() && track.sendAutomation[route].getMode() != AutomationMode::read)
+        try { track.sendAutomation[route].upsertPoint(getPlayheadPosition(), constrainedAmount); }
+        catch (const std::length_error&) {}
+    track.activeSendCount = static_cast<uint8_t>(std::count_if(track.sends.begin(), track.sends.end(),
+        [] (const TrackState::SendRoute& send) { return send.targetBus.isValid(); }));
     publishRenderStructureSnapshot(); markProjectModified(); return true;
+}
+bool TrackDataModel::clearTrackSendRoute(TrackId trackId, size_t route)
+{
+    const auto index = getTrackIndex(trackId);
+    if (index < 0 || route >= maxSendsPerTrack)
+        return false;
+
+    auto& track = trackStates[static_cast<size_t>(index)];
+    if (! track.sends[route].targetBus.isValid())
+        return false;
+    track.sends[route] = {};
+    track.activeSendCount = static_cast<uint8_t>(std::count_if(track.sends.begin(), track.sends.end(),
+        [] (const TrackState::SendRoute& send) { return send.targetBus.isValid(); }));
+    publishRenderStructureSnapshot();
+    markProjectModified();
+    return true;
 }
 bool TrackDataModel::clearTrackSend(TrackId trackId)
 {
     const auto index = getTrackIndex(trackId); if (index < 0) return false;
     auto& track = trackStates[static_cast<size_t>(index)];
     if (track.activeSendCount == 0) return true;
+    track.sends.fill({});
     track.activeSendCount = 0;
     publishRenderStructureSnapshot();
     markProjectModified();
     return true;
 }
 
-void TrackDataModel::setTrackVolume(size_t index, float value) noexcept
+void TrackDataModel::setTrackVolume(size_t index, float value)
 {
-    if (index < trackStates.size())
+    if (index >= trackStates.size())
+        return;
+
+    const auto constrainedValue = juce::jlimit(0.0f, 2.0f, value);
+    auto& track = trackStates[index];
+    if (track.volume.load(std::memory_order_relaxed) == constrainedValue)
+        return;
+
+    auto before = captureEditState();
+    track.volume.store(constrainedValue, std::memory_order_relaxed);
+    const auto mode = track.volumeAutomation.getMode();
+    if (isPlaying() && mode != AutomationMode::read)
     {
-        if (trackStates[index].volume.load(std::memory_order_relaxed) == juce::jlimit(0.0f, 2.0f, value)) return;
-        auto before = captureEditState();
-        trackStates[index].volume.store(juce::jlimit(0.0f, 2.0f, value), std::memory_order_relaxed);
-        publishRenderStructureSnapshot();
-        commitEdit(std::move(before));
+        try { track.volumeAutomation.upsertPoint(getPlayheadPosition(), constrainedValue); }
+        catch (const std::length_error&) {}
     }
+    publishRenderStructureSnapshot();
+    commitEdit(std::move(before));
+    sendChangeMessage();
 }
 void TrackDataModel::setTrackName(size_t index, const juce::String& value)
 {
@@ -353,16 +416,171 @@ void TrackDataModel::setTrackName(size_t index, const juce::String& value)
     commitEdit(std::move(before));
     sendChangeMessage();
 }
-void TrackDataModel::setTrackPan(size_t index, float value) noexcept
+void TrackDataModel::setTrackPan(size_t index, float value)
 {
-    if (index < trackStates.size())
+    if (index >= trackStates.size())
+        return;
+
+    const auto constrainedValue = juce::jlimit(-1.0f, 1.0f, value);
+    auto& track = trackStates[index];
+    if (track.pan.load(std::memory_order_relaxed) == constrainedValue)
+        return;
+
+    auto before = captureEditState();
+    track.pan.store(constrainedValue, std::memory_order_relaxed);
+    const auto mode = track.panAutomation.getMode();
+    if (isPlaying() && mode != AutomationMode::read)
     {
-        if (trackStates[index].pan.load(std::memory_order_relaxed) == juce::jlimit(-1.0f, 1.0f, value)) return;
+        try { track.panAutomation.upsertPoint(getPlayheadPosition(), constrainedValue); }
+        catch (const std::length_error&) {}
+    }
+    publishRenderStructureSnapshot();
+    commitEdit(std::move(before));
+    sendChangeMessage();
+}
+
+const AutomationLane* TrackDataModel::getTrackAutomationLane(size_t trackIndex, AutomationParameter parameter) const noexcept
+{
+    if (trackIndex >= trackStates.size())
+        return nullptr;
+
+    const auto& track = trackStates[trackIndex];
+    switch (parameter)
+    {
+        case AutomationParameter::trackVolume: return &track.volumeAutomation;
+        case AutomationParameter::trackPan:    return &track.panAutomation;
+        case AutomationParameter::sendLevel:   return nullptr;
+    }
+
+    return nullptr;
+}
+
+const AutomationLane* TrackDataModel::getTrackSendAutomationLane(size_t trackIndex, size_t sendSlot) const noexcept
+{
+    if (trackIndex >= trackStates.size() || sendSlot >= maxSendsPerTrack)
+        return nullptr;
+    return &trackStates[trackIndex].sendAutomation[sendSlot];
+}
+
+bool TrackDataModel::upsertTrackSendAutomationPoint(size_t trackIndex, size_t sendSlot,
+                                                     double samplePosition, float value)
+{
+    if (trackIndex >= trackStates.size() || sendSlot >= maxSendsPerTrack)
+        return false;
+
+    try
+    {
         auto before = captureEditState();
-        trackStates[index].pan.store(juce::jlimit(-1.0f, 1.0f, value), std::memory_order_relaxed);
+        trackStates[trackIndex].sendAutomation[sendSlot].upsertPoint(samplePosition, value);
         publishRenderStructureSnapshot();
         commitEdit(std::move(before));
+        sendChangeMessage();
+        return true;
     }
+    catch (const std::invalid_argument&)
+    {
+        return false;
+    }
+    catch (const std::length_error&)
+    {
+        return false;
+    }
+}
+
+bool TrackDataModel::setTrackSendAutomationMode(size_t trackIndex, size_t sendSlot, AutomationMode mode)
+{
+    if (trackIndex >= trackStates.size() || sendSlot >= maxSendsPerTrack)
+        return false;
+
+    auto& lane = trackStates[trackIndex].sendAutomation[sendSlot];
+    if (lane.getMode() == mode)
+        return false;
+
+    auto before = captureEditState();
+    lane.setMode(mode);
+    publishRenderStructureSnapshot();
+    commitEdit(std::move(before));
+    sendChangeMessage();
+    return true;
+}
+
+AutomationLane* TrackDataModel::getMutableTrackAutomationLane(size_t trackIndex, AutomationParameter parameter) noexcept
+{
+    if (trackIndex >= trackStates.size())
+        return nullptr;
+
+    auto& track = trackStates[trackIndex];
+    switch (parameter)
+    {
+        case AutomationParameter::trackVolume: return &track.volumeAutomation;
+        case AutomationParameter::trackPan:    return &track.panAutomation;
+        case AutomationParameter::sendLevel:   return nullptr;
+    }
+
+    return nullptr;
+}
+
+bool TrackDataModel::upsertTrackAutomationPoint(size_t trackIndex, AutomationParameter parameter,
+                                                double samplePosition, float value)
+{
+    if (trackIndex >= trackStates.size())
+        return false;
+
+    auto* lane = getMutableTrackAutomationLane(trackIndex, parameter);
+    if (lane == nullptr)
+        return false;
+
+    try
+    {
+        auto before = captureEditState();
+        lane->upsertPoint(samplePosition, value);
+        publishRenderStructureSnapshot();
+        commitEdit(std::move(before));
+        sendChangeMessage();
+        return true;
+    }
+    catch (const std::invalid_argument&)
+    {
+        return false;
+    }
+    catch (const std::length_error&)
+    {
+        return false;
+    }
+}
+
+bool TrackDataModel::removeTrackAutomationPoint(size_t trackIndex, AutomationParameter parameter,
+                                                double samplePosition)
+{
+    if (trackIndex >= trackStates.size())
+        return false;
+
+    auto before = captureEditState();
+    auto* lane = getMutableTrackAutomationLane(trackIndex, parameter);
+    if (lane == nullptr || ! lane->removePoint(samplePosition))
+        return false;
+
+    publishRenderStructureSnapshot();
+    commitEdit(std::move(before));
+    sendChangeMessage();
+    return true;
+}
+
+bool TrackDataModel::setTrackAutomationMode(size_t trackIndex, AutomationParameter parameter, AutomationMode mode)
+{
+    if (trackIndex >= trackStates.size())
+        return false;
+
+    auto* lane = getMutableTrackAutomationLane(trackIndex, parameter);
+    if (lane == nullptr || lane->getMode() == mode)
+        return false;
+
+    auto before = captureEditState();
+    lane->setMode(mode);
+    publishRenderStructureSnapshot();
+    commitEdit(std::move(before));
+    sendChangeMessage();
+    return true;
 }
 void TrackDataModel::setTrackMuted(size_t index, bool value) noexcept
 {
@@ -386,9 +604,30 @@ void TrackDataModel::setTrackSolo(size_t index, bool value) noexcept
         commitEdit(std::move(before));
     }
 }
+void TrackDataModel::setTrackSoloSafe(size_t index, bool value) noexcept
+{
+    if (index >= trackStates.size() || trackStates[index].soloSafe.load(std::memory_order_relaxed) == value)
+        return;
+    auto before = captureEditState();
+    trackStates[index].soloSafe.store(value, std::memory_order_relaxed);
+    publishRenderStructureSnapshot();
+    commitEdit(std::move(before));
+    sendChangeMessage();
+}
+
+bool TrackDataModel::isTrackSoloSafe(size_t index) const noexcept
+{
+    return index < trackStates.size() && trackStates[index].soloSafe.load(std::memory_order_relaxed);
+}
+
 void TrackDataModel::setTrackArmed(size_t index, bool value) noexcept
 {
-    if (index < trackStates.size()) trackStates[index].armed.store(value, std::memory_order_relaxed);
+    if (index >= trackStates.size() || trackStates[index].armed.load(std::memory_order_relaxed) == value)
+        return;
+
+    trackStates[index].armed.store(value, std::memory_order_relaxed);
+    publishRenderStructureSnapshot();
+    sendChangeMessage();
 }
 bool TrackDataModel::isTrackArmed(size_t index) const noexcept
 {
@@ -439,6 +678,78 @@ MidiEventId TrackDataModel::addMidiNote(MidiClipId clipId, int pitch, float velo
     }
     return {};
 }
+
+MidiClipId TrackDataModel::addMidiRecording(TrackId track, double startSample, std::vector<MidiNoteEvent> notes)
+{
+    if (getTrackIndex(track) < 0 || notes.empty())
+        return {};
+
+    auto before = captureEditState();
+    MidiClipState clip { { nextMidiClipId++ }, track, juce::jmax(0.0, startSample), {} };
+    clip.notes.reserve(notes.size());
+    for (auto& note : notes)
+    {
+        note.id = { nextMidiEventId++ };
+        note.pitch = juce::jlimit(0, 127, note.pitch);
+        note.velocity = juce::jlimit(0.0f, 1.0f, note.velocity);
+        note.startSample = juce::jmax(0.0, note.startSample);
+        note.durationSamples = juce::jmax(1.0, note.durationSamples);
+        note.channel = juce::jlimit(1, 16, note.channel);
+        clip.notes.push_back(note);
+    }
+    midiClips.push_back(std::move(clip));
+    publishMidiClipSnapshot();
+    commitEdit(std::move(before));
+    sendChangeMessage();
+    return midiClips.back().id;
+}
+
+juce::Result TrackDataModel::importMidiTracks(const std::vector<ImportedMidiTrack>& tracks, double startSample)
+{
+    const auto importCount = static_cast<size_t>(std::count_if(tracks.begin(), tracks.end(), [] (const auto& track)
+    {
+        return ! track.notes.empty();
+    }));
+    if (importCount == 0)
+        return juce::Result::fail("The MIDI import contains no note data.");
+    if (! canChangeTrackStructure() || trackStates.size() + importCount > maxTracks)
+        return juce::Result::fail("There are not enough available track slots for this MIDI file.");
+
+    auto before = captureEditState();
+    for (const auto& imported : tracks)
+    {
+        if (imported.notes.empty())
+            continue;
+
+        trackStates.emplace_back();
+        auto& track = trackStates.back();
+        track.id = { nextTrackId++ };
+        track.type = TrackType::instrument;
+        track.name = imported.name.isNotEmpty() ? imported.name : "MIDI " + juce::String(trackStates.size());
+        for (size_t slot = 0; slot < maxTracks; ++slot)
+            if (! fxRackTrackIds[slot].isValid())
+            {
+                fxRackTrackIds[slot] = track.id;
+                break;
+            }
+
+        MidiClipState clip { { nextMidiClipId++ }, track.id, juce::jmax(0.0, startSample), {} };
+        clip.notes.reserve(imported.notes.size());
+        for (const auto& importedNote : imported.notes)
+            clip.notes.push_back({ { nextMidiEventId++ }, juce::jlimit(0, 127, importedNote.pitch),
+                                   juce::jlimit(0.0f, 1.0f, importedNote.velocity),
+                                   juce::jmax(0.0, importedNote.startSample),
+                                   juce::jmax(1.0, importedNote.durationSamples),
+                                   juce::jlimit(1, 16, importedNote.channel) });
+        midiClips.push_back(std::move(clip));
+    }
+
+    publishMidiClipSnapshot();
+    publishRenderStructureSnapshot();
+    commitEdit(std::move(before));
+    sendChangeMessage();
+    return juce::Result::ok();
+}
 const std::vector<MidiClipState>& TrackDataModel::getMidiClips() const noexcept { return midiClips; }
 bool TrackDataModel::deleteMidiNote(MidiClipId clipId, MidiEventId noteId)
 {
@@ -467,6 +778,35 @@ bool TrackDataModel::setMidiNoteVelocity(MidiClipId clipId, MidiEventId noteId, 
 {
     for (auto& clip : midiClips) if (clip.id == clipId) for (auto& note : clip.notes) if (note.id == noteId)
     { auto before = captureEditState(); note.velocity = juce::jlimit(0.0f, 1.0f, velocity); publishMidiClipSnapshot(); commitEdit(std::move(before)); return true; }
+    return false;
+}
+bool TrackDataModel::transposeMidiClip(MidiClipId clipId, int semitones)
+{
+    if (semitones == 0) return false;
+    for (auto& clip : midiClips) if (clip.id == clipId)
+    {
+        auto before = captureEditState();
+        for (auto& note : clip.notes)
+            note.pitch = juce::jlimit(0, 127, note.pitch + semitones);
+        publishMidiClipSnapshot();
+        commitEdit(std::move(before));
+        return true;
+    }
+    return false;
+}
+
+bool TrackDataModel::quantizeMidiClip(MidiClipId clipId, double gridSamples)
+{
+    if (! std::isfinite(gridSamples) || gridSamples <= 0.0) return false;
+    for (auto& clip : midiClips) if (clip.id == clipId)
+    {
+        auto before = captureEditState();
+        for (auto& note : clip.notes)
+            note.startSample = juce::jmax(0.0, std::round(note.startSample / gridSamples) * gridSamples);
+        publishMidiClipSnapshot();
+        commitEdit(std::move(before));
+        return true;
+    }
     return false;
 }
 
@@ -511,7 +851,7 @@ void TrackDataModel::setActiveTool(EditTool tool) noexcept { activeTool.store(to
 float TrackDataModel::getHorizontalZoom() const noexcept { return horizontalZoom.load(); }
 void TrackDataModel::setHorizontalZoom(float zoom) noexcept { horizontalZoom.store(std::clamp(zoom, 0.5f, 5.0f)); sendChangeMessage(); }
 int TrackDataModel::getTrackHeight() const noexcept { return trackHeight.load(); }
-void TrackDataModel::setTrackHeight(int height) noexcept { trackHeight.store(std::clamp(height, 40, 120)); sendChangeMessage(); }
+void TrackDataModel::setTrackHeight(int height) noexcept { trackHeight.store(std::clamp(height, 36, 96)); sendChangeMessage(); }
 bool TrackDataModel::isCycleActive() const noexcept { return cycleActive.load(); }
 double TrackDataModel::getCycleStartSample() const noexcept { return cycleStartSample.load(); }
 double TrackDataModel::getCycleEndSample() const noexcept { return cycleEndSample.load(); }
@@ -526,6 +866,27 @@ void TrackDataModel::setCycle(double startSample, double endSample) noexcept
 void TrackDataModel::clearCycle() noexcept
 {
     if (cycleActive.exchange(false, std::memory_order_relaxed))
+        markProjectModified();
+    sendChangeMessage();
+}
+
+bool TrackDataModel::isPunchActive() const noexcept { return punchActive.load(std::memory_order_relaxed); }
+double TrackDataModel::getPunchInSample() const noexcept { return punchInSample.load(std::memory_order_relaxed); }
+double TrackDataModel::getPunchOutSample() const noexcept { return punchOutSample.load(std::memory_order_relaxed); }
+void TrackDataModel::setPunchRange(double inSample, double outSample) noexcept
+{
+    const auto start = std::max(0.0, std::min(inSample, outSample));
+    const auto end = std::max(0.0, std::max(inSample, outSample));
+    punchInSample.store(start, std::memory_order_relaxed);
+    punchOutSample.store(end, std::memory_order_relaxed);
+    punchActive.store(end > start, std::memory_order_relaxed);
+    markProjectModified();
+    sendChangeMessage();
+}
+
+void TrackDataModel::clearPunchRange() noexcept
+{
+    if (punchActive.exchange(false, std::memory_order_relaxed))
         markProjectModified();
     sendChangeMessage();
 }
@@ -758,6 +1119,9 @@ TrackDataModel::EditState TrackDataModel::captureEditState() const
     state.cycleActive = cycleActive.load(std::memory_order_relaxed);
     state.cycleStartSample = cycleStartSample.load(std::memory_order_relaxed);
     state.cycleEndSample = cycleEndSample.load(std::memory_order_relaxed);
+    state.punchActive = punchActive.load(std::memory_order_relaxed);
+    state.punchInSample = punchInSample.load(std::memory_order_relaxed);
+    state.punchOutSample = punchOutSample.load(std::memory_order_relaxed);
     state.fxRackTrackIds = fxRackTrackIds;
     for (size_t slot = 0; slot < maxTracks; ++slot)
         if (fxRacks[slot] != nullptr) state.fxRacks[slot] = *fxRacks[slot];
@@ -783,6 +1147,9 @@ void TrackDataModel::restoreEditState(EditState state)
     cycleActive.store(state.cycleActive, std::memory_order_relaxed);
     cycleStartSample.store(state.cycleStartSample, std::memory_order_relaxed);
     cycleEndSample.store(state.cycleEndSample, std::memory_order_relaxed);
+    punchActive.store(state.punchActive, std::memory_order_relaxed);
+    punchInSample.store(state.punchInSample, std::memory_order_relaxed);
+    punchOutSample.store(state.punchOutSample, std::memory_order_relaxed);
     fxRackTrackIds = state.fxRackTrackIds;
     for (size_t slot = 0; slot < maxTracks; ++slot)
         publishFxRackSnapshot(slot, std::make_unique<FxRackSnapshot>(std::move(state.fxRacks[slot])));
@@ -829,14 +1196,30 @@ ProjectState TrackDataModel::createProjectState() const
     state.cycleActive = isCycleActive();
     state.cycleStartSample = getCycleStartSample();
     state.cycleEndSample = getCycleEndSample();
+    state.punchActive = isPunchActive();
+    state.punchInSample = getPunchInSample();
+    state.punchOutSample = getPunchOutSample();
     state.tempoMap.reserve(tempoMap.size());
     for (const auto& event : tempoMap) state.tempoMap.push_back({ event.samplePosition, event.bpm });
     state.buses.reserve(busStates.size());
-    for (const auto& bus : busStates)
-        state.buses.push_back({ bus.id, bus.gain, bus.muted });
-    state.tracks.reserve(trackStates.size());
-    for (const auto& track : trackStates)
+    for (size_t busIndex = 0; busIndex < busStates.size(); ++busIndex)
     {
+        const auto& bus = busStates[busIndex];
+        PersistedBusState savedBus { bus.id, bus.gain, bus.muted };
+        if (const auto* rack = publishedBusFxRacks[busIndex].load(std::memory_order_acquire); rack != nullptr)
+            for (size_t slot = 0; slot < maxFxSlots; ++slot)
+                if (const auto& processor = rack->processors[slot]; processor != nullptr)
+                {
+                    savedBus.fxSlots[slot].persistentIdentifier = processor->getPersistentIdentifier();
+                    savedBus.fxSlots[slot].bypassed = rack->bypass[slot];
+                    processor->getState(savedBus.fxSlots[slot].state);
+                }
+        state.buses.push_back(std::move(savedBus));
+    }
+    state.tracks.reserve(trackStates.size());
+    for (size_t trackIndex = 0; trackIndex < trackStates.size(); ++trackIndex)
+    {
+        const auto& track = trackStates[trackIndex];
         PersistedTrackState savedTrack;
         savedTrack.id = track.id;
         savedTrack.type = track.type;
@@ -845,11 +1228,47 @@ ProjectState TrackDataModel::createProjectState() const
         savedTrack.pan = track.pan.load(std::memory_order_relaxed);
         savedTrack.muted = track.muted.load(std::memory_order_relaxed);
         savedTrack.solo = track.solo.load(std::memory_order_relaxed);
+        savedTrack.soloSafe = track.soloSafe.load(std::memory_order_relaxed);
         savedTrack.inputMonitoring = track.inputMonitoring.load(std::memory_order_relaxed);
         savedTrack.inputChannel = track.inputChannel.load(std::memory_order_relaxed);
         savedTrack.outputBus = track.outputBus;
         savedTrack.activeSendCount = track.activeSendCount;
-        for (size_t i = 0; i < track.activeSendCount; ++i) savedTrack.sends[i] = { track.sends[i].targetBus, track.sends[i].level, track.sends[i].preFader };
+        for (size_t i = 0; i < maxSendsPerTrack; ++i)
+            savedTrack.sends[i] = { track.sends[i].targetBus, track.sends[i].level, track.sends[i].preFader };
+        if (const auto* rack = getFxRackSnapshot(trackIndex); rack != nullptr)
+            for (size_t slot = 0; slot < maxFxSlots; ++slot)
+                if (const auto& processor = rack->processors[slot]; processor != nullptr)
+                {
+                    savedTrack.fxSlots[slot].persistentIdentifier = processor->getPersistentIdentifier();
+                    savedTrack.fxSlots[slot].bypassed = rack->bypass[slot];
+                    processor->getState(savedTrack.fxSlots[slot].state);
+                }
+        const auto saveAutomation = [&savedTrack] (const AutomationLane& lane)
+        {
+            PersistedAutomationLane savedLane;
+            savedLane.parameter = static_cast<int>(lane.getParameter());
+            savedLane.mode = static_cast<int>(lane.getMode());
+            savedLane.defaultValue = lane.getDefaultValue();
+            savedLane.points.reserve(lane.getPoints().size());
+            for (const auto& point : lane.getPoints())
+                savedLane.points.push_back({ point.samplePosition, point.value });
+            savedTrack.automationLanes.push_back(std::move(savedLane));
+        };
+        saveAutomation(track.volumeAutomation);
+        saveAutomation(track.panAutomation);
+        for (size_t slot = 0; slot < maxSendsPerTrack; ++slot)
+            if (const auto& lane = track.sendAutomation[slot]; lane.getMode() != AutomationMode::read || ! lane.getPoints().empty())
+            {
+                PersistedAutomationLane savedLane;
+                savedLane.parameter = static_cast<int>(AutomationParameter::sendLevel);
+                savedLane.sendSlot = static_cast<int>(slot);
+                savedLane.mode = static_cast<int>(lane.getMode());
+                savedLane.defaultValue = lane.getDefaultValue();
+                savedLane.points.reserve(lane.getPoints().size());
+                for (const auto& point : lane.getPoints())
+                    savedLane.points.push_back({ point.samplePosition, point.value });
+                savedTrack.automationLanes.push_back(std::move(savedLane));
+            }
         savedTrack.clips.reserve(track.clips.size());
         for (const auto& clip : track.clips)
             savedTrack.clips.push_back({ clip.id, clip.trackId, clip.sourceFile.getFullPathName(), clip.clipName,
@@ -886,6 +1305,10 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
         || state.cycleStartSample < 0.0 || state.cycleEndSample < state.cycleStartSample
         || (state.cycleActive && state.cycleEndSample <= state.cycleStartSample))
         return juce::Result::fail("Project cycle range is invalid");
+    if (! std::isfinite(state.punchInSample) || ! std::isfinite(state.punchOutSample)
+        || state.punchInSample < 0.0 || state.punchOutSample < state.punchInSample
+        || (state.punchActive && state.punchOutSample <= state.punchInSample))
+        return juce::Result::fail("Project punch range is invalid");
     if (state.buses.size() > maxBuses)
         return juce::Result::fail("Project exceeds the current " + juce::String(maxBuses) + "-bus engine limit");
 
@@ -922,10 +1345,49 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
         if ((track.outputBus.isValid() && std::find(busIds.begin(), busIds.end(), track.outputBus) == busIds.end())
             || track.activeSendCount > maxSendsPerTrack)
             return juce::Result::fail("Project track bus routing is invalid");
-        for (size_t i = 0; i < track.activeSendCount; ++i)
-            if (! track.sends[i].targetBus.isValid() || std::find(busIds.begin(), busIds.end(), track.sends[i].targetBus) == busIds.end()
-                || ! std::isfinite(track.sends[i].level) || track.sends[i].level < 0.0f || track.sends[i].level > 1.0f)
+        const auto activeRoutes = static_cast<uint8_t>(std::count_if(track.sends.begin(), track.sends.end(),
+            [] (const PersistedTrackState::SendRoute& send) { return send.targetBus.isValid(); }));
+        if (activeRoutes != track.activeSendCount)
+            return juce::Result::fail("Project track send count is invalid");
+        for (const auto& send : track.sends)
+            if (send.targetBus.isValid()
+                && (std::find(busIds.begin(), busIds.end(), send.targetBus) == busIds.end()
+                    || ! std::isfinite(send.level) || send.level < 0.0f || send.level > 1.0f))
                 return juce::Result::fail("Project track send routing is invalid");
+        if (track.automationLanes.size() > 2 + maxSendsPerTrack)
+            return juce::Result::fail("Project has too many automation lanes per track");
+        std::array<bool, 2> seenTrackAutomation {};
+        std::array<bool, maxSendsPerTrack> seenSendAutomation {};
+        for (const auto& lane : track.automationLanes)
+        {
+            if (lane.parameter < static_cast<int>(AutomationParameter::trackVolume)
+                || lane.parameter > static_cast<int>(AutomationParameter::sendLevel)
+                || lane.mode < static_cast<int>(AutomationMode::read) || lane.mode > static_cast<int>(AutomationMode::write)
+                || lane.points.size() > AutomationLane::maximumPoints)
+                return juce::Result::fail("Project automation lane is invalid");
+            const auto parameter = static_cast<AutomationParameter>(lane.parameter);
+            if (! AutomationLane::isValueValid(parameter, lane.defaultValue))
+                return juce::Result::fail("Project automation lane is invalid");
+            if (parameter == AutomationParameter::sendLevel)
+            {
+                if (lane.sendSlot < 0 || lane.sendSlot >= static_cast<int>(maxSendsPerTrack)
+                    || seenSendAutomation[static_cast<size_t>(lane.sendSlot)])
+                    return juce::Result::fail("Project send automation lane is invalid");
+                seenSendAutomation[static_cast<size_t>(lane.sendSlot)] = true;
+            }
+            else if (lane.sendSlot != -1 || seenTrackAutomation[static_cast<size_t>(parameter)])
+                return juce::Result::fail("Project automation lane is invalid");
+            else
+                seenTrackAutomation[static_cast<size_t>(parameter)] = true;
+            double previousPosition = -1.0;
+            for (const auto& point : lane.points)
+            {
+                if (! std::isfinite(point.samplePosition) || point.samplePosition < 0.0 || point.samplePosition <= previousPosition
+                    || ! AutomationLane::isValueValid(parameter, point.value))
+                    return juce::Result::fail("Project automation point is invalid");
+                previousPosition = point.samplePosition;
+            }
+        }
         trackIds.push_back(track.id);
         largestTrackId = std::max(largestTrackId, track.id.value);
         for (const auto& clip : track.clips)
@@ -993,11 +1455,26 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
         restored.pan.store(track.pan, std::memory_order_relaxed);
         restored.muted.store(track.muted, std::memory_order_relaxed);
         restored.solo.store(track.solo, std::memory_order_relaxed);
+        restored.soloSafe.store(track.soloSafe, std::memory_order_relaxed);
         restored.inputMonitoring.store(track.inputMonitoring, std::memory_order_relaxed);
         restored.inputChannel.store(track.inputChannel, std::memory_order_relaxed);
         restored.outputBus = track.outputBus;
         restored.activeSendCount = track.activeSendCount;
-        for (size_t i = 0; i < track.activeSendCount; ++i) restored.sends[i] = { track.sends[i].targetBus, track.sends[i].level, track.sends[i].preFader };
+        for (size_t i = 0; i < maxSendsPerTrack; ++i)
+            restored.sends[i] = { track.sends[i].targetBus, track.sends[i].level, track.sends[i].preFader };
+        for (const auto& lane : track.automationLanes)
+        {
+            const auto parameter = static_cast<AutomationParameter>(lane.parameter);
+            AutomationLane* restoredLane = parameter == AutomationParameter::trackVolume ? &restored.volumeAutomation
+                                             : parameter == AutomationParameter::trackPan ? &restored.panAutomation
+                                             : lane.sendSlot >= 0 && lane.sendSlot < static_cast<int>(maxSendsPerTrack)
+                                                ? &restored.sendAutomation[static_cast<size_t>(lane.sendSlot)] : nullptr;
+            if (restoredLane == nullptr) continue;
+            restoredLane->clear();
+            restoredLane->setMode(static_cast<AutomationMode>(lane.mode));
+            for (const auto& point : lane.points)
+                restoredLane->upsertPoint(point.samplePosition, point.value);
+        }
         restored.clips.reserve(track.clips.size());
         for (const auto& clip : track.clips)
         {
@@ -1048,6 +1525,9 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
     cycleStartSample.store(state.cycleStartSample, std::memory_order_relaxed);
     cycleEndSample.store(state.cycleEndSample, std::memory_order_relaxed);
     cycleActive.store(state.cycleActive, std::memory_order_relaxed);
+    punchInSample.store(state.punchInSample, std::memory_order_relaxed);
+    punchOutSample.store(state.punchOutSample, std::memory_order_relaxed);
+    punchActive.store(state.punchActive, std::memory_order_relaxed);
     playing.store(false, std::memory_order_relaxed);
     playheadPosition.store(0.0, std::memory_order_relaxed);
     nextTrackId = largestTrackId + 1;
@@ -1146,13 +1626,19 @@ void TrackDataModel::publishRenderStructureSnapshot()
         renderTrack.pan = track.pan.load(std::memory_order_relaxed);
         renderTrack.muted = track.muted.load(std::memory_order_relaxed);
         renderTrack.solo = track.solo.load(std::memory_order_relaxed);
+        renderTrack.soloSafe = track.soloSafe.load(std::memory_order_relaxed);
+        renderTrack.armed = track.armed.load(std::memory_order_relaxed);
         renderTrack.inputMonitoring = track.inputMonitoring.load(std::memory_order_relaxed);
         renderTrack.inputChannel = track.inputChannel.load(std::memory_order_relaxed);
         const auto rackSlot = getFxRackSlot(track.id);
         renderTrack.fxRack = rackSlot >= 0 ? publishedFxRacks[static_cast<size_t>(rackSlot)].load(std::memory_order_acquire) : nullptr;
         renderTrack.outputBus = track.outputBus;
         renderTrack.activeSendCount = track.activeSendCount;
-        for (size_t i = 0; i < track.activeSendCount; ++i) renderTrack.sends[i] = { track.sends[i].targetBus, track.sends[i].level, track.sends[i].preFader };
+        for (size_t i = 0; i < maxSendsPerTrack; ++i)
+            renderTrack.sends[i] = { track.sends[i].targetBus, track.sends[i].level, track.sends[i].preFader,
+                                     AutomationRenderLane::compile(track.sendAutomation[i]) };
+        renderTrack.volumeAutomation = AutomationRenderLane::compile(track.volumeAutomation);
+        renderTrack.panAutomation = AutomationRenderLane::compile(track.panAutomation);
     }
     std::unique_ptr<const RenderStructureSnapshot> snapshot = std::move(next);
     auto previous = std::move(renderStructureSnapshot);

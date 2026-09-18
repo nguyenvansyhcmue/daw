@@ -2,13 +2,14 @@
 
 #include "../AudioEngine/AudioEngine.h"
 #include "../Plugins/PluginHostService.h"
+#include "Theme/StudioForgeLookAndFeel.h"
 
 namespace
 {
-constexpr int inspectorPadding = 6;
-constexpr int sectionGap = 5;
-constexpr int regionInspectorHeight = 46;
-constexpr int trackInspectorHeight = 48;
+constexpr int inspectorPadding = 4;
+constexpr int sectionGap = 3;
+constexpr int regionInspectorHeight = 88;
+constexpr int trackInspectorHeight = 104;
 }
 
 InspectorPane::InspectorPane(TrackDataModel& model, AudioEngine& engine, PluginHostService& pluginHost)
@@ -43,8 +44,8 @@ void InspectorPane::setSelectedMidiClip(MidiClipId clip)
 
 void InspectorPane::paint(juce::Graphics& g)
 {
-    g.fillAll(juce::Colour(0xff202328));
-    g.setColour(juce::Colours::white.withAlpha(0.10f));
+    g.fillAll(StudioForgeTheme::workspaceBackground);
+    g.setColour(StudioForgeTheme::separator);
     g.drawVerticalLine(getWidth() - 1, 0.0f, static_cast<float>(getHeight()));
 }
 

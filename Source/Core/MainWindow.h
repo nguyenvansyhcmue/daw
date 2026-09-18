@@ -5,6 +5,9 @@
 
 #include "UI/MainComponent.h"
 #include "Project/RecentProjectsStore.h"
+#include "Project/ProjectTemplateStore.h"
+#include "Project/ProjectAlternativeStore.h"
+#include "Project/AutosaveService.h"
 
 class MainWindow final : public juce::DocumentWindow,
                          public juce::MenuBarModel,
@@ -28,10 +31,20 @@ private:
     enum MenuItem
     {
         newProject = 1,
+        newAudioRecordingTemplate,
+        newMidiProductionTemplate,
+        saveProjectTemplate,
+        newProjectAlternative,
         openProject,
+        closeProject,
         saveProject,
         saveProjectAs,
+        saveProjectCopy,
         importAudio,
+        importMidi,
+        bounceProject,
+        deviceSettings,
+        projectSettings,
         quitApplication,
         undoEdit,
         redoEdit,
@@ -40,12 +53,25 @@ private:
         normalTracks,
         toggleInspector,
         toggleBrowser,
-        toggleMixer
+        toggleMixer,
+        recentProjectBase = 1000,
+        userTemplateBase = 1100
+        , alternativeBase = 1200
     };
 
     void chooseProjectToOpen();
     void chooseProjectToSave();
+    void chooseProjectCopyToSave();
+    void chooseProjectTemplateToSave();
+    void chooseProjectAlternativeToSave();
     void chooseAudioToImport();
+    void chooseMidiToImport();
+    void createProjectFromTemplate(ProjectTemplate projectTemplate);
+    void createProjectFromUserTemplate(const juce::File& file);
+    void loadProjectAlternative(const juce::File& file);
+    void closeCurrentProject();
+    void showDeviceSettings();
+    void showProjectSettings();
     void saveCurrentProject();
     void loadProjectFromFile(const juce::File& file);
     void refreshRecentProjects();
@@ -55,7 +81,12 @@ private:
     std::unique_ptr<juce::OpenGLContext> openGLContext;
     std::unique_ptr<juce::FileChooser> projectFileChooser;
     std::unique_ptr<juce::FileChooser> audioFileChooser;
+    std::unique_ptr<juce::FileChooser> midiFileChooser;
     MainComponent* mainComponent = nullptr;
     juce::File currentProjectFile;
+    juce::File projectRootFile;
     RecentProjectsStore recentProjects;
+    ProjectTemplateStore projectTemplates;
+    ProjectAlternativeStore projectAlternatives;
+    std::unique_ptr<AutosaveService> autosaveService;
 };

@@ -1,5 +1,6 @@
 # CMake and IDE build output
 build/
+build-*/
 .vs/
 *.suo
 *.user

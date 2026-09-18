@@ -99,7 +99,8 @@ void drawTrackTypeCard(juce::Graphics& g, juce::Rectangle<float> bounds, juce::S
 
 StartupWorkflowPane::StartupWorkflowPane()
 {
-    addAndMakeVisible(title); addAndMakeVisible(emptyProject); addAndMakeVisible(openProject); addAndMakeVisible(chooseProject);
+    addAndMakeVisible(title); addAndMakeVisible(emptyProject); addAndMakeVisible(audioRecordingProject);
+    addAndMakeVisible(midiProductionProject); addAndMakeVisible(openProject); addAndMakeVisible(chooseProject);
     for (size_t index = 0; index < recentProjectButtons.size(); ++index)
     {
         auto& button = recentProjectButtons[index];
@@ -121,9 +122,13 @@ StartupWorkflowPane::StartupWorkflowPane()
     title.setJustificationType(juce::Justification::centred);
     title.setFont(juce::Font(juce::FontOptions(14.0f, juce::Font::bold)));
     title.setColour(juce::Label::textColourId, juce::Colours::white);
-    emptyProject.setButtonText({});
-    emptyProject.setColour(juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
-    emptyProject.setColour(juce::TextButton::textColourOffId, juce::Colours::transparentBlack);
+    for (auto* templateButton : { &emptyProject, &audioRecordingProject, &midiProductionProject })
+    {
+        templateButton->setButtonText({});
+        templateButton->setColour(juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
+        templateButton->setColour(juce::TextButton::textColourOffId, juce::Colours::transparentBlack);
+        templateButton->onStateChange = [this] { repaint(); };
+    }
     openProject.setColour(juce::TextButton::buttonColourId, juce::Colour(0xfff8fbfd));
     openProject.setColour(juce::TextButton::textColourOffId, juce::Colour(0xff3d454c));
     chooseProject.setColour(juce::TextButton::buttonColourId, selectedBlue);
@@ -141,8 +146,14 @@ StartupWorkflowPane::StartupWorkflowPane()
         cardButton->setColour(juce::TextButton::textColourOffId, juce::Colours::transparentBlack);
         cardButton->onStateChange = [this] { repaint(); };
     }
-    emptyProject.onClick = [this] { repaint(); };
-    chooseProject.onClick = [this] { if (onEmptyProject) onEmptyProject(); };
+    emptyProject.onClick = [this] { selectedProjectTemplate = ProjectTemplate::empty; repaint(); };
+    audioRecordingProject.onClick = [this] { selectedProjectTemplate = ProjectTemplate::audioRecording; repaint(); };
+    midiProductionProject.onClick = [this] { selectedProjectTemplate = ProjectTemplate::midiProduction; repaint(); };
+    chooseProject.onClick = [this]
+    {
+        if (onTemplateSelected != nullptr)
+            onTemplateSelected(selectedProjectTemplate);
+    };
     openProject.onClick = [this] { if (onOpenProject) onOpenProject(); };
     midi.onClick = [this] { guitarInputSelected = false; setType(TrackType::instrument); };
     softwareInstrument.onClick = [this] { guitarInputSelected = false; setType(TrackType::instrument); };
@@ -400,13 +411,23 @@ void StartupWorkflowPane::paint(juce::Graphics& g)
 
     const auto content = juce::Rectangle<float>(sidebar.getRight(), dialog.getY() + 36.0f,
                                                 dialog.getRight() - sidebar.getRight(), dialog.getHeight() - 92.0f);
-    const auto emptyTile = juce::Rectangle<float>(content.getX() + 34.0f, content.getY() + 28.0f, 124.0f, 100.0f);
-    g.setColour(selectedBlue);
-    g.drawRoundedRectangle(emptyTile.expanded(3.0f), 8.0f, 2.0f);
-    drawProjectGlyph(g, emptyTile, false);
-    g.setColour(selectedBlue);
-    g.setFont(12.0f);
-    g.drawText("Empty Project", emptyTile.translated(-8.0f, 114.0f).withWidth(144.0f), juce::Justification::centred, false);
+    const std::array<ProjectTemplate, 3> templates { ProjectTemplate::empty, ProjectTemplate::audioRecording, ProjectTemplate::midiProduction };
+    for (size_t index = 0; index < templates.size(); ++index)
+    {
+        const auto tile = juce::Rectangle<float>(content.getX() + 26.0f + static_cast<float>(index) * 142.0f,
+                                                 content.getY() + 28.0f, 124.0f, 100.0f);
+        const auto selected = templates[index] == selectedProjectTemplate;
+        if (selected)
+        {
+            g.setColour(selectedBlue);
+            g.drawRoundedRectangle(tile.expanded(3.0f), 8.0f, 2.0f);
+        }
+        drawProjectGlyph(g, tile, templates[index] == ProjectTemplate::midiProduction);
+        g.setColour(selected ? selectedBlue : juce::Colour(0xff4f5962));
+        g.setFont(12.0f);
+        g.drawText(ProjectTemplates::getName(templates[index]), tile.translated(-10.0f, 114.0f).withWidth(144.0f),
+                   juce::Justification::centred, false);
+    }
 
     const auto detailsY = dialog.getBottom() - footerHeight;
     g.setColour(juce::Colour(0xffdfe5eb));
@@ -414,7 +435,8 @@ void StartupWorkflowPane::paint(juce::Graphics& g)
     g.setColour(juce::Colour(0xff68737c));
     g.setFont(11.0f);
     g.drawText("›  Details", dialog.getX() + 12.0f, detailsY + 7.0f, 180.0f, 18.0f, juce::Justification::centredLeft, false);
-    g.drawText("Create an empty project", dialog.getCentreX() - 80.0f, detailsY + 7.0f, 220.0f, 18.0f, juce::Justification::centred, false);
+    g.drawText(ProjectTemplates::getDescription(selectedProjectTemplate), dialog.getCentreX() - 140.0f, detailsY + 7.0f,
+               300.0f, 18.0f, juce::Justification::centred, false);
     g.setColour(juce::Colour(0xffdfe5eb));
     g.fillRect(dialog.getX() + 1.0f, detailsY + 1.0f, 172.0f, 30.0f);
     g.setColour(juce::Colour(0xff68737c));
@@ -426,7 +448,8 @@ void StartupWorkflowPane::resized()
     auto card = getDialogBounds();
     title.setBounds(card.removeFromTop(36));
     const auto splash=step==Step::splash, chooser=step==Step::chooseProject, creating=!chooser && !splash;
-    emptyProject.setVisible(chooser); openProject.setVisible(chooser); chooseProject.setVisible(chooser);
+    emptyProject.setVisible(chooser); audioRecordingProject.setVisible(chooser); midiProductionProject.setVisible(chooser);
+    openProject.setVisible(chooser); chooseProject.setVisible(chooser);
     midi.setVisible(creating); audio.setVisible(creating);
     softwareInstrument.setVisible(creating); externalMidi.setVisible(creating);
     micOrLine.setVisible(creating); guitarOrBass.setVisible(creating);
@@ -440,7 +463,9 @@ void StartupWorkflowPane::resized()
     {
         const auto contentX = card.getX() + 168;
         const auto footerTop = card.getBottom() - 52;
-        emptyProject.setBounds(contentX + 28, card.getY() + 28, 130, 108);
+        emptyProject.setBounds(contentX + 20, card.getY() + 28, 130, 108);
+        audioRecordingProject.setBounds(contentX + 162, card.getY() + 28, 130, 108);
+        midiProductionProject.setBounds(contentX + 304, card.getY() + 28, 130, 108);
         openProject.setBounds(contentX + 12, footerTop + 25, 184, 24);
         chooseProject.setBounds(card.getRight() - 94, footerTop + 23, 82, 26);
         for (size_t index = 0; index < recentProjectButtons.size(); ++index)

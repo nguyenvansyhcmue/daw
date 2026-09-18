@@ -9,12 +9,103 @@ const auto accentBlue = juce::Colour(0xff6f88a8);
 const auto accentCyan = juce::Colour(0xffa7c5df);
 }
 
+TransportIconButton::TransportIconButton(Icon requestedIcon)
+    : juce::Button({}), icon(requestedIcon)
+{
+    setWantsKeyboardFocus(false);
+}
+
+void TransportIconButton::paintButton(juce::Graphics& graphics, bool highlighted, bool down)
+{
+    auto bounds = getLocalBounds().toFloat().reduced(1.0f);
+    const auto active = getToggleState();
+    auto background = isColourSpecified(juce::TextButton::buttonColourId)
+        ? findColour(juce::TextButton::buttonColourId)
+        : juce::Colour(0xff30363a);
+
+    if (icon == Icon::record && active)
+        background = juce::Colour(0xffb94141);
+    else if (active)
+        background = juce::Colour(0xff447eae);
+    else if (down)
+        background = background.brighter(0.22f);
+    else if (highlighted)
+        background = background.brighter(0.12f);
+
+    graphics.setColour(background);
+    graphics.fillRoundedRectangle(bounds, 4.0f);
+    graphics.setColour(juce::Colours::white.withAlpha(highlighted || active ? 0.96f : 0.78f));
+
+    const auto iconBounds = bounds.reduced(7.0f);
+    const auto centreX = iconBounds.getCentreX();
+    const auto centreY = iconBounds.getCentreY();
+    juce::Path path;
+
+    const auto drawTriangle = [&graphics](float left, float top, float width, float height, bool pointsRight)
+    {
+        juce::Path triangle;
+        if (pointsRight)
+        {
+            triangle.startNewSubPath(left, top);
+            triangle.lineTo(left + width, top + height * 0.5f);
+            triangle.lineTo(left, top + height);
+        }
+        else
+        {
+            triangle.startNewSubPath(left + width, top);
+            triangle.lineTo(left, top + height * 0.5f);
+            triangle.lineTo(left + width, top + height);
+        }
+        triangle.closeSubPath();
+        graphics.fillPath(triangle);
+    };
+
+    switch (icon)
+    {
+        case Icon::goToBeginning:
+            graphics.fillRect(iconBounds.getX(), iconBounds.getY(), 1.8f, iconBounds.getHeight());
+            drawTriangle(iconBounds.getX() + 3.5f, iconBounds.getY() + 1.0f,
+                         iconBounds.getWidth() - 4.5f, iconBounds.getHeight() - 2.0f, false);
+            break;
+
+        case Icon::rewind:
+            drawTriangle(iconBounds.getX(), iconBounds.getY() + 1.0f,
+                         iconBounds.getWidth() * 0.58f, iconBounds.getHeight() - 2.0f, false);
+            drawTriangle(iconBounds.getX() + iconBounds.getWidth() * 0.38f, iconBounds.getY() + 1.0f,
+                         iconBounds.getWidth() * 0.58f, iconBounds.getHeight() - 2.0f, false);
+            break;
+
+        case Icon::play:
+            drawTriangle(iconBounds.getX() + 2.5f, iconBounds.getY() + 1.0f,
+                         iconBounds.getWidth() - 4.5f, iconBounds.getHeight() - 2.0f, true);
+            break;
+
+        case Icon::stop:
+            graphics.fillRoundedRectangle(centreX - 4.5f, centreY - 4.5f, 9.0f, 9.0f, 1.2f);
+            break;
+
+        case Icon::forward:
+            drawTriangle(iconBounds.getX() + iconBounds.getWidth() * 0.04f, iconBounds.getY() + 1.0f,
+                         iconBounds.getWidth() * 0.58f, iconBounds.getHeight() - 2.0f, true);
+            drawTriangle(iconBounds.getX() + iconBounds.getWidth() * 0.42f, iconBounds.getY() + 1.0f,
+                         iconBounds.getWidth() * 0.58f, iconBounds.getHeight() - 2.0f, true);
+            break;
+
+        case Icon::record:
+            graphics.fillEllipse(centreX - 5.0f, centreY - 5.0f, 10.0f, 10.0f);
+            break;
+    }
+}
+
 ControlBar::ControlBar(TrackDataModel* model, AudioEngine* engine)
     : trackModel(model), audioEngine(engine)
 {
     addAndMakeVisible(playButton);
     addAndMakeVisible(stopButton);
     addAndMakeVisible(recordButton);
+    addAndMakeVisible(countInButton);
+    addAndMakeVisible(punchButton);
+    addAndMakeVisible(cycleButton);
     addAndMakeVisible(metronomeButton);
     addAndMakeVisible(bpmSlider);
     addAndMakeVisible(inspectorButton);
@@ -22,6 +113,9 @@ ControlBar::ControlBar(TrackDataModel* model, AudioEngine* engine)
     addAndMakeVisible(pianoRollButton);
     addAndMakeVisible(browserButton);
     addAndMakeVisible(addTrackButton);
+    addAndMakeVisible(goToBeginningButton);
+    addAndMakeVisible(rewindButton);
+    addAndMakeVisible(forwardButton);
     addAndMakeVisible(timecodeLabel);
     addAndMakeVisible(pointerTool);
     addAndMakeVisible(scissorsTool);
@@ -46,6 +140,12 @@ ControlBar::ControlBar(TrackDataModel* model, AudioEngine* engine)
         if (onCreateTrack != nullptr)
             onCreateTrack(TrackType::audio);
     };
+    goToBeginningButton.setTooltip("Go to beginning (Return)");
+    rewindButton.setTooltip("Move playhead back one bar");
+    forwardButton.setTooltip("Move playhead forward one bar");
+    goToBeginningButton.onClick = [this] { goToBeginning(); };
+    rewindButton.onClick = [this] { rewindOneBar(); };
+    forwardButton.onClick = [this] { forwardOneBar(); };
     pointerTool.setClickingTogglesState(true);
     scissorsTool.setClickingTogglesState(true);
     eraserTool.setClickingTogglesState(true);
@@ -81,10 +181,35 @@ ControlBar::ControlBar(TrackDataModel* model, AudioEngine* engine)
         stopPlayback();
     };
     recordButton.onClick = [this] { toggleRecording(); };
+    countInButton.setClickingTogglesState(true);
+    countInButton.setTooltip("Record after one bar of count-in");
+    countInButton.onClick = [this]
+    {
+        if (onCountInChanged != nullptr)
+            onCountInChanged(countInButton.getToggleState());
+    };
+    punchButton.setClickingTogglesState(true);
+    punchButton.setTooltip("Enable punch recording. Uses the cycle range, or one bar at the playhead.");
+    punchButton.onClick = [this]
+    {
+        if (onPunchChanged != nullptr)
+            onPunchChanged(punchButton.getToggleState());
+    };
+    cycleButton.setClickingTogglesState(true);
+    cycleButton.setTooltip("Repeat the active cycle range (C)");
+    cycleButton.onClick = [this] { toggleCycle(); };
+    metronomeButton.setClickingTogglesState(true);
+    metronomeButton.setTooltip("Enable metronome click (K)");
+    metronomeButton.onClick = [this]
+    {
+        if (audioEngine != nullptr)
+            audioEngine->setMetronomeEnabled(metronomeButton.getToggleState());
+    };
 
     playButton.setColour(juce::TextButton::buttonColourId, accentCyan.withAlpha(0.16f));
     stopButton.setColour(juce::TextButton::buttonColourId, juce::Colours::white.withAlpha(0.08f));
     recordButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xffdc4d4d).withAlpha(0.15f));
+    punchButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xffde9b42).withAlpha(0.18f));
     inspectorButton.setColour(juce::TextButton::buttonColourId, darkPanel);
     mixerButton.setColour(juce::TextButton::buttonColourId, darkPanel);
     pianoRollButton.setColour(juce::TextButton::buttonColourId, darkPanel);
@@ -109,7 +234,7 @@ ControlBar::ControlBar(TrackDataModel* model, AudioEngine* engine)
                              juce::dontSendNotification);
     };
 
-    metronomeButton.setToggleState(true, juce::NotificationType::dontSendNotification);
+    metronomeButton.setToggleState(audioEngine != nullptr && audioEngine->isMetronomeEnabled(), juce::dontSendNotification);
     bpmLabel.setText("120 BPM", juce::dontSendNotification);
     bpmLabel.setJustificationType(juce::Justification::centredRight);
     bpmLabel.setFont(juce::Font(16.0f, juce::Font::bold));
@@ -150,6 +275,49 @@ void ControlBar::stopPlayback() noexcept
         audioEngine->setPlaybackState(false);
 }
 
+void ControlBar::goToBeginning() noexcept
+{
+    if (audioEngine != nullptr)
+        audioEngine->setPlaybackState(false);
+    if (trackModel != nullptr)
+        trackModel->setPlayheadPosition(0.0);
+}
+
+void ControlBar::rewindOneBar() noexcept
+{
+    if (trackModel == nullptr)
+        return;
+    const auto samplesPerBar = trackModel->getSampleRate() * 60.0
+        / juce::jmax(1.0, trackModel->getTempoAtSample(trackModel->getPlayheadPosition()))
+        * trackModel->getTimeSignatureNumerator();
+    trackModel->setPlayheadPosition(trackModel->getPlayheadPosition() - samplesPerBar);
+}
+
+void ControlBar::forwardOneBar() noexcept
+{
+    if (trackModel == nullptr)
+        return;
+    const auto samplesPerBar = trackModel->getSampleRate() * 60.0
+        / juce::jmax(1.0, trackModel->getTempoAtSample(trackModel->getPlayheadPosition()))
+        * trackModel->getTimeSignatureNumerator();
+    trackModel->setPlayheadPosition(trackModel->getPlayheadPosition() + samplesPerBar);
+}
+
+void ControlBar::toggleCycle() noexcept
+{
+    if (trackModel == nullptr)
+        return;
+    if (trackModel->isCycleActive())
+    {
+        trackModel->clearCycle();
+        return;
+    }
+    const auto start = trackModel->getPlayheadPosition();
+    const auto length = trackModel->getSampleRate() * 60.0 / juce::jmax(1.0, trackModel->getBpm())
+        * trackModel->getTimeSignatureNumerator();
+    trackModel->setCycle(start, start + length);
+}
+
 void ControlBar::toggleRecording()
 {
     if (onRecordRequested != nullptr)
@@ -175,11 +343,17 @@ void ControlBar::toggleRecording()
                                                   .getChildFile("StudioForgeRecording.wav"));
     }
 
-    recordButton.setToggleState(audioEngine->isRecording(), juce::dontSendNotification);
+    recordButton.setToggleState(audioEngine->isRecording() || audioEngine->isMidiRecording(), juce::dontSendNotification);
 }
 
 void ControlBar::setRecordActive(bool active) noexcept
 {
+    recordButton.setToggleState(active, juce::dontSendNotification);
+}
+
+void ControlBar::setRecordCountdown(bool active) noexcept
+{
+    recordButton.setTooltip(active ? "Recording starts after count-in" : "Record");
     recordButton.setToggleState(active, juce::dontSendNotification);
 }
 
@@ -194,6 +368,9 @@ void ControlBar::timerCallback()
     const auto remainingSeconds = seconds % 60;
     timecodeLabel.setText(juce::String::formatted("%02d:%02d:%02d", hours, minutes, remainingSeconds),
                           juce::dontSendNotification);
+    punchButton.setToggleState(trackModel->isPunchActive(), juce::dontSendNotification);
+    cycleButton.setToggleState(trackModel->isCycleActive(), juce::dontSendNotification);
+    metronomeButton.setToggleState(audioEngine != nullptr && audioEngine->isMetronomeEnabled(), juce::dontSendNotification);
 }
 
 void ControlBar::paint(juce::Graphics& g)
@@ -213,7 +390,7 @@ void ControlBar::paint(juce::Graphics& g)
 void ControlBar::resized()
 {
     const auto bounds = getLocalBounds().reduced(8, 7);
-    const auto buttonWidth = 58;
+    const auto buttonWidth = 30;
     const auto buttonHeight = 32;
 
     inspectorButton.setBounds(bounds.getX(), bounds.getY(), 30, buttonHeight);
@@ -223,13 +400,19 @@ void ControlBar::resized()
     addTrackButton.setBounds(bounds.getX() + 136, bounds.getY(), 30, buttonHeight);
 
     const auto centre = bounds.getCentreX();
-    const auto transportWidth = buttonWidth * 2 + 6;
+    const auto transportWidth = buttonWidth * 5 + 16;
     const auto transportX = centre - transportWidth / 2;
     timecodeLabel.setBounds(centre - 95, bounds.getY(), 190, 18);
-    playButton.setBounds(transportX, bounds.getY() + 19, buttonWidth, 26);
-    stopButton.setBounds(transportX + buttonWidth + 5, bounds.getY() + 19, buttonWidth, 26);
+    goToBeginningButton.setBounds(transportX, bounds.getY() + 19, 30, 26);
+    rewindButton.setBounds(transportX + 34, bounds.getY() + 19, 30, 26);
+    playButton.setBounds(transportX + 68, bounds.getY() + 19, buttonWidth, 26);
+    stopButton.setBounds(transportX + 102, bounds.getY() + 19, buttonWidth, 26);
+    forwardButton.setBounds(transportX + 136, bounds.getY() + 19, 30, 26);
 
-    recordButton.setBounds(bounds.getRight() - 270, bounds.getY(), 66, buttonHeight);
+    recordButton.setBounds(bounds.getRight() - 444, bounds.getY() + 3, 30, 26);
+    cycleButton.setBounds(bounds.getRight() - 410, bounds.getY(), 66, buttonHeight);
+    countInButton.setBounds(bounds.getRight() - 340, bounds.getY(), 64, buttonHeight);
+    punchButton.setBounds(bounds.getRight() - 270, bounds.getY(), 66, buttonHeight);
     metronomeButton.setBounds(bounds.getRight() - 198, bounds.getY(), 86, buttonHeight);
     bpmSlider.setBounds(bounds.getRight() - 108, bounds.getY() + 2, 62, 25);
     bpmLabel.setBounds(bounds.getRight() - 46, bounds.getY(), 46, buttonHeight);

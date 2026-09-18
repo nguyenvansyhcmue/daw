@@ -6,6 +6,18 @@
 class TrackDataModel;
 class AudioEngine;
 
+class TransportIconButton final : public juce::Button
+{
+public:
+    enum class Icon { goToBeginning, rewind, play, stop, forward, record };
+
+    explicit TransportIconButton(Icon icon);
+    void paintButton(juce::Graphics& graphics, bool highlighted, bool down) override;
+
+private:
+    Icon icon;
+};
+
 class ControlBar final : public juce::Component, private juce::Timer
 {
 public:
@@ -17,6 +29,8 @@ public:
     std::function<void()> onBrowserToggle;
     std::function<void(TrackType)> onCreateTrack;
     std::function<void()> onRecordRequested;
+    std::function<void(bool)> onCountInChanged;
+    std::function<void(bool)> onPunchChanged;
 
     void setInspectorVisible(bool visible) noexcept;
     void setMixerVisible(bool visible) noexcept;
@@ -24,8 +38,13 @@ public:
     void setBrowserVisible(bool visible) noexcept;
     void togglePlayback() noexcept;
     void stopPlayback() noexcept;
+    void goToBeginning() noexcept;
+    void rewindOneBar() noexcept;
+    void forwardOneBar() noexcept;
+    void toggleCycle() noexcept;
     void toggleRecording();
     void setRecordActive(bool active) noexcept;
+    void setRecordCountdown(bool active) noexcept;
 
     void paint(juce::Graphics& g) override;
     void resized() override;
@@ -38,9 +57,15 @@ private:
     juce::TextButton pianoRollButton { "P" };
     juce::TextButton browserButton { "B" };
     juce::TextButton addTrackButton { "+" };
-    juce::TextButton playButton { "Play" };
-    juce::TextButton stopButton { "Stop" };
-    juce::TextButton recordButton { "Record" };
+    TransportIconButton goToBeginningButton { TransportIconButton::Icon::goToBeginning };
+    TransportIconButton rewindButton { TransportIconButton::Icon::rewind };
+    TransportIconButton forwardButton { TransportIconButton::Icon::forward };
+    TransportIconButton playButton { TransportIconButton::Icon::play };
+    TransportIconButton stopButton { TransportIconButton::Icon::stop };
+    TransportIconButton recordButton { TransportIconButton::Icon::record };
+    juce::ToggleButton countInButton { "COUNT" };
+    juce::ToggleButton punchButton { "PUNCH" };
+    juce::ToggleButton cycleButton { "CYCLE" };
     juce::ToggleButton metronomeButton { "Metronome" };
     juce::Slider bpmSlider;
     juce::Label bpmLabel;

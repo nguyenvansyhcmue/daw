@@ -26,7 +26,13 @@ PerformanceFooter::PerformanceFooter(AudioEngine* engine) : audioEngine(engine)
     addAndMakeVisible(automationVisible);
     cpuLabel.setJustificationType(juce::Justification::centredRight);
     cpuLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.72f));
+    deviceLabel.setJustificationType(juce::Justification::centredRight);
+    deviceLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.52f));
+    overloadLabel.setJustificationType(juce::Justification::centredRight);
+    overloadLabel.setColour(juce::Label::textColourId, juce::Colours::orange.withAlpha(0.88f));
     addAndMakeVisible(cpuLabel);
+    addAndMakeVisible(deviceLabel);
+    addAndMakeVisible(overloadLabel);
     addAndMakeVisible(cpuMeter);
     startTimerHz(15);
 }
@@ -37,6 +43,28 @@ void PerformanceFooter::timerCallback()
         masterGain.setValue(audioEngine->getMasterGain(), juce::dontSendNotification);
     cpuLoad = audioEngine != nullptr ? juce::jlimit(0.0, 1.0, audioEngine->getAudioDeviceManager().getCpuUsage()) : 0.0;
     cpuLabel.setText("CPU " + juce::String(juce::roundToInt(cpuLoad * 100.0)) + "%", juce::dontSendNotification);
+    if (audioEngine != nullptr)
+    {
+        const auto diagnostics = audioEngine->getRealtimeDiagnostics();
+        deviceLabel.setText(juce::String(juce::roundToInt(diagnostics.sampleRate)) + " Hz / "
+                            + juce::String(diagnostics.bufferSize) + " smp", juce::dontSendNotification);
+        juce::String warnings;
+        if (diagnostics.overloadCount != 0)
+            warnings << "XRUN " << diagnostics.overloadCount;
+        if (diagnostics.midiInputOverflowCount != 0)
+        {
+            if (warnings.isNotEmpty())
+                warnings << "  ";
+            warnings << "MIDI DROP " << diagnostics.midiInputOverflowCount;
+        }
+        if (diagnostics.midiRecordingOverflowCount != 0)
+        {
+            if (warnings.isNotEmpty())
+                warnings << "  ";
+            warnings << "MIDI REC DROP " << diagnostics.midiRecordingOverflowCount;
+        }
+        overloadLabel.setText(warnings, juce::dontSendNotification);
+    }
     repaint(cpuMeter.getBounds());
 }
 
@@ -54,6 +82,8 @@ void PerformanceFooter::resized()
     masterGain.setBounds(area.removeFromLeft(180).reduced(0, 3));
     bounceButton.setBounds(area.removeFromLeft(76).reduced(3, 0));
     automationVisible.setBounds(area.removeFromRight(130));
+    overloadLabel.setBounds(area.removeFromRight(80));
+    deviceLabel.setBounds(area.removeFromRight(104));
     cpuMeter.setBounds(area.removeFromRight(92).reduced(3, 5));
     cpuLabel.setBounds(area);
 }

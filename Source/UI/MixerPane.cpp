@@ -2,6 +2,7 @@
 #include "../AudioEngine/AudioEngine.h"
 #include "../AudioEngine/GainUtilityProcessor.h"
 #include "../Plugins/PluginHostService.h"
+#include "PluginBrowserPanel.h"
 
 namespace
 {
@@ -20,6 +21,11 @@ MixerPane::MixerPane(TrackDataModel* model, AudioEngine* engine, PluginHostServi
     titleLabel.setColour(juce::Label::textColourId, juce::Colours::white);
     titleLabel.setFont(juce::Font(16.0f, juce::Font::bold));
     addAndMakeVisible(titleLabel);
+    busTitleLabel.setText("AUX RETURNS", juce::dontSendNotification);
+    busTitleLabel.setJustificationType(juce::Justification::centredLeft);
+    busTitleLabel.setColour(juce::Label::textColourId, accentCyan.withAlpha(0.85f));
+    busTitleLabel.setFont(juce::Font(11.0f, juce::Font::bold));
+    addAndMakeVisible(busTitleLabel);
 
     for (int i = 0; i < static_cast<int>(TrackDataModel::maxTracks); ++i)
     {
@@ -96,25 +102,19 @@ MixerPane::MixerPane(TrackDataModel* model, AudioEngine* engine, PluginHostServi
                             [this, i, slot](const juce::FileChooser& chooser)
                             {
                                 const auto selected = chooser.getResult();
-                                if (pluginHostService == nullptr || audioEngine == nullptr || ! selected.exists())
+                                if (pluginHostService == nullptr || ! selected.exists())
                                 {
                                     pluginFileChooser.reset();
                                     return;
                                 }
 
-                                if (pluginHostService->scanVst3(selected).wasOk())
-                                {
-                                    const auto plugins = pluginHostService->getKnownPlugins();
-                                    if (! plugins.isEmpty())
-                                    {
-                                        juce::String error;
-                                        auto effect = pluginHostService->createEffect(plugins.getLast(),
-                                            trackModel != nullptr ? trackModel->getSampleRate() : 44100.0, 512, error);
-                                        if (effect != nullptr)
-                                            audioEngine->setFxProcessor(static_cast<size_t>(i), slot, std::move(effect));
-                                    }
-                                }
                                 pluginFileChooser.reset();
+                                const juce::Component::SafePointer<MixerPane> safeThis(this);
+                                pluginHostService->scanVst3Async(selected, [safeThis, i, slot](juce::Result result)
+                                {
+                                    if (safeThis != nullptr && result.wasOk())
+                                        safeThis->showPluginBrowser(i, slot);
+                                });
                             });
                     }
                 });
@@ -151,7 +151,100 @@ MixerPane::MixerPane(TrackDataModel* model, AudioEngine* engine, PluginHostServi
         addAndMakeVisible(panSliders[i]);
     }
 
+    for (int i = 0; i < static_cast<int>(TrackDataModel::maxBuses); ++i)
+    {
+        busLabels[i].setJustificationType(juce::Justification::centred);
+        busLabels[i].setColour(juce::Label::textColourId, accentCyan.withAlpha(0.9f));
+        busLabels[i].setFont(juce::Font(11.0f, juce::Font::bold));
+        addAndMakeVisible(busLabels[i]);
+        addAndMakeVisible(busMeters[i]);
+
+        busFaders[i].setRange(0.0, 2.0, 0.01);
+        busFaders[i].setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+        busFaders[i].setColour(juce::Slider::trackColourId, accentBlue);
+        busFaders[i].setColour(juce::Slider::thumbColourId, accentCyan);
+        busFaders[i].onValueChange = [this, i]
+        {
+            if (trackModel == nullptr || static_cast<size_t>(i) >= trackModel->getBuses().size())
+                return;
+            trackModel->setBusGain(trackModel->getBuses()[static_cast<size_t>(i)].id,
+                                    static_cast<float>(busFaders[i].getValue()));
+        };
+        addAndMakeVisible(busFaders[i]);
+
+        busMuteButtons[i].setButtonText("M");
+        busMuteButtons[i].setColour(juce::ToggleButton::textColourId, juce::Colours::white);
+        busMuteButtons[i].setColour(juce::ToggleButton::tickColourId, accentCyan);
+        busMuteButtons[i].onClick = [this, i]
+        {
+            if (trackModel == nullptr || static_cast<size_t>(i) >= trackModel->getBuses().size())
+                return;
+            trackModel->setBusMuted(trackModel->getBuses()[static_cast<size_t>(i)].id,
+                                    busMuteButtons[i].getToggleState());
+        };
+        addAndMakeVisible(busMuteButtons[i]);
+
+        for (size_t slot = 0; slot < TrackDataModel::maxFxSlots; ++slot)
+        {
+            auto& button = busFxButtons[static_cast<size_t>(i)][slot];
+            button.setButtonText("FX " + juce::String(static_cast<int>(slot + 1)));
+            button.onClick = [this, i, slot]
+            {
+                if (trackModel == nullptr || static_cast<size_t>(i) >= trackModel->getBuses().size())
+                    return;
+                const auto bus = trackModel->getBuses()[static_cast<size_t>(i)].id;
+                juce::PopupMenu menu;
+                menu.addItem(1, "None");
+                menu.addItem(2, "Gain Utility (-6dB)");
+                menu.addItem(3, "Bypass Toggle");
+                menu.showMenuAsync(juce::PopupMenu::Options {}, [this, bus, slot](int result)
+                {
+                    if (trackModel == nullptr)
+                        return;
+                    if (result == 1) trackModel->setBusFxProcessor(bus, slot, nullptr);
+                    else if (result == 2) trackModel->setBusFxProcessor(bus, slot, std::make_shared<GainUtilityProcessor>());
+                    else if (result == 3)
+                    {
+                        if (const auto* rack = trackModel->getBusFxRackSnapshot(bus); rack != nullptr)
+                            trackModel->setBusFxBypassed(bus, slot, ! rack->bypass[slot]);
+                    }
+                });
+            };
+            addAndMakeVisible(button);
+        }
+    }
+
     refreshFromModel();
+}
+
+void MixerPane::showPluginBrowser(int trackIndex, size_t slot)
+{
+    if (pluginHostService == nullptr || audioEngine == nullptr || trackIndex < 0)
+        return;
+
+    auto* panel = new PluginBrowserPanel(*pluginHostService, [safeThis = juce::Component::SafePointer<MixerPane>(this), trackIndex, slot]
+                                         (const juce::PluginDescription& description)
+    {
+        if (safeThis == nullptr || safeThis->audioEngine == nullptr || safeThis->pluginHostService == nullptr)
+            return;
+
+        juce::String error;
+        auto* device = safeThis->audioEngine->getAudioDeviceManager().getCurrentAudioDevice();
+        const auto sampleRate = device != nullptr ? device->getCurrentSampleRate()
+                                                  : (safeThis->trackModel != nullptr ? safeThis->trackModel->getSampleRate() : 44100.0);
+        const auto blockSize = device != nullptr ? device->getCurrentBufferSizeSamples() : 512;
+        if (auto effect = safeThis->pluginHostService->createEffect(description, sampleRate, blockSize, error))
+            safeThis->audioEngine->setFxProcessor(static_cast<size_t>(trackIndex), slot, std::move(effect));
+    });
+
+    juce::DialogWindow::LaunchOptions options;
+    options.content.setOwned(panel);
+    options.dialogTitle = "Plug-in Browser";
+    options.dialogBackgroundColour = juce::Colour(0xff25282d);
+    options.useNativeTitleBar = true;
+    options.resizable = true;
+    options.componentToCentreAround = this;
+    options.launchAsync();
 }
 
 void MixerPane::refreshFromModel()
@@ -179,6 +272,19 @@ void MixerPane::refreshFromModel()
         for (auto& button : fxButtons[index])
             button.setEnabled(active);
     }
+
+    const auto& buses = trackModel != nullptr ? trackModel->getBuses() : std::vector<TrackDataModel::BusState> {};
+    for (size_t index = 0; index < busFaders.size(); ++index)
+    {
+        const auto active = index < buses.size();
+        busLabels[index].setText(active ? "Bus " + juce::String(static_cast<int>(index + 1)) : "—",
+                                 juce::dontSendNotification);
+        busFaders[index].setValue(active ? buses[index].gain : 1.0f, juce::dontSendNotification);
+        busMuteButtons[index].setToggleState(active && buses[index].muted, juce::dontSendNotification);
+        busFaders[index].setEnabled(active);
+        busMuteButtons[index].setEnabled(active);
+        for (auto& button : busFxButtons[index]) button.setEnabled(active);
+    }
 }
 
 void MixerPane::timerCallback()
@@ -195,6 +301,16 @@ void MixerPane::timerCallback()
         for (size_t slot = 0; slot < TrackDataModel::maxFxSlots; ++slot)
             fxButtons[i][slot].setActive(rack != nullptr && rack->processors[slot] != nullptr);
     }
+
+    if (trackModel != nullptr)
+        for (size_t i = 0; i < busMeters.size(); ++i)
+        {
+            busMeters[i].updatePeak(audioEngine->getBusPeak(i));
+            const auto& buses = trackModel->getBuses();
+            const auto* rack = i < buses.size() ? trackModel->getBusFxRackSnapshot(buses[i].id) : nullptr;
+            for (size_t slot = 0; slot < TrackDataModel::maxFxSlots; ++slot)
+                busFxButtons[i][slot].setActive(rack != nullptr && rack->processors[slot] != nullptr);
+        }
 
 }
 
@@ -213,6 +329,8 @@ void MixerPane::resized()
 {
     auto area = getLocalBounds();
     titleLabel.setBounds(area.removeFromTop(24).reduced(8, 0));
+    const auto busArea = area.removeFromRight(juce::jmin(360, area.getWidth() / 3));
+    busTitleLabel.setBounds(busArea.withHeight(22).reduced(8, 0));
 
     const auto stripWidth = juce::jmax(1, (area.getWidth() - 20) / static_cast<int>(TrackDataModel::maxTracks));
     for (int i = 0; i < static_cast<int>(TrackDataModel::maxTracks); ++i)
@@ -233,5 +351,22 @@ void MixerPane::resized()
         meters[i].setBounds(controlRow.removeFromLeft(controlRow.getWidth() / 3).reduced(2, 0));
         faders[i].setBounds(controlRow.reduced(4, 0));
         panSliders[i].setBounds(content.removeFromBottom(18).reduced(4, 0));
+    }
+
+    auto returns = busArea;
+    returns.removeFromTop(24);
+    const auto busStripWidth = juce::jmax(1, returns.getWidth() / static_cast<int>(TrackDataModel::maxBuses));
+    for (int i = 0; i < static_cast<int>(TrackDataModel::maxBuses); ++i)
+    {
+        auto strip = returns.removeFromLeft(busStripWidth).reduced(4, 4);
+        busLabels[i].setBounds(strip.removeFromBottom(18));
+        busMuteButtons[i].setBounds(strip.removeFromBottom(22).reduced(3, 1));
+        auto fxArea = strip.removeFromTop(80);
+        const auto fxHeight = juce::jmax(1, fxArea.getHeight() / static_cast<int>(TrackDataModel::maxFxSlots));
+        for (size_t slot = 0; slot < TrackDataModel::maxFxSlots; ++slot)
+            busFxButtons[static_cast<size_t>(i)][slot].setBounds(fxArea.removeFromTop(fxHeight).reduced(1, 1));
+        auto faderArea = strip.reduced(4, 4);
+        busMeters[i].setBounds(faderArea.removeFromLeft(juce::jmax(10, faderArea.getWidth() / 3)));
+        busFaders[i].setBounds(faderArea);
     }
 }

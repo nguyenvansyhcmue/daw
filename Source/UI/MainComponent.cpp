@@ -1,4 +1,5 @@
 #include "MainComponent.h"
+#include "../Midi/MidiFileImporter.h"
 #include "../Project/ProjectSerializer.h"
 #include "../Project/ProjectState.h"
 
@@ -57,7 +58,29 @@ MainComponent::MainComponent()
         startupWorkflow.showTrackCreation(true);
     };
     controlBar.onRecordRequested = [this] { toggleRecording(); };
-    startupWorkflow.onEmptyProject = [this] { createNewProject(); };
+    controlBar.onCountInChanged = [this](bool enabled) { countInEnabled = enabled; };
+    controlBar.onPunchChanged = [this](bool enabled)
+    {
+        if (! enabled)
+        {
+            trackDataModel.clearPunchRange();
+            return;
+        }
+
+        if (trackDataModel.isCycleActive())
+        {
+            trackDataModel.setPunchRange(trackDataModel.getCycleStartSample(), trackDataModel.getCycleEndSample());
+            return;
+        }
+
+        const auto samplesPerBeat = trackDataModel.getSampleRate() * 60.0 / trackDataModel.getBpm();
+        const auto start = trackDataModel.getPlayheadPosition();
+        trackDataModel.setPunchRange(start, start + samplesPerBeat * trackDataModel.getTimeSignatureNumerator());
+    };
+    startupWorkflow.onTemplateSelected = [this] (ProjectTemplate projectTemplate)
+    {
+        createProjectFromTemplate(projectTemplate);
+    };
     startupWorkflow.onOpenProject = [this]
     {
         if (onOpenProjectRequested != nullptr)
@@ -97,22 +120,11 @@ MainComponent::MainComponent()
     {
         importAudioFile(file);
     };
-    performanceFooter.onBounceRequested = [this]
-    {
-        bounceFileChooser = std::make_unique<juce::FileChooser>("Bounce mixdown", juce::File {}, "*.wav");
-        bounceFileChooser->launchAsync(juce::FileBrowserComponent::saveMode
-                                           | juce::FileBrowserComponent::canSelectFiles,
-            [this](const juce::FileChooser& chooser)
-            {
-                const auto output = chooser.getResult();
-                if (output != juce::File {})
-                    audioEngine.renderOfflineWav(output.withFileExtension(".wav"), trackDataModel.getSampleRate());
-                bounceFileChooser.reset();
-            });
-    };
+    performanceFooter.onBounceRequested = [this] { requestProjectBounce(); };
 
     // A project starts empty; tracks are created through the explicit New Track workflow.
     markProjectSaved();
+    startTimerHz(30);
 }
 
 void MainComponent::showInitialTrackCreation()
@@ -135,6 +147,7 @@ void MainComponent::configureTrackCreationDialog()
 
 MainComponent::~MainComponent()
 {
+    stopTimer();
     setLookAndFeel(nullptr);
 }
 
@@ -164,6 +177,16 @@ bool MainComponent::handleGlobalKeyPress(const juce::KeyPress& key)
         controlBar.toggleRecording();
         return true;
     }
+    if (key.getKeyCode() == 'c' || key.getKeyCode() == 'C')
+    {
+        controlBar.toggleCycle();
+        return true;
+    }
+    if (key.getKeyCode() == 'k' || key.getKeyCode() == 'K')
+    {
+        audioEngine.setMetronomeEnabled(! audioEngine.isMetronomeEnabled());
+        return true;
+    }
 
     return false;
 }
@@ -176,12 +199,23 @@ juce::Result MainComponent::saveProject(const juce::File& file)
     return result;
 }
 
+juce::Result MainComponent::saveProjectCopy(const juce::File& file) const
+{
+    return ProjectSerializer::save(trackDataModel, file);
+}
+
+juce::Result MainComponent::saveProjectTemplate(const juce::File& file) const
+{
+    return ProjectSerializer::save(trackDataModel, file);
+}
+
 juce::Result MainComponent::loadProject(const juce::File& file, juce::StringArray* missingMediaReferences)
 {
     audioEngine.setPlaybackState(false);
-    const auto result = ProjectSerializer::load(trackDataModel, file, missingMediaReferences);
+    const auto result = ProjectSerializer::load(trackDataModel, pluginHost, file, missingMediaReferences);
     if (result.wasOk())
     {
+        audioEngine.prepareActiveEffects();
         selectTrack(0);
         mixerPane.refreshFromModel();
         arrangeWindow.repaint();
@@ -198,11 +232,13 @@ juce::Result MainComponent::loadProject(const juce::File& file, juce::StringArra
 
 juce::Result MainComponent::createNewProject()
 {
-    audioEngine.setPlaybackState(false);
-    ProjectState state;
-    state.tempoMap.push_back({ 0.0, 120.0 });
+    return createProjectFromTemplate(ProjectTemplate::empty);
+}
 
-    const auto result = trackDataModel.applyProjectState(state);
+juce::Result MainComponent::createProjectFromTemplate(ProjectTemplate projectTemplate)
+{
+    audioEngine.setPlaybackState(false);
+    const auto result = trackDataModel.applyProjectState(ProjectTemplates::create(projectTemplate));
     if (result.wasOk())
     {
         selectTrack(0);
@@ -210,19 +246,28 @@ juce::Result MainComponent::createNewProject()
         arrangeWindow.repaint();
         pianoRoll.repaint();
         markProjectSaved();
-        showInitialTrackCreation();
+        if (trackDataModel.getTrackCount() == 0)
+            showInitialTrackCreation();
+        else
+            showWorkspace();
     }
     return result;
 }
 
 bool MainComponent::isProjectDirty() const noexcept
 {
-    return trackDataModel.getProjectRevision() != savedProjectRevision;
+    return recoveredProjectNeedsSave || trackDataModel.getProjectRevision() != savedProjectRevision;
 }
 
 void MainComponent::markProjectSaved() noexcept
 {
     savedProjectRevision = trackDataModel.getProjectRevision();
+    recoveredProjectNeedsSave = false;
+}
+
+void MainComponent::markProjectRecovered() noexcept
+{
+    recoveredProjectNeedsSave = true;
 }
 
 bool MainComponent::undoEdit()
@@ -270,6 +315,51 @@ void MainComponent::importAudioFile(const juce::File& file)
     arrangeWindow.importAudioFile(file, getSelectedTrackIndex(), trackDataModel.getPlayheadPosition());
 }
 
+juce::Result MainComponent::importMidiFile(const juce::File& file)
+{
+    std::vector<ImportedMidiTrack> importedTracks;
+    const auto parseResult = MidiFileImporter::read(file, trackDataModel.getSampleRate(),
+                                                     trackDataModel.getBpm(), importedTracks);
+    if (parseResult.failed())
+        return parseResult;
+
+    const auto result = trackDataModel.importMidiTracks(importedTracks, trackDataModel.getPlayheadPosition());
+    if (result.failed())
+        return result;
+
+    selectTrack(static_cast<int>(trackDataModel.getTrackCount() - importedTracks.size()));
+    mixerPane.refreshFromModel();
+    arrangeWindow.repaint();
+    return juce::Result::ok();
+}
+
+void MainComponent::requestProjectBounce()
+{
+    bounceFileChooser = std::make_unique<juce::FileChooser>("Bounce Project", juce::File {}, "*.wav;*.aif;*.aiff;*.flac");
+    bounceFileChooser->launchAsync(juce::FileBrowserComponent::saveMode
+                                       | juce::FileBrowserComponent::canSelectFiles,
+        [safeOwner = juce::Component::SafePointer<MainComponent>(this)](const juce::FileChooser& chooser)
+        {
+            if (safeOwner == nullptr)
+                return;
+
+            auto output = chooser.getResult();
+            safeOwner->bounceFileChooser.reset();
+            if (output == juce::File {})
+                return;
+
+            if (output.getFileExtension().isEmpty())
+                output = output.withFileExtension(".wav");
+
+            AudioEngine::OfflineRenderOptions options;
+            options.sampleRate = safeOwner->trackDataModel.getSampleRate();
+            const auto result = safeOwner->audioEngine.renderOfflineAudio(output, options);
+            if (result.failed())
+                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                                       "Bounce Failed", result.getErrorMessage());
+        });
+}
+
 void MainComponent::selectTrack(int trackIndex)
 {
     const auto count = static_cast<int>(trackDataModel.getTrackCount());
@@ -301,25 +391,98 @@ juce::File MainComponent::createRecordingDestination() const
 
 void MainComponent::toggleRecording()
 {
-    if (audioEngine.isRecording())
+    if (audioEngine.isRecording() || audioEngine.isMidiRecording() || recordingCountdownActive)
     {
-        audioEngine.stopRecording();
+        if (audioEngine.isRecording())
+            audioEngine.stopRecording();
+        if (audioEngine.isMidiRecording())
+            audioEngine.stopMidiRecording();
+        audioEngine.clearRecordingCaptureRange();
+        recordingCountdownActive = false;
+        recordingPunchStopSample = -1.0;
+        pendingRecordingTrack = -1;
+        pendingRecordingDestination = {};
         controlBar.setRecordActive(false);
+        controlBar.setRecordCountdown(false);
         arrangeWindow.repaint();
         return;
     }
 
     const auto armedTrack = trackDataModel.getFirstArmedTrackIndex();
     const auto target = armedTrack >= 0 ? armedTrack : getSelectedTrackIndex();
-    if (target < 0 || target >= static_cast<int>(trackDataModel.getTrackCount())
-        || trackDataModel.getTrack(static_cast<size_t>(target)).type != TrackType::audio)
+    if (target < 0 || target >= static_cast<int>(trackDataModel.getTrackCount()))
         return;
 
-    const auto destination = createRecordingDestination();
-    if (destination == juce::File {})
+    const auto type = trackDataModel.getTrack(static_cast<size_t>(target)).type;
+    if (type != TrackType::audio && type != TrackType::instrument && type != TrackType::externalMidi)
         return;
-    if (audioEngine.startRecording(static_cast<size_t>(target), destination).wasOk())
+    const auto destination = type == TrackType::audio ? createRecordingDestination() : juce::File {};
+    if (type == TrackType::audio && destination == juce::File {})
+        return;
+    if (type == TrackType::audio && trackDataModel.isPunchActive())
+    {
+        const auto punchIn = trackDataModel.getPunchInSample();
+        const auto punchOut = trackDataModel.getPunchOutSample();
+        audioEngine.setRecordingCaptureRange(punchIn, punchOut);
+        recordingPunchStopSample = punchOut;
+        audioEngine.setPlaybackState(true);
+        startRecordingNow(target, destination, punchIn);
+        return;
+    }
+
+    audioEngine.clearRecordingCaptureRange();
+    if (! countInEnabled)
+    {
+        startRecordingNow(target, destination);
+        return;
+    }
+
+    const auto samplesPerBeat = trackDataModel.getSampleRate() * 60.0 / trackDataModel.getBpm();
+    pendingRecordingStartSample = trackDataModel.getPlayheadPosition()
+        + samplesPerBeat * trackDataModel.getTimeSignatureNumerator();
+    pendingRecordingTrack = target;
+    pendingRecordingDestination = destination;
+    recordingCountdownActive = true;
+    audioEngine.setPlaybackState(true);
+    controlBar.setRecordCountdown(true);
+}
+
+void MainComponent::startRecordingNow(int trackIndex, const juce::File& destination,
+                                      double timelineStartSample)
+{
+    if (trackIndex < 0 || trackIndex >= static_cast<int>(trackDataModel.getTrackCount()))
+        return;
+    const auto type = trackDataModel.getTrack(static_cast<size_t>(trackIndex)).type;
+    const auto result = type == TrackType::audio
+        ? audioEngine.startRecording(static_cast<size_t>(trackIndex), destination, timelineStartSample)
+        : audioEngine.startMidiRecording(static_cast<size_t>(trackIndex));
+    if (result.wasOk())
         controlBar.setRecordActive(true);
+}
+
+void MainComponent::timerCallback()
+{
+    if (audioEngine.isRecording() && recordingPunchStopSample >= 0.0
+        && trackDataModel.getPlayheadPosition() >= recordingPunchStopSample)
+    {
+        audioEngine.stopRecording();
+        recordingPunchStopSample = -1.0;
+        controlBar.setRecordActive(false);
+        arrangeWindow.repaint();
+        return;
+    }
+
+    if (! recordingCountdownActive || trackDataModel.getPlayheadPosition() < pendingRecordingStartSample)
+        return;
+
+    const auto track = pendingRecordingTrack;
+    const auto destination = pendingRecordingDestination;
+    recordingCountdownActive = false;
+    pendingRecordingTrack = -1;
+    pendingRecordingDestination = {};
+    controlBar.setRecordCountdown(false);
+    if (track >= 0)
+        startRecordingNow(track, destination);
 }
 
 void MainComponent::setWorkspaceTrackHeight(int height)

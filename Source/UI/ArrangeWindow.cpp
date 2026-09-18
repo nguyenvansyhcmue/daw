@@ -1,6 +1,7 @@
 #include "ArrangeWindow.h"
 
 #include "../Media/MediaReloadService.h"
+#include "Theme/StudioForgeLookAndFeel.h"
 
 #include <cmath>
 
@@ -162,12 +163,67 @@ private:
 TrackHeaderPanel::TrackHeaderPanel(TrackDataModel* model)
     : trackModel(model)
 {
+    for (size_t index = 0; index < volumeControls.size(); ++index)
+    {
+        auto& volume = volumeControls[index];
+        volume.setRange(0.0, 2.0, 0.01);
+        volume.setSliderStyle(juce::Slider::LinearBar);
+        volume.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+        volume.setTooltip("Track volume");
+        volume.onValueChange = [this, index]
+        {
+            if (trackModel != nullptr && index < trackModel->getTrackCount())
+                trackModel->setTrackVolume(index, static_cast<float>(volumeControls[index].getValue()));
+        };
+        addAndMakeVisible(volume);
+
+        auto& pan = panControls[index];
+        pan.setRange(-1.0, 1.0, 0.01);
+        pan.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+        pan.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+        pan.setTooltip("Track pan");
+        pan.onValueChange = [this, index]
+        {
+            if (trackModel != nullptr && index < trackModel->getTrackCount())
+                trackModel->setTrackPan(index, static_cast<float>(panControls[index].getValue()));
+        };
+        addAndMakeVisible(pan);
+    }
     startTimerHz(30);
 }
 
 void TrackHeaderPanel::timerCallback()
 {
+    if (trackModel != nullptr)
+    {
+        if (laidOutTrackCount != trackModel->getTrackCount() || laidOutTrackHeight != trackModel->getTrackHeight())
+            resized();
+        for (size_t index = 0; index < trackModel->getTrackCount() && index < volumeControls.size(); ++index)
+        {
+            const auto& track = trackModel->getTrack(index);
+            volumeControls[index].setValue(track.volume.load(std::memory_order_relaxed), juce::dontSendNotification);
+            panControls[index].setValue(track.pan.load(std::memory_order_relaxed), juce::dontSendNotification);
+        }
+    }
     repaint();
+}
+
+void TrackHeaderPanel::resized()
+{
+    const auto rowHeight = trackModel != nullptr ? trackModel->getTrackHeight() : StudioForgeTheme::UIMetrics::trackHeaderHeight;
+    laidOutTrackCount = trackModel != nullptr ? trackModel->getTrackCount() : 0;
+    laidOutTrackHeight = rowHeight;
+    for (size_t index = 0; index < volumeControls.size(); ++index)
+    {
+        const auto visible = trackModel != nullptr && index < trackModel->getTrackCount();
+        volumeControls[index].setVisible(visible);
+        panControls[index].setVisible(visible);
+        if (! visible)
+            continue;
+        const auto rowY = static_cast<int>(index) * rowHeight;
+        panControls[index].setBounds(getWidth() - 29, rowY + 8, 24, 24);
+        volumeControls[index].setBounds(103, rowY + 24, juce::jmax(0, getWidth() - 137), 12);
+    }
 }
 
 void TrackHeaderPanel::paint(juce::Graphics& g)
@@ -182,38 +238,42 @@ void TrackHeaderPanel::paint(juce::Graphics& g)
     for (int index = 0; index < count; ++index)
     {
         const auto row = juce::Rectangle<float>(0.0f, static_cast<float>(index) * rowHeight, static_cast<float>(getWidth()), rowHeight);
-        g.setColour(index == selectedTrack ? juce::Colour(0xff435362) : (index % 2 == 0 ? panelAlt : panelBackground));
+        g.setColour(index == selectedTrack ? juce::Colour(0xff3a4147) : (index % 2 == 0 ? juce::Colour(0xff292c2f) : juce::Colour(0xff25282b)));
         g.fillRect(row);
 
         const auto& track = trackModel->getTrack(static_cast<size_t>(index));
         const auto colour = track.type == TrackType::instrument ? juce::Colour(0xff35a866)
             : track.type == TrackType::externalMidi ? juce::Colour(0xff9167d4)
             : juce::Colour(0xff3d8ed7);
+        g.setColour(StudioForgeTheme::separator.withAlpha(0.75f));
+        g.drawHorizontalLine(row.getBottom() - 1.0f, row.getX(), row.getRight());
         g.setColour(colour);
-        g.fillRoundedRectangle(row.getX() + 10.0f, row.getY() + 12.0f, 28.0f, 28.0f, 4.0f);
+        g.fillRect(row.getX() + 3.0f, row.getY() + 2.0f, 3.0f, row.getHeight() - 4.0f);
+        g.fillRoundedRectangle(row.getX() + 10.0f, row.getY() + 11.0f, 18.0f, 18.0f, 3.0f);
         g.setColour(juce::Colours::white.withAlpha(0.9f));
         g.setFont(juce::Font(juce::FontOptions(13.0f, juce::Font::bold)));
         g.drawText(track.type == TrackType::instrument ? "♪" : track.type == TrackType::externalMidi ? "M" : "~",
-                   row.getX() + 10.0f, row.getY() + 12.0f, 28.0f, 28.0f, juce::Justification::centred, false);
+                   row.getX() + 10.0f, row.getY() + 11.0f, 18.0f, 18.0f, juce::Justification::centred, false);
         g.drawText(track.name.isNotEmpty() ? track.name : "Track " + juce::String(index + 1),
-                   row.getX() + 46.0f, row.getY() + 8.0f, 90.0f, 18.0f, juce::Justification::centredLeft, true);
-        g.setColour(juce::Colours::white.withAlpha(0.42f));
-        g.setFont(10.0f);
-        const auto typeName = track.type == TrackType::instrument ? "Instrument"
-            : track.type == TrackType::externalMidi ? "External MIDI" : "Audio";
-        g.drawText(typeName, row.getX() + 46.0f, row.getY() + 27.0f, 80.0f, 15.0f, juce::Justification::centredLeft, false);
-
-        const auto arm = juce::Rectangle<float>(row.getRight() - 96.0f, row.getY() + 16.0f, 20.0f, 20.0f);
-        const auto mute = arm.translated(24.0f, 0.0f);
-        const auto solo = mute.translated(24.0f, 0.0f);
-        g.setColour(track.armed.load(std::memory_order_relaxed) ? juce::Colour(0xffc94a4a) : juce::Colour(0xff333333));
-        g.fillRoundedRectangle(arm, 3.0f);
-        g.setColour(track.muted.load(std::memory_order_relaxed) ? juce::Colour(0xffd6a23d) : juce::Colour(0xff333333));
-        g.fillRoundedRectangle(mute, 3.0f);
-        g.setColour(track.solo.load(std::memory_order_relaxed) ? juce::Colour(0xffd6a23d) : juce::Colour(0xff333333));
-        g.fillRoundedRectangle(solo, 3.0f);
+                   row.getX() + 35.0f, row.getY() + 4.0f, row.getWidth() - 70.0f, 16.0f, juce::Justification::centredLeft, true);
+        const auto arm = juce::Rectangle<float>(row.getX() + 35.0f, row.getY() + 23.0f, 14.0f, 14.0f);
+        const auto monitor = arm.translated(16.0f, 0.0f);
+        const auto mute = track.type == TrackType::audio ? monitor.translated(16.0f, 0.0f) : arm.translated(16.0f, 0.0f);
+        const auto solo = mute.translated(16.0f, 0.0f);
+        g.setColour(track.armed.load(std::memory_order_relaxed) ? StudioForgeTheme::recordRed : juce::Colour(0xff333333));
+        g.fillRoundedRectangle(arm, 2.0f);
+        if (track.type == TrackType::audio)
+        {
+            g.setColour(track.inputMonitoring.load(std::memory_order_relaxed) ? StudioForgeTheme::accentBlue : juce::Colour(0xff333333));
+            g.fillRoundedRectangle(monitor, 2.0f);
+        }
+        g.setColour(track.muted.load(std::memory_order_relaxed) ? StudioForgeTheme::muteAmber : juce::Colour(0xff333333));
+        g.fillRoundedRectangle(mute, 2.0f);
+        g.setColour(track.solo.load(std::memory_order_relaxed) ? StudioForgeTheme::soloYellow : juce::Colour(0xff333333));
+        g.fillRoundedRectangle(solo, 2.0f);
         g.setColour(juce::Colours::white.withAlpha(0.8f));
         g.drawText("R", arm, juce::Justification::centred, true);
+        if (track.type == TrackType::audio) g.drawText("I", monitor, juce::Justification::centred, true);
         g.drawText("M", mute, juce::Justification::centred, true);
         g.drawText("S", solo, juce::Justification::centred, true);
     }
@@ -237,13 +297,76 @@ void TrackHeaderPanel::mouseDown(const juce::MouseEvent& event)
         return;
 
     const auto rowY = static_cast<float>(track * rowHeight);
-    const auto arm = juce::Rectangle<float>(static_cast<float>(getWidth()) - 96.0f, rowY + 16.0f, 20.0f, 20.0f);
-    const auto mute = arm.translated(24.0f, 0.0f);
-    const auto solo = mute.translated(24.0f, 0.0f);
     const auto& state = trackModel->getTrack(static_cast<size_t>(track));
+    const auto arm = juce::Rectangle<float>(35.0f, rowY + 23.0f, 14.0f, 14.0f);
+    const auto monitor = arm.translated(16.0f, 0.0f);
+    const auto mute = state.type == TrackType::audio ? monitor.translated(16.0f, 0.0f) : arm.translated(16.0f, 0.0f);
+    const auto solo = mute.translated(16.0f, 0.0f);
+
+    if (event.mods.isPopupMenu())
+    {
+        juce::PopupMenu menu;
+        menu.addItem(1, "New Audio Track Below");
+        menu.addItem(2, "New Software Instrument Below");
+        menu.addItem(3, "New External MIDI Track Below");
+        menu.addItem(4, "New Aux Bus");
+        menu.addSeparator();
+        menu.addItem(5, "Duplicate Track");
+        menu.addItem(6, "Delete Track", trackModel->getTrackCount() > 1);
+        const auto safeOwner = juce::Component::SafePointer<TrackHeaderPanel>(this);
+        menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this),
+                           [safeOwner, track] (int choice)
+        {
+            if (safeOwner == nullptr || safeOwner->trackModel == nullptr || choice == 0)
+                return;
+
+            auto& model = *safeOwner->trackModel;
+            const auto createBelow = [&model, track] (TrackType type)
+            {
+                const auto created = model.addTrack(type);
+                if (created.isValid() && track + 1 < static_cast<int>(model.getTrackCount()))
+                    model.reorderTrack(created, static_cast<size_t>(track + 1));
+                return created;
+            };
+
+            TrackId selected;
+            if (choice >= 1 && choice <= 3)
+                selected = createBelow(choice == 1 ? TrackType::audio
+                                       : choice == 2 ? TrackType::instrument : TrackType::externalMidi);
+            else if (choice == 4)
+                model.addBus();
+            else if (choice == 5 && track < static_cast<int>(model.getTrackCount()))
+            {
+                const auto& source = model.getTrack(static_cast<size_t>(track));
+                selected = createBelow(source.type);
+                if (selected.isValid())
+                {
+                    const auto index = model.getTrackIndex(selected);
+                    if (index >= 0)
+                    {
+                        model.setTrackVolume(static_cast<size_t>(index), source.volume.load(std::memory_order_relaxed));
+                        model.setTrackPan(static_cast<size_t>(index), source.pan.load(std::memory_order_relaxed));
+                    }
+                }
+            }
+            else if (choice == 6 && track < static_cast<int>(model.getTrackCount()))
+                model.removeTrack(model.getTrackId(static_cast<size_t>(track)));
+
+            if (selected.isValid())
+            {
+                safeOwner->selectedTrack = model.getTrackIndex(selected);
+                if (safeOwner->onTrackSelected != nullptr)
+                    safeOwner->onTrackSelected(safeOwner->selectedTrack);
+            }
+            safeOwner->repaint();
+        });
+        return;
+    }
 
     if (arm.contains(event.position))
         trackModel->setTrackArmed(static_cast<size_t>(track), ! state.armed.load(std::memory_order_relaxed));
+    else if (monitor.contains(event.position) && state.type == TrackType::audio)
+        trackModel->setTrackInputMonitoring(static_cast<size_t>(track), ! state.inputMonitoring.load(std::memory_order_relaxed));
     else if (mute.contains(event.position))
         trackModel->setTrackMuted(static_cast<size_t>(track), ! state.muted.load(std::memory_order_relaxed));
     else if (solo.contains(event.position))
@@ -255,10 +378,156 @@ void TrackHeaderPanel::mouseDown(const juce::MouseEvent& event)
         onTrackSelected(track);
 }
 
+void TrackHeaderPanel::mouseDoubleClick(const juce::MouseEvent& event)
+{
+    if (trackModel == nullptr || trackModel->getTrackCount() >= TrackDataModel::maxTracks)
+        return;
+
+    const auto anchor = juce::jlimit(0, static_cast<int>(trackModel->getTrackCount()) - 1,
+                                     static_cast<int>(event.position.y) / juce::jmax(1, trackModel->getTrackHeight()));
+    const auto type = trackModel->getTrack(static_cast<size_t>(anchor)).type;
+    const auto created = trackModel->addTrack(type);
+    if (! created.isValid())
+        return;
+    if (anchor + 1 < static_cast<int>(trackModel->getTrackCount()))
+        trackModel->reorderTrack(created, static_cast<size_t>(anchor + 1));
+    selectedTrack = trackModel->getTrackIndex(created);
+    if (onTrackSelected != nullptr)
+        onTrackSelected(selectedTrack);
+    repaint();
+}
+
 void TimelineGrid::timerCallback()
 {
     if (trackModel != nullptr && trackModel->isPlaying())
         repaint();
+}
+
+void TimelineGrid::setViewStartSample(double sample) noexcept
+{
+    viewStartSample = juce::jmax(0.0, sample);
+    repaint();
+}
+
+double TimelineGrid::sampleAt(const juce::Point<float>& position) const noexcept
+{
+    if (trackModel == nullptr)
+        return 0.0;
+    const auto pixelsPerSecond = 80.0 * trackModel->getHorizontalZoom();
+    return viewStartSample + static_cast<double>(position.x) / pixelsPerSecond * trackModel->getSampleRate();
+}
+
+int TimelineGrid::trackAt(const juce::Point<float>& position) const noexcept
+{
+    if (trackModel == nullptr || trackModel->getTrackCount() == 0)
+        return -1;
+    return juce::jlimit(0, static_cast<int>(trackModel->getTrackCount()) - 1,
+                        static_cast<int>(position.y / trackModel->getTrackHeight()));
+}
+
+void TimelineGrid::updateView(double startSample, float zoom)
+{
+    if (trackModel == nullptr)
+        return;
+
+    const auto clampedZoom = juce::jlimit(0.5f, 5.0f, zoom);
+    viewStartSample = juce::jmax(0.0, startSample);
+    trackModel->setHorizontalZoom(clampedZoom);
+    if (onViewChanged != nullptr)
+        onViewChanged(viewStartSample, clampedZoom);
+    repaint();
+}
+
+TrackId TimelineGrid::createTrackAfter(TrackType type, int anchorTrack)
+{
+    if (trackModel == nullptr || trackModel->getTrackCount() >= TrackDataModel::maxTracks)
+        return {};
+    const auto created = trackModel->addTrack(type);
+    if (created.isValid() && anchorTrack >= 0 && anchorTrack + 1 < static_cast<int>(trackModel->getTrackCount()))
+        trackModel->reorderTrack(created, static_cast<size_t>(anchorTrack + 1));
+    return created;
+}
+
+void TimelineGrid::showContextMenu(const juce::MouseEvent& event, int track, ClipId clip, double sampleAtMouse)
+{
+    if (trackModel == nullptr)
+        return;
+
+    juce::PopupMenu menu;
+    if (clip.isValid())
+    {
+        menu.addItem(1, "Split at Mouse Position");
+        menu.addItem(2, "Split at Playhead");
+        menu.addItem(3, "Duplicate");
+        menu.addItem(4, "Delete");
+        menu.addSeparator();
+        menu.addItem(5, "Reset Fades");
+    }
+    else
+    {
+        menu.addItem(10, "New Audio Track Below");
+        menu.addItem(11, "New Software Instrument Below");
+        menu.addItem(12, "New External MIDI Track Below");
+        menu.addItem(13, "New Aux Bus");
+        menu.addSeparator();
+        menu.addItem(14, "Delete Selected Track", track >= 0 && trackModel->getTrackCount() > 1);
+    }
+
+    const auto safeOwner = juce::Component::SafePointer<TimelineGrid>(this);
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this),
+                       [safeOwner, track, clip, sampleAtMouse] (int choice)
+    {
+        if (safeOwner == nullptr || safeOwner->trackModel == nullptr || choice == 0)
+            return;
+
+        auto& model = *safeOwner->trackModel;
+        if (choice == 1 || choice == 2)
+        {
+            const auto trackIndex = model.getTrackIndex(model.getTrackId(static_cast<size_t>(track)));
+            if (trackIndex >= 0)
+            {
+                const auto& clips = model.getTrack(static_cast<size_t>(trackIndex)).clips;
+                const auto found = std::find_if(clips.begin(), clips.end(), [clip] (const auto& candidate) { return candidate.id == clip; });
+                if (found != clips.end())
+                    model.splitAudioClip(static_cast<size_t>(trackIndex), static_cast<size_t>(std::distance(clips.begin(), found)),
+                                         choice == 1 ? sampleAtMouse : model.getPlayheadPosition());
+            }
+        }
+        else if (choice == 3)
+        {
+            const auto trackIndex = model.getTrackIndex(model.getTrackId(static_cast<size_t>(track)));
+            if (trackIndex >= 0)
+            {
+                const auto& clips = model.getTrack(static_cast<size_t>(trackIndex)).clips;
+                const auto found = std::find_if(clips.begin(), clips.end(), [clip] (const auto& candidate) { return candidate.id == clip; });
+                if (found != clips.end())
+                    safeOwner->selectedClipId = model.duplicateAudioClip(clip, model.getTrackId(static_cast<size_t>(trackIndex)),
+                                                                           found->startSample + found->durationSamples);
+            }
+        }
+        else if (choice == 4)
+            model.deleteAudioClip(clip);
+        else if (choice == 5)
+            model.setClipFades(clip, 0.0, 0.0);
+        else if (choice >= 10 && choice <= 12)
+        {
+            const auto type = choice == 10 ? TrackType::audio : choice == 11 ? TrackType::instrument : TrackType::externalMidi;
+            const auto created = safeOwner->createTrackAfter(type, track);
+            if (created.isValid())
+            {
+                safeOwner->selectedTrack = model.getTrackIndex(created);
+                if (safeOwner->onTrackSelected != nullptr)
+                    safeOwner->onTrackSelected(safeOwner->selectedTrack);
+            }
+        }
+        else if (choice == 13)
+            model.addBus();
+        else if (choice == 14 && track >= 0 && track < static_cast<int>(model.getTrackCount()))
+            model.removeTrack(model.getTrackId(static_cast<size_t>(track)));
+
+        safeOwner->selectedClip = -1;
+        safeOwner->repaint();
+    });
 }
 
 void TimelineRuler::paint(juce::Graphics& g)
@@ -271,7 +540,8 @@ void TimelineRuler::paint(juce::Graphics& g)
                                                           pixelsPerSecond);
     for (int beat = 0; beatWidth > 1.0 && beat * beatWidth < getWidth(); ++beat)
     {
-        const auto x = static_cast<float>(beat * beatWidth);
+        const auto x = static_cast<float>(beat * beatWidth
+                                          - trackModel->sampleToXPosition(viewStartSample, pixelsPerSecond));
         g.setColour(beat % trackModel->getTimeSignatureNumerator() == 0
                         ? juce::Colours::white.withAlpha(0.7f)
                         : juce::Colours::white.withAlpha(0.25f));
@@ -282,8 +552,8 @@ void TimelineRuler::paint(juce::Graphics& g)
     }
     if (trackModel->isCycleActive())
     {
-        const auto start = trackModel->sampleToXPosition(trackModel->getCycleStartSample(), pixelsPerSecond);
-        const auto end = trackModel->sampleToXPosition(trackModel->getCycleEndSample(), pixelsPerSecond);
+        const auto start = trackModel->sampleToXPosition(trackModel->getCycleStartSample() - viewStartSample, pixelsPerSecond);
+        const auto end = trackModel->sampleToXPosition(trackModel->getCycleEndSample() - viewStartSample, pixelsPerSecond);
         g.setColour(juce::Colour(0x40ffff90));
         g.fillRect(start, 0.0f, end - start, static_cast<float>(getHeight()));
         g.setColour(juce::Colour(0xffffd166));
@@ -298,7 +568,7 @@ void TimelineRuler::mouseDown(const juce::MouseEvent& event)
     dragging = true;
     const auto pixelsPerSecond = 80.0 * trackModel->getHorizontalZoom();
     dragStart = trackModel->getSnappedSamplePosition(
-        static_cast<double>(event.position.x) / pixelsPerSecond * trackModel->getSampleRate(), 0.25);
+        viewStartSample + static_cast<double>(event.position.x) / pixelsPerSecond * trackModel->getSampleRate(), 0.25);
     trackModel->setCycle(dragStart, dragStart + 1.0);
 }
 
@@ -308,7 +578,7 @@ void TimelineRuler::mouseDrag(const juce::MouseEvent& event)
         return;
     const auto pixelsPerSecond = 80.0 * trackModel->getHorizontalZoom();
     const auto current = trackModel->getSnappedSamplePosition(
-        static_cast<double>(event.position.x) / pixelsPerSecond * trackModel->getSampleRate(), 0.25);
+        viewStartSample + static_cast<double>(event.position.x) / pixelsPerSecond * trackModel->getSampleRate(), 0.25);
     trackModel->setCycle(dragStart, current);
     repaint();
 }
@@ -318,11 +588,20 @@ void TimelineGrid::mouseDown(const juce::MouseEvent& event)
     if (trackModel == nullptr)
         return;
 
+    if (event.mods.isMiddleButtonDown())
+    {
+        panningTimeline = true;
+        panDragStartX = event.position.x;
+        panDragStartSample = viewStartSample;
+        setMouseCursor(juce::MouseCursor::DraggingHandCursor);
+        return;
+    }
+
     const auto pixelsPerSecond = 80.0 * trackModel->getHorizontalZoom();
-    const auto sampleAtMouse = viewStartSample
-        + (static_cast<double>(event.position.x) / pixelsPerSecond) * trackModel->getSampleRate();
-    const auto track = juce::jlimit(0, static_cast<int>(trackModel->getTrackCount()) - 1,
-                                     static_cast<int>(event.position.y / trackModel->getTrackHeight()));
+    const auto sampleAtMouse = sampleAt(event.position);
+    const auto track = trackAt(event.position);
+    if (track < 0)
+        return;
     grabKeyboardFocus();
     const auto& audioClips = trackModel->getTrack(static_cast<size_t>(track)).clips;
     for (size_t index = 0; index < audioClips.size(); ++index)
@@ -332,6 +611,11 @@ void TimelineGrid::mouseDown(const juce::MouseEvent& event)
         const auto endX = trackModel->sampleToXPosition(clip.startSample + clip.durationSamples - viewStartSample, pixelsPerSecond);
         if (event.position.x >= startX && event.position.x <= endX)
         {
+            if (event.mods.isPopupMenu())
+            {
+                showContextMenu(event, track, clip.id, sampleAtMouse);
+                return;
+            }
             selectedTrack = track;
             selectedClip = static_cast<int>(index);
             selectedClipId = clip.id;
@@ -351,16 +635,24 @@ void TimelineGrid::mouseDown(const juce::MouseEvent& event)
                 return;
             }
             if (onAudioClipSelected != nullptr) onAudioClipSelected(clip.id);
-            trimmingLeft = std::abs(event.position.x - startX) <= 5.0;
-            trimmingRight = std::abs(event.position.x - endX) <= 5.0;
+            const auto isHandleRow = event.position.y <= static_cast<float>(track) * trackModel->getTrackHeight() + 20.0f;
+            adjustingFadeIn = isHandleRow && event.position.x <= startX + 12.0f;
+            adjustingFadeOut = isHandleRow && event.position.x >= endX - 12.0f;
+            trimmingLeft = ! adjustingFadeIn && std::abs(event.position.x - startX) <= 5.0;
+            trimmingRight = ! adjustingFadeOut && std::abs(event.position.x - endX) <= 5.0;
             clipDragStartSample = clip.startSample;
             clipDragPreviewSample = clip.startSample;
             clipDragPreviewTrack = track;
-            setMouseCursor(trimmingLeft || trimmingRight
+            setMouseCursor(trimmingLeft || trimmingRight || adjustingFadeIn || adjustingFadeOut
                                ? juce::MouseCursor::LeftRightResizeCursor
                                : juce::MouseCursor::NormalCursor);
             return;
         }
+    }
+    if (event.mods.isPopupMenu())
+    {
+        showContextMenu(event, track, {}, sampleAtMouse);
+        return;
     }
     for (const auto& midiClip : trackModel->getMidiClips())
     {
@@ -395,11 +687,13 @@ void TimelineGrid::mouseDoubleClick(const juce::MouseEvent& event)
     if (clickedTrack >= 0 && clickedTrack < static_cast<int>(trackModel->getTrackCount()))
         return; // Existing rows are reserved for region editing, not track creation.
 
-    const auto createdId = trackModel->addTrack();
+    const auto anchor = selectedTrack >= 0 ? selectedTrack : static_cast<int>(trackModel->getTrackCount()) - 1;
+    const auto type = anchor >= 0 ? trackModel->getTrack(static_cast<size_t>(anchor)).type : TrackType::audio;
+    const auto createdId = createTrackAfter(type, anchor);
     if (! createdId.isValid())
         return;
 
-    selectedTrack = static_cast<int>(trackModel->getTrackCount()) - 1;
+    selectedTrack = trackModel->getTrackIndex(createdId);
     selectedClip = -1;
     selectedClipId = {};
     if (onTrackSelected != nullptr)
@@ -413,6 +707,25 @@ void TimelineGrid::mouseDrag(const juce::MouseEvent& event)
         return;
 
     const auto pixelsPerSecond = 80.0 * trackModel->getHorizontalZoom();
+    if (panningTimeline)
+    {
+        const auto deltaSamples = static_cast<double>(panDragStartX - event.position.x) / pixelsPerSecond * trackModel->getSampleRate();
+        updateView(panDragStartSample + deltaSamples, trackModel->getHorizontalZoom());
+        return;
+    }
+    if (selectedTrack >= 0 && selectedClip >= 0 && (adjustingFadeIn || adjustingFadeOut))
+    {
+        const auto& clip = trackModel->getTrack(static_cast<size_t>(selectedTrack)).clips[static_cast<size_t>(selectedClip)];
+        const auto sample = viewStartSample
+            + static_cast<double>(event.position.x) / pixelsPerSecond * trackModel->getSampleRate();
+        const auto fadeLength = adjustingFadeIn ? sample - clip.startSample
+                                                : clip.startSample + clip.durationSamples - sample;
+        trackModel->setClipFades(selectedClipId,
+                                 adjustingFadeIn ? fadeLength : clip.fadeInSamples,
+                                 adjustingFadeOut ? fadeLength : clip.fadeOutSamples);
+        repaint();
+        return;
+    }
     if (selectedTrack >= 0 && selectedClip >= 0 && (trimmingLeft || trimmingRight))
     {
         const auto& clip = trackModel->getTrack(static_cast<size_t>(selectedTrack)).clips[static_cast<size_t>(selectedClip)];
@@ -451,9 +764,35 @@ void TimelineGrid::mouseUp(const juce::MouseEvent&)
         if (onTrackSelected != nullptr) onTrackSelected(selectedTrack);
     }
     draggingClip = false;
+    panningTimeline = false;
     trimmingLeft = false;
     trimmingRight = false;
+    adjustingFadeIn = false;
+    adjustingFadeOut = false;
     setMouseCursor(juce::MouseCursor::NormalCursor);
+}
+
+void TimelineGrid::mouseWheelMove(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel)
+{
+    if (trackModel == nullptr)
+        return;
+
+    const auto currentZoom = trackModel->getHorizontalZoom();
+    if (event.mods.isShiftDown() || std::abs(wheel.deltaX) > std::abs(wheel.deltaY))
+    {
+        const auto pixelsPerSecond = 80.0 * currentZoom;
+        const auto delta = static_cast<double>(wheel.deltaX != 0.0f ? wheel.deltaX : wheel.deltaY)
+            * trackModel->getSampleRate() * 2.5 / pixelsPerSecond;
+        updateView(viewStartSample - delta, currentZoom);
+        return;
+    }
+
+    const auto pivotSample = sampleAt(event.position);
+    const auto zoomMultiplier = wheel.deltaY > 0.0f ? 1.12f : 1.0f / 1.12f;
+    const auto newZoom = juce::jlimit(0.5f, 5.0f, currentZoom * zoomMultiplier);
+    const auto newPixelsPerSecond = 80.0 * newZoom;
+    const auto newStart = pivotSample - static_cast<double>(event.position.x) / newPixelsPerSecond * trackModel->getSampleRate();
+    updateView(newStart, newZoom);
 }
 
 bool TimelineGrid::keyPressed(const juce::KeyPress& key)
@@ -530,6 +869,13 @@ void TimelineGrid::paint(juce::Graphics& g)
 
             const auto thumbnail = waveformCache != nullptr ? waveformCache->find(clip.sourceFile) : nullptr;
             drawPremiumWaveform(g, clip, thumbnail.get(), rect);
+            const auto fadeInX = rect.getX() + static_cast<float>(trackModel->sampleToXPosition(clip.fadeInSamples, pixelsPerSecond));
+            const auto fadeOutX = rect.getRight() - static_cast<float>(trackModel->sampleToXPosition(clip.fadeOutSamples, pixelsPerSecond));
+            g.setColour(juce::Colours::white.withAlpha(0.62f));
+            g.drawLine(rect.getX(), rect.getBottom() - 3.0f, fadeInX, rect.getY() + 3.0f, 1.5f);
+            g.drawLine(fadeOutX, rect.getY() + 3.0f, rect.getRight(), rect.getBottom() - 3.0f, 1.5f);
+            g.fillEllipse(rect.getX() - 2.0f, rect.getY() + 2.0f, 5.0f, 5.0f);
+            g.fillEllipse(rect.getRight() - 3.0f, rect.getY() + 2.0f, 5.0f, 5.0f);
             if (track == selectedTrack && static_cast<int>(&clip - state.clips.data()) == selectedClip)
             {
                 g.setColour(juce::Colour(0xffc9e5ff));
@@ -593,12 +939,10 @@ ArrangeWindow::ArrangeWindow(TrackDataModel* model)
     {
         if (trackModel != nullptr)
         {
-            trackModel->setHorizontalZoom(static_cast<float>(horizontalZoomSlider.getValue()));
-            timelineRuler.repaint();
-            timelineGrid.repaint();
+            setTimelineView(timelineGrid.getViewStartSample(), static_cast<float>(horizontalZoomSlider.getValue()));
         }
     };
-    trackHeightSlider.setRange(40.0, 120.0, 1.0);
+    trackHeightSlider.setRange(36.0, 96.0, 1.0);
     trackHeightSlider.setValue(model != nullptr ? model->getTrackHeight() : 60);
     trackHeightSlider.onValueChange = [this]
     {
@@ -621,6 +965,12 @@ ArrangeWindow::ArrangeWindow(TrackDataModel* model)
     {
         trackHeaderPanel.setSelectedTrack(track);
         if (onTrackSelected != nullptr) onTrackSelected(track);
+    };
+    timelineGrid.onViewChanged = [this] (double startSample, float zoom)
+    {
+        timelineRuler.setViewStartSample(startSample);
+        horizontalZoomSlider.setValue(zoom, juce::dontSendNotification);
+        timelineRuler.repaint();
     };
     timelineGrid.onMidiClipSelected = [this](MidiClipId clip)
     {
@@ -713,6 +1063,17 @@ void ArrangeWindow::filesDropped(const juce::StringArray& files, int x, int y)
         * trackModel->getSampleRate();
     const auto snappedSample = trackModel->getSnappedSamplePosition(rawSample, 0.25);
     importAudioFile(juce::File(files[0]), track, snappedSample);
+}
+
+void ArrangeWindow::setTimelineView(double startSample, float zoom)
+{
+    timelineGrid.setViewStartSample(startSample);
+    timelineRuler.setViewStartSample(startSample);
+    if (trackModel != nullptr)
+        trackModel->setHorizontalZoom(zoom);
+    horizontalZoomSlider.setValue(zoom, juce::dontSendNotification);
+    timelineRuler.repaint();
+    timelineGrid.repaint();
 }
 
 void ArrangeWindow::setSelectedTrack(int trackIndex) noexcept

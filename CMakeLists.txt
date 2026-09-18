@@ -34,23 +34,34 @@ set_target_properties(StudioForgeDAW PROPERTIES
 target_sources(StudioForgeDAW PRIVATE
     Source/Core/Main.cpp
     Source/Core/MainWindow.cpp
+    Source/Core/Automation/AutomationLane.cpp
     Source/AudioEngine/AudioEngine.cpp
     Source/AudioEngine/AudioGraph.cpp
     Source/Models/TrackDataModel.cpp
     Source/Project/ProjectSerializer.cpp
+    Source/Project/ProjectTemplates.cpp
+    Source/Project/ProjectTemplateStore.cpp
+    Source/Project/ProjectAlternativeStore.cpp
     Source/Project/RecentProjectsStore.cpp
+    Source/Project/AutosaveService.cpp
     Source/Media/MediaReloadService.cpp
     Source/Media/AudioMediaPool.cpp
     Source/Media/WaveformThumbnailCache.cpp
     Source/Recording/RecordingSession.cpp
     Source/Midi/MidiCore.cpp
+    Source/Midi/MidiFileImporter.cpp
+    Source/Midi/MidiTransposeProcessor.cpp
     Source/Plugins/PluginHostService.cpp
     Source/UI/MainComponent.cpp
+    Source/UI/DeviceSettingsPanel.cpp
+    Source/UI/ProjectSettingsPanel.cpp
+    Source/UI/PluginBrowserPanel.cpp
     Source/UI/Theme/StudioForgeLookAndFeel.cpp
     Source/UI/ControlBar.cpp
     Source/UI/ArrangeWindow.cpp
     Source/UI/MixerPane.cpp
     Source/UI/PianoRoll.cpp
+    Source/UI/Inspector/InspectorViewState.cpp
     Source/UI/InspectorPane.cpp
     Source/UI/InspectorComponents.cpp
     Source/UI/AudioPeakMeter.cpp
@@ -135,17 +146,26 @@ if (BUILD_TESTING)
 
     add_executable(StudioForgeCoreTests
         Tests/CorePlaybackMixerTests.cpp
+        Tests/AutomationDomainTests.cpp
+        Source/Core/Automation/AutomationLane.cpp
         Source/AudioEngine/AudioEngine.cpp
         Source/AudioEngine/AudioGraph.cpp
         Source/Models/TrackDataModel.cpp
         Source/Project/ProjectSerializer.cpp
+        Source/Project/ProjectTemplates.cpp
+        Source/Project/ProjectTemplateStore.cpp
+        Source/Project/ProjectAlternativeStore.cpp
         Source/Project/RecentProjectsStore.cpp
+        Source/Project/AutosaveService.cpp
         Source/Media/MediaReloadService.cpp
         Source/Media/AudioMediaPool.cpp
         Source/Media/WaveformThumbnailCache.cpp
         Source/Recording/RecordingSession.cpp
         Source/Midi/MidiCore.cpp
+        Source/Midi/MidiFileImporter.cpp
+        Source/Midi/MidiTransposeProcessor.cpp
         Source/Plugins/PluginHostService.cpp
+        Source/UI/Inspector/InspectorViewState.cpp
     )
 
     target_include_directories(StudioForgeCoreTests PRIVATE

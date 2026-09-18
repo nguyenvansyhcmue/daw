@@ -15,6 +15,15 @@ float peakForChannel(const juce::AudioBuffer<float>& buffer, int channel, int nu
         peak = juce::jmax(peak, std::abs(samples[sample]));
     return peak;
 }
+
+std::unique_ptr<juce::AudioFormat> createOfflineFormat(const juce::File& destination)
+{
+    const auto extension = destination.getFileExtension().toLowerCase();
+    if (extension == ".wav") return std::make_unique<juce::WavAudioFormat>();
+    if (extension == ".aif" || extension == ".aiff") return std::make_unique<juce::AiffAudioFormat>();
+    if (extension == ".flac") return std::make_unique<juce::FlacAudioFormat>();
+    return {};
+}
 }
 
 AudioEngine::AudioEngine(TrackDataModel* model)
@@ -34,12 +43,14 @@ void AudioEngine::initialise()
 {
     deviceManager.initialiseWithDefaultDevices(2, 2);
     deviceManager.addAudioCallback(this);
+    deviceManager.addMidiInputDeviceCallback({}, this);
     setMasterGain(1.0f);
 }
 
 void AudioEngine::shutdown()
 {
     if (recordingSession != nullptr) recordingSession->stop();
+    deviceManager.removeMidiInputDeviceCallback({}, this);
     deviceManager.removeAudioCallback(this);
     deviceManager.closeAudioDevice();
     processingBuffer.clear();
@@ -62,7 +73,18 @@ void AudioEngine::setTempo(double newTempo) noexcept
         dataModel->setBpm(newTempo);
 }
 
-juce::Result AudioEngine::startRecording(size_t trackIndex, const juce::File& destination)
+void AudioEngine::setMetronomeEnabled(bool enabled) noexcept
+{
+    metronomeEnabled.store(enabled, std::memory_order_release);
+}
+
+bool AudioEngine::isMetronomeEnabled() const noexcept
+{
+    return metronomeEnabled.load(std::memory_order_acquire);
+}
+
+juce::Result AudioEngine::startRecording(size_t trackIndex, const juce::File& destination,
+                                         double timelineStartSample)
 {
     if (recordingSession == nullptr) return juce::Result::fail("Audio engine has no project model");
     if (trackIndex >= dataModel->getTrackCount()
@@ -72,8 +94,10 @@ juce::Result AudioEngine::startRecording(size_t trackIndex, const juce::File& de
     const auto sampleRate = device != nullptr ? device->getCurrentSampleRate() : dataModel->getSampleRate();
     const auto inputChannels = device != nullptr ? device->getActiveInputChannels().countNumberOfSetBits() : 2;
     const auto blockSize = device != nullptr ? device->getCurrentBufferSizeSamples() : processingBuffer.getNumSamples();
-    const auto result = recordingSession->start(trackIndex, destination, dataModel->getPlayheadPosition(), sampleRate,
-                                                inputChannels, blockSize);
+    const auto inputChannel = dataModel->getTrack(trackIndex).inputChannel.load(std::memory_order_relaxed) % inputChannels;
+    const auto startSample = timelineStartSample >= 0.0 ? timelineStartSample : dataModel->getPlayheadPosition();
+    const auto result = recordingSession->start(trackIndex, destination, startSample, sampleRate,
+                                                inputChannel, blockSize);
     if (result.wasOk()) dataModel->setTrackArmed(trackIndex, true);
     return result;
 }
@@ -81,6 +105,7 @@ juce::Result AudioEngine::startRecording(size_t trackIndex, const juce::File& de
 juce::Result AudioEngine::stopRecording()
 {
     if (recordingSession == nullptr) return juce::Result::ok();
+    clearRecordingCaptureRange();
     const auto result = recordingSession->stop();
     if (dataModel != nullptr)
         for (size_t index = 0; index < dataModel->getTrackCount(); ++index) dataModel->setTrackArmed(index, false);
@@ -88,25 +113,133 @@ juce::Result AudioEngine::stopRecording()
 }
 bool AudioEngine::isRecording() const noexcept { return recordingSession != nullptr && recordingSession->isRecording(); }
 
+juce::Result AudioEngine::startMidiRecording(size_t trackIndex)
+{
+    if (dataModel == nullptr || trackIndex >= dataModel->getTrackCount())
+        return juce::Result::fail("MIDI recording track is invalid");
+    const auto& track = dataModel->getTrack(trackIndex);
+    if (track.type != TrackType::instrument && track.type != TrackType::externalMidi)
+        return juce::Result::fail("MIDI recording requires an instrument or external MIDI track");
+    if (midiRecordingActive.load(std::memory_order_acquire))
+        return juce::Result::fail("MIDI recording is already active");
+
+    recordedMidiFifo.reset();
+    droppedMidiRecordingEvents.store(0, std::memory_order_relaxed);
+    midiRecordingTrack = track.id;
+    midiRecordingStartSample = dataModel->getPlayheadPosition();
+    midiRecordingActive.store(true, std::memory_order_release);
+    dataModel->setTrackArmed(trackIndex, true);
+    return juce::Result::ok();
+}
+
+MidiClipId AudioEngine::stopMidiRecording()
+{
+    if (! midiRecordingActive.exchange(false, std::memory_order_acq_rel) || dataModel == nullptr)
+        return {};
+
+    while (midiRecordingCallbackUsers.load(std::memory_order_acquire) != 0)
+        juce::Thread::sleep(1);
+
+    std::vector<RecordedMidiEvent> events;
+    events.reserve(static_cast<size_t>(recordedMidiFifo.getNumReady()));
+    int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
+    recordedMidiFifo.prepareToRead(recordedMidiCapacity, start1, size1, start2, size2);
+    const auto copyRange = [this, &events] (int start, int count)
+    {
+        for (int offset = 0; offset < count; ++offset)
+            events.push_back(recordedMidiEvents[static_cast<size_t>(start + offset)]);
+    };
+    copyRange(start1, size1);
+    copyRange(start2, size2);
+    recordedMidiFifo.finishedRead(size1 + size2);
+    if (events.empty())
+        return {};
+
+    struct OpenNote { int pitch; int channel; float velocity; double start; };
+    std::vector<OpenNote> openNotes;
+    std::vector<MidiNoteEvent> notes;
+    const auto stopSample = dataModel->getPlayheadPosition();
+    for (const auto& event : events)
+    {
+        if (event.noteOn)
+        {
+            openNotes.push_back({ event.pitch, event.channel, event.velocity, event.samplePosition });
+            continue;
+        }
+
+        const auto match = std::find_if(openNotes.rbegin(), openNotes.rend(), [&event] (const OpenNote& open)
+        {
+            return open.pitch == event.pitch && open.channel == event.channel;
+        });
+        if (match == openNotes.rend())
+            continue;
+        notes.push_back({ {}, match->pitch, match->velocity,
+                          match->start - midiRecordingStartSample,
+                          event.samplePosition - match->start, match->channel });
+        openNotes.erase(std::next(match).base());
+    }
+    for (const auto& open : openNotes)
+        notes.push_back({ {}, open.pitch, open.velocity, open.start - midiRecordingStartSample,
+                          stopSample - open.start, open.channel });
+
+    return dataModel->addMidiRecording(midiRecordingTrack, midiRecordingStartSample, std::move(notes));
+}
+
+bool AudioEngine::isMidiRecording() const noexcept
+{
+    return midiRecordingActive.load(std::memory_order_acquire);
+}
+
+void AudioEngine::setRecordingCaptureRange(double startSample, double endSample) noexcept
+{
+    const auto start = juce::jmax(0.0, juce::jmin(startSample, endSample));
+    const auto end = juce::jmax(0.0, juce::jmax(startSample, endSample));
+    recordingCaptureStartSample.store(start, std::memory_order_release);
+    recordingCaptureEndSample.store(end, std::memory_order_release);
+    recordingCaptureRangeActive.store(end > start, std::memory_order_release);
+}
+
+void AudioEngine::clearRecordingCaptureRange() noexcept
+{
+    recordingCaptureRangeActive.store(false, std::memory_order_release);
+}
+
 juce::Result AudioEngine::renderOfflineWav(const juce::File& destination, double sampleRate,
                                            int blockSize, bool useCycle)
 {
-    if (dataModel == nullptr || sampleRate <= 0.0 || blockSize <= 0)
+    OfflineRenderOptions options;
+    options.sampleRate = sampleRate;
+    options.blockSize = blockSize;
+    options.useCycle = useCycle;
+    return renderOfflineAudio(destination.withFileExtension(".wav"), options);
+}
+
+juce::Result AudioEngine::renderOfflineAudio(const juce::File& destination,
+                                             const OfflineRenderOptions& options)
+{
+    if (dataModel == nullptr || options.sampleRate <= 0.0 || options.blockSize <= 0)
         return juce::Result::fail("Offline render configuration is invalid");
     if (isRecording()) return juce::Result::fail("Stop recording before offline render");
+    auto format = createOfflineFormat(destination);
+    if (format == nullptr)
+        return juce::Result::fail("Unsupported bounce format. Choose WAV, AIFF, or FLAC.");
+    const auto bitDepth = juce::jlimit(16, 32, options.bitDepth);
+    const auto projectState = dataModel->createProjectState();
     double endSample = 0.0;
-    for (const auto& track : dataModel->createProjectState().tracks)
+    for (const auto& track : projectState.tracks)
         for (const auto& clip : track.clips)
             endSample = juce::jmax(endSample, clip.startSample + clip.durationSamples);
-    if (useCycle && dataModel->isCycleActive()) endSample = dataModel->getCycleEndSample();
+    for (const auto& clip : projectState.midiClips)
+        for (const auto& note : clip.notes)
+            endSample = juce::jmax(endSample, clip.startSample + note.startSample + note.durationSamples);
+    if (options.useCycle && dataModel->isCycleActive()) endSample = dataModel->getCycleEndSample();
     if (endSample <= 0.0) return juce::Result::fail("Project has no audio to render");
 
     destination.deleteFile();
     auto stream = destination.createOutputStream();
     if (stream == nullptr) return juce::Result::fail("Cannot create offline render file");
-    juce::WavAudioFormat wav;
     auto* rawStream = stream.release();
-    std::unique_ptr<juce::AudioFormatWriter> writer(wav.createWriterFor(rawStream, sampleRate, 2, 32, {}, 0));
+    std::unique_ptr<juce::AudioFormatWriter> writer(format->createWriterFor(rawStream, options.sampleRate, 2, bitDepth, {}, 0));
     if (writer == nullptr)
     {
         delete rawStream;
@@ -129,21 +262,21 @@ juce::Result AudioEngine::renderOfflineWav(const juce::File& destination, double
         if (cycleWasActive) dataModel->setCycle(cycleStart, cycleEnd); else dataModel->clearCycle();
         dataModel->restoreProjectRevision(previousProjectRevision);
     };
-    dataModel->setSampleRate(sampleRate);
-    if (! useCycle) dataModel->clearCycle();
-    dataModel->setPlayheadPosition(useCycle && cycleWasActive ? cycleStart : 0.0);
+    dataModel->setSampleRate(options.sampleRate);
+    if (! options.useCycle) dataModel->clearCycle();
+    dataModel->setPlayheadPosition(options.useCycle && cycleWasActive ? cycleStart : 0.0);
     dataModel->setPlaying(true);
-    processingBuffer.setSize(2, blockSize, false, true, true);
-    for (auto& buffer : trackBuffers) buffer.setSize(2, blockSize, false, true, true);
-    for (auto& buffer : busBuffers) buffer.setSize(2, blockSize, false, true, true);
+    processingBuffer.setSize(2, options.blockSize, false, true, true);
+    for (auto& buffer : trackBuffers) buffer.setSize(2, options.blockSize, false, true, true);
+    for (auto& buffer : busBuffers) buffer.setSize(2, options.blockSize, false, true, true);
     for (auto& midi : trackMidiBuffers) midi.ensureSize(MidiEventBuffer::capacity * 4);
-    juce::AudioBuffer<float> renderBuffer(2, blockSize);
+    juce::AudioBuffer<float> renderBuffer(2, options.blockSize);
     float* outputs[] { renderBuffer.getWritePointer(0), renderBuffer.getWritePointer(1) };
     const auto totalSamples = static_cast<int64_t>(std::ceil(endSample));
     int64_t rendered = 0;
     while (rendered < totalSamples)
     {
-        const auto count = static_cast<int>(juce::jmin<int64_t>(blockSize, totalSamples - rendered));
+        const auto count = static_cast<int>(juce::jmin<int64_t>(options.blockSize, totalSamples - rendered));
         audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, count, {});
         if (! writer->writeFromAudioSampleBuffer(renderBuffer, 0, count))
         {
@@ -202,6 +335,18 @@ float AudioEngine::getMasterRightPeak() const noexcept
     return masterRightPeak.load(std::memory_order_relaxed);
 }
 
+AudioEngine::RealtimeDiagnostics AudioEngine::getRealtimeDiagnostics() const noexcept
+{
+    return { activeSampleRate.load(std::memory_order_relaxed),
+             activeBufferSize.load(std::memory_order_relaxed),
+             activeInputLatencySamples.load(std::memory_order_relaxed),
+             activeOutputLatencySamples.load(std::memory_order_relaxed),
+             callbackLoad.load(std::memory_order_relaxed),
+             callbackOverloadCount.load(std::memory_order_relaxed),
+             droppedMidiInputEvents.load(std::memory_order_relaxed),
+             droppedMidiRecordingEvents.load(std::memory_order_relaxed) };
+}
+
 void AudioEngine::setFxProcessor(size_t trackIndex, size_t slot,
                                  std::shared_ptr<AudioEffectProcessor> processor)
 {
@@ -233,7 +378,8 @@ void AudioEngine::setMasterFxProcessor(size_t slot, std::shared_ptr<AudioEffectP
     if (slot >= TrackDataModel::maxFxSlots) return;
     auto* device = deviceManager.getCurrentAudioDevice();
     const auto sampleRate = device != nullptr ? device->getCurrentSampleRate()
-                                              : (dataModel != nullptr ? dataModel->getSampleRate() : 44100.0);
+                                              : juce::jmax(activeSampleRate.load(std::memory_order_relaxed),
+                                                           dataModel != nullptr ? dataModel->getSampleRate() : 44100.0);
     const auto blockSize = device != nullptr ? device->getCurrentBufferSizeSamples() : 512;
     if (processor != nullptr) processor->prepareToPlay(sampleRate, blockSize, 2);
 
@@ -252,6 +398,37 @@ void AudioEngine::setMasterFxBypassed(size_t slot, bool bypassed)
     publishMasterFxRack(std::move(updated));
 }
 
+void AudioEngine::prepareRack(const TrackDataModel::FxRackSnapshot* rack, double sampleRate, int blockSize)
+{
+    if (rack == nullptr || sampleRate <= 0.0 || blockSize <= 0)
+        return;
+
+    for (const auto& processor : rack->processors)
+        if (processor != nullptr)
+            processor->prepareToPlay(sampleRate, blockSize, 2);
+}
+
+void AudioEngine::prepareActiveEffects()
+{
+    auto* device = deviceManager.getCurrentAudioDevice();
+    const auto sampleRate = device != nullptr ? device->getCurrentSampleRate()
+                                              : juce::jmax(activeSampleRate.load(std::memory_order_relaxed),
+                                                           dataModel != nullptr ? dataModel->getSampleRate() : 44100.0);
+    const auto blockSize = device != nullptr ? device->getCurrentBufferSizeSamples()
+                                             : juce::jmax(1, processingBuffer.getNumSamples());
+    const auto resolvedSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
+
+    if (dataModel != nullptr)
+    {
+        dataModel->setSampleRate(resolvedSampleRate);
+        for (size_t trackIndex = 0; trackIndex < TrackDataModel::maxTracks; ++trackIndex)
+            prepareRack(dataModel->getFxRackSnapshot(trackIndex), resolvedSampleRate, blockSize);
+        for (const auto& bus : dataModel->getBuses())
+            prepareRack(dataModel->getBusFxRackSnapshot(bus.id), resolvedSampleRate, blockSize);
+    }
+    prepareRack(getMasterFxRackSnapshot(), resolvedSampleRate, blockSize);
+}
+
 void AudioEngine::publishMasterFxRack(std::unique_ptr<const TrackDataModel::FxRackSnapshot> snapshot)
 {
     auto previous = std::move(masterFxRack);
@@ -264,6 +441,11 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
 {
     const auto outputChannels = device != nullptr ? device->getActiveOutputChannels().countNumberOfSetBits() : 2;
     const auto blockSize = device != nullptr ? device->getCurrentBufferSizeSamples() : 512;
+    activeSampleRate.store(device != nullptr ? device->getCurrentSampleRate() : 0.0, std::memory_order_relaxed);
+    activeBufferSize.store(blockSize, std::memory_order_relaxed);
+    activeInputLatencySamples.store(device != nullptr ? device->getInputLatencyInSamples() : 0, std::memory_order_relaxed);
+    activeOutputLatencySamples.store(device != nullptr ? device->getOutputLatencyInSamples() : 0, std::memory_order_relaxed);
+    callbackLoad.store(0.0f, std::memory_order_relaxed);
     processingBuffer.setSize(juce::jmax(2, outputChannels), juce::jmax(1, blockSize),
                              false, true, true);
     for (auto& buffer : trackBuffers)
@@ -273,30 +455,57 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
     for (auto& midi : trackMidiBuffers)
         midi.ensureSize(MidiEventBuffer::capacity * 4);
 
-    if (dataModel != nullptr && device != nullptr && device->getCurrentSampleRate() > 0.0)
-    {
-        dataModel->setSampleRate(device->getCurrentSampleRate());
-        for (size_t trackIndex = 0; trackIndex < trackBuffers.size(); ++trackIndex)
-        {
-            const auto* rack = dataModel->getFxRackSnapshot(trackIndex);
-            if (rack == nullptr)
-                continue;
-            for (const auto& processor : rack->processors)
-                if (processor != nullptr)
-                    processor->prepareToPlay(device->getCurrentSampleRate(), processingBuffer.getNumSamples(), 2);
-        }
-    }
-
-    if (device != nullptr && device->getCurrentSampleRate() > 0.0)
-        if (const auto* rack = getMasterFxRackSnapshot(); rack != nullptr)
-            for (const auto& processor : rack->processors)
-                if (processor != nullptr)
-                    processor->prepareToPlay(device->getCurrentSampleRate(), processingBuffer.getNumSamples(), 2);
+    prepareActiveEffects();
 }
 
 void AudioEngine::audioDeviceStopped()
 {
     processingBuffer.clear();
+    activeSampleRate.store(0.0, std::memory_order_relaxed);
+    activeBufferSize.store(0, std::memory_order_relaxed);
+}
+
+void AudioEngine::handleIncomingMidiMessage(juce::MidiInput*, const juce::MidiMessage& message)
+{
+    if (! message.isNoteOnOrOff())
+        return;
+
+    int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
+    incomingMidiFifo.prepareToWrite(1, start1, size1, start2, size2);
+    if (size1 == 0)
+    {
+        droppedMidiInputEvents.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    incomingMidiEvents[static_cast<size_t>(start1)] = { message.getNoteNumber(), static_cast<float>(message.getVelocity()) / 127.0f,
+                                                         message.getChannel(), message.isNoteOn() };
+    incomingMidiFifo.finishedWrite(1);
+}
+
+AudioEngine::CallbackTimingScope::CallbackTimingScope(AudioEngine& owner, int samples) noexcept
+    : engine(owner), numSamples(samples), started(std::chrono::steady_clock::now())
+{
+}
+
+AudioEngine::CallbackTimingScope::~CallbackTimingScope()
+{
+    engine.recordCallbackTiming(numSamples, started);
+}
+
+void AudioEngine::recordCallbackTiming(int numSamples, std::chrono::steady_clock::time_point started) noexcept
+{
+    const auto sampleRate = activeSampleRate.load(std::memory_order_relaxed);
+    if (sampleRate <= 0.0 || numSamples <= 0)
+        return;
+
+    const auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    const auto blockDuration = static_cast<double>(numSamples) / sampleRate;
+    const auto instantaneousLoad = static_cast<float>(elapsed / blockDuration);
+    const auto previousLoad = callbackLoad.load(std::memory_order_relaxed);
+    callbackLoad.store(previousLoad * 0.90f + instantaneousLoad * 0.10f, std::memory_order_relaxed);
+    if (elapsed > blockDuration)
+        callbackOverloadCount.fetch_add(1, std::memory_order_relaxed);
 }
 
 void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChannelData,
@@ -309,14 +518,37 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
     if (numSamples <= 0 || outputChannelData == nullptr)
         return;
 
+    CallbackTimingScope callbackTiming(*this, numSamples);
+
     for (int channel = 0; channel < numOutputChannels; ++channel)
         juce::FloatVectorOperations::clear(outputChannelData[channel], numSamples);
-
-    if (recordingSession != nullptr) recordingSession->capture(inputChannelData, numInputChannels, numSamples);
 
     if (dataModel == nullptr || numSamples > processingBuffer.getNumSamples())
         return;
 
+    if (recordingSession != nullptr)
+    {
+        auto captureOffset = 0;
+        auto captureSamples = numSamples;
+        if (recordingCaptureRangeActive.load(std::memory_order_acquire))
+        {
+            if (! dataModel->isPlaying())
+                captureSamples = 0;
+            else
+            {
+                const auto blockStart = dataModel->getPlayheadPosition();
+                const auto rangeStart = recordingCaptureStartSample.load(std::memory_order_acquire);
+                const auto rangeEnd = recordingCaptureEndSample.load(std::memory_order_acquire);
+                captureOffset = juce::jlimit(0, numSamples, static_cast<int>(std::ceil(rangeStart - blockStart)));
+                const auto captureEnd = juce::jlimit(0, numSamples, static_cast<int>(std::ceil(rangeEnd - blockStart)));
+                captureSamples = juce::jmax(0, captureEnd - captureOffset);
+            }
+        }
+        if (captureSamples > 0)
+            recordingSession->capture(inputChannelData, numInputChannels, captureOffset, captureSamples);
+    }
+
+    const auto blockStartSample = dataModel->getPlayheadPosition();
     const auto snapshots = dataModel->acquireRealtimeSnapshot();
     const auto* clips = snapshots.getAudioClips();
     const auto* structure = snapshots.getRenderStructure();
@@ -326,7 +558,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
     for (size_t index = 0; structure != nullptr && index < structure->trackCount; ++index)
         hasMonitoredAudio = hasMonitoredAudio || (structure->tracks[index].type == TrackType::audio
             && structure->tracks[index].inputMonitoring);
-    if (! playing && ! hasMonitoredAudio)
+    const auto hasPendingMidi = incomingMidiFifo.getNumReady() > 0;
+    const auto hasActiveInstrument = std::any_of(instrumentVoices.begin(), instrumentVoices.end(),
+                                                 [] (const InstrumentVoice& voice) { return voice.active; });
+    if (! playing && ! hasMonitoredAudio && ! hasPendingMidi && ! hasActiveInstrument)
         return;
 
     processingBuffer.clear(0, numSamples);
@@ -369,11 +604,13 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
         dataModel->setPlayheadPosition(playhead);
     }
 
+    if (structure != nullptr)
+        appendIncomingMidiEvents(*structure, blockStartSample);
+
     bool anyTrackSoloed = false;
+    const auto automationSample = dataModel->getPlayheadPosition();
     for (size_t trackIndex = 0; structure != nullptr && trackIndex < structure->trackCount; ++trackIndex)
         anyTrackSoloed = anyTrackSoloed || structure->tracks[trackIndex].solo;
-
-    if (playing && structure != nullptr) renderInstrument(*structure, numSamples);
 
     for (auto& midi : trackMidiBuffers)
         midi.clear();
@@ -389,6 +626,17 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
             trackMidiBuffers[static_cast<size_t>(trackIndex)].addEvent(message, event.sampleOffset);
         }
     }
+
+    if (structure != nullptr)
+        for (size_t trackIndex = 0; trackIndex < structure->trackCount; ++trackIndex)
+            if (const auto* rack = structure->tracks[trackIndex].fxRack; rack != nullptr)
+                for (size_t slot = 0; slot < TrackDataModel::maxFxSlots; ++slot)
+                    if (const auto& processor = rack->processors[slot]; processor != nullptr && ! rack->bypass[slot]
+                        && processor->isMidiEffect())
+                        processor->processBlock(trackBuffers[trackIndex], trackMidiBuffers[trackIndex]);
+
+    if (structure != nullptr)
+        renderInstrument(*structure, numSamples);
 
     if (structure != nullptr && inputChannelData != nullptr && numInputChannels > 0)
         for (size_t trackIndex = 0; trackIndex < structure->trackCount; ++trackIndex)
@@ -413,31 +661,43 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
             for (size_t slot = 0; slot < TrackDataModel::maxFxSlots; ++slot)
             {
                 const auto& processor = rack->processors[slot];
-                if (processor != nullptr && !rack->bypass[slot])
+                if (processor != nullptr && !rack->bypass[slot] && ! processor->isMidiEffect())
                     processor->processBlock(trackBuffer, trackMidiBuffers[trackIndex]);
             }
         }
 
         const auto& track = structure->tracks[trackIndex];
-        for (size_t route = 0; route < track.activeSendCount; ++route)
-            if (track.sends[route].preFader)
-                if (const auto bus = structure->getBusIndex(track.sends[route].targetBus); bus >= 0 && track.sends[route].level > 0.0f)
+        const auto getSendLevel = [&track, automationSample] (size_t route) noexcept
+        {
+            const auto& send = track.sends[route];
+            return send.automation.mode == AutomationMode::read && send.automation.pointCount > 0
+                ? send.automation.evaluate(automationSample) : send.level;
+        };
+        for (size_t route = 0; route < TrackDataModel::maxSendsPerTrack; ++route)
+            if (track.sends[route].targetBus.isValid() && track.sends[route].preFader)
+                if (const auto bus = structure->getBusIndex(track.sends[route].targetBus); bus >= 0 && getSendLevel(route) > 0.0f)
                     for (int channel = 0; channel < juce::jmin(trackBuffer.getNumChannels(), busBuffers[static_cast<size_t>(bus)].getNumChannels()); ++channel)
-                        juce::FloatVectorOperations::addWithMultiply(busBuffers[static_cast<size_t>(bus)].getWritePointer(channel), trackBuffer.getReadPointer(channel), track.sends[route].level, numSamples);
+                        juce::FloatVectorOperations::addWithMultiply(busBuffers[static_cast<size_t>(bus)].getWritePointer(channel),
+                                                                      trackBuffer.getReadPointer(channel), getSendLevel(route), numSamples);
+        const auto automatedVolume = track.volumeAutomation.mode == AutomationMode::read && track.volumeAutomation.pointCount > 0
+            ? track.volumeAutomation.evaluate(automationSample) : track.volume;
+        const auto automatedPan = track.panAutomation.mode == AutomationMode::read && track.panAutomation.pointCount > 0
+            ? track.panAutomation.evaluate(automationSample) : track.pan;
         TrackMixing::apply(trackBuffer, numSamples,
-                           { track.volume, track.pan,
-                             !track.muted && (!anyTrackSoloed || track.solo) });
+                           { automatedVolume, automatedPan,
+                             !track.muted && (!anyTrackSoloed || track.solo || track.soloSafe) });
         trackPeaks[trackIndex].store(TrackMixing::peak(trackBuffer, numSamples), std::memory_order_relaxed);
 
         const auto outputBusIndex = structure->getBusIndex(track.outputBus);
         auto& destination = outputBusIndex >= 0 ? busBuffers[static_cast<size_t>(outputBusIndex)] : processingBuffer;
         for (int channel = 0; channel < juce::jmin(trackBuffer.getNumChannels(), destination.getNumChannels()); ++channel)
             juce::FloatVectorOperations::add(destination.getWritePointer(channel), trackBuffer.getReadPointer(channel), numSamples);
-        for (size_t route = 0; route < track.activeSendCount; ++route)
-            if (! track.sends[route].preFader)
-                if (const auto bus = structure->getBusIndex(track.sends[route].targetBus); bus >= 0 && track.sends[route].level > 0.0f)
-                for (int channel = 0; channel < juce::jmin(trackBuffer.getNumChannels(), busBuffers[static_cast<size_t>(bus)].getNumChannels()); ++channel)
-                    juce::FloatVectorOperations::addWithMultiply(busBuffers[static_cast<size_t>(bus)].getWritePointer(channel), trackBuffer.getReadPointer(channel), track.sends[route].level, numSamples);
+        for (size_t route = 0; route < TrackDataModel::maxSendsPerTrack; ++route)
+            if (track.sends[route].targetBus.isValid() && ! track.sends[route].preFader)
+                if (const auto bus = structure->getBusIndex(track.sends[route].targetBus); bus >= 0 && getSendLevel(route) > 0.0f)
+                    for (int channel = 0; channel < juce::jmin(trackBuffer.getNumChannels(), busBuffers[static_cast<size_t>(bus)].getNumChannels()); ++channel)
+                        juce::FloatVectorOperations::addWithMultiply(busBuffers[static_cast<size_t>(bus)].getWritePointer(channel),
+                                                                      trackBuffer.getReadPointer(channel), getSendLevel(route), numSamples);
     }
 
     for (size_t busIndex = 0; busIndex < structure->busCount; ++busIndex)
@@ -461,9 +721,11 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
     if (const auto* rack = publishedMasterFxRack.load(std::memory_order_acquire); rack != nullptr)
         for (size_t slot = 0; slot < TrackDataModel::maxFxSlots; ++slot)
             if (const auto& processor = rack->processors[slot]; processor != nullptr && !rack->bypass[slot])
-                processor->processBlock(processingBuffer);
+                    processor->processBlock(processingBuffer);
 
     graph.process(processingBuffer, numSamples);
+    if (playing && metronomeEnabled.load(std::memory_order_acquire))
+        renderMetronome(blockStartSample, numSamples);
     masterPeak.store(TrackMixing::peak(processingBuffer, numSamples), std::memory_order_relaxed);
     masterLeftPeak.store(peakForChannel(processingBuffer, 0, numSamples), std::memory_order_relaxed);
     masterRightPeak.store(peakForChannel(processingBuffer, 1, numSamples), std::memory_order_relaxed);
@@ -472,26 +734,129 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
         juce::FloatVectorOperations::copy(outputChannelData[channel], processingBuffer.getReadPointer(channel), numSamples);
 }
 
+void AudioEngine::renderMetronome(double blockStartSample, int numSamples) noexcept
+{
+    if (dataModel == nullptr || processingBuffer.getNumChannels() == 0)
+        return;
+
+    const auto sampleRate = juce::jmax(1.0, activeSampleRate.load(std::memory_order_relaxed));
+    const auto bpm = dataModel->getTempoAtSample(blockStartSample);
+    const auto samplesPerBeat = sampleRate * 60.0 / juce::jmax(1.0, bpm);
+    const auto beatsPerBar = juce::jmax(1, dataModel->getTimeSignatureNumerator());
+    const auto firstBeat = static_cast<long long>(std::floor(blockStartSample / samplesPerBeat));
+    const auto lastBeat = static_cast<long long>(std::floor((blockStartSample + numSamples - 1) / samplesPerBeat));
+    constexpr int clickLength = 192;
+
+    for (auto beat = firstBeat; beat <= lastBeat; ++beat)
+    {
+        const auto beatSample = static_cast<double>(beat) * samplesPerBeat;
+        const auto offset = static_cast<int>(std::llround(beatSample - blockStartSample));
+        const auto start = juce::jmax(0, offset);
+        const auto end = juce::jmin(numSamples, offset + clickLength);
+        if (start >= end)
+            continue;
+
+        const auto accent = (beat % beatsPerBar) == 0;
+        const auto frequency = accent ? 1760.0 : 1320.0;
+        const auto amplitude = accent ? 0.16f : 0.10f;
+        for (int sample = start; sample < end; ++sample)
+        {
+            const auto age = sample - offset;
+            const auto envelope = std::exp(-static_cast<float>(age) / 42.0f);
+            const auto value = amplitude * envelope * std::sin(static_cast<float>(juce::MathConstants<double>::twoPi
+                * frequency * static_cast<double>(age) / sampleRate));
+            for (int channel = 0; channel < processingBuffer.getNumChannels(); ++channel)
+                processingBuffer.addSample(channel, sample, value);
+        }
+    }
+}
+
+void AudioEngine::appendIncomingMidiEvents(const TrackDataModel::RenderStructureSnapshot& structure,
+                                           double blockStartSample) noexcept
+{
+    int targetTrack = -1;
+    for (size_t index = 0; index < structure.trackCount; ++index)
+        if (structure.tracks[index].type == TrackType::instrument && structure.tracks[index].armed)
+        {
+            targetTrack = static_cast<int>(index);
+            break;
+        }
+    if (targetTrack < 0)
+        for (size_t index = 0; index < structure.trackCount; ++index)
+            if (structure.tracks[index].type == TrackType::instrument)
+            {
+                targetTrack = static_cast<int>(index);
+                break;
+            }
+
+    int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
+    incomingMidiFifo.prepareToRead(incomingMidiCapacity, start1, size1, start2, size2);
+    const auto appendRange = [this, &structure, targetTrack, blockStartSample] (int start, int count) noexcept
+    {
+        if (targetTrack < 0)
+            return;
+        for (int offset = 0; offset < count; ++offset)
+        {
+            const auto& event = incomingMidiEvents[static_cast<size_t>(start + offset)];
+            if (! scheduledMidiEvents.add({ structure.tracks[static_cast<size_t>(targetTrack)].id, 0,
+                                            event.pitch, event.velocity, event.channel, event.noteOn }))
+                break;
+            if (midiRecordingActive.load(std::memory_order_acquire))
+            {
+                midiRecordingCallbackUsers.fetch_add(1, std::memory_order_acq_rel);
+                if (midiRecordingActive.load(std::memory_order_acquire))
+                {
+                    int writeStart1 = 0, writeSize1 = 0, writeStart2 = 0, writeSize2 = 0;
+                    recordedMidiFifo.prepareToWrite(1, writeStart1, writeSize1, writeStart2, writeSize2);
+                    if (writeSize1 > 0)
+                    {
+                        recordedMidiEvents[static_cast<size_t>(writeStart1)] = { blockStartSample, event.pitch,
+                                                                                  event.velocity, event.channel, event.noteOn };
+                        recordedMidiFifo.finishedWrite(1);
+                    }
+                    else
+                    {
+                        droppedMidiRecordingEvents.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
+                midiRecordingCallbackUsers.fetch_sub(1, std::memory_order_acq_rel);
+            }
+        }
+    };
+    appendRange(start1, size1);
+    appendRange(start2, size2);
+    incomingMidiFifo.finishedRead(size1 + size2);
+}
+
 void AudioEngine::renderInstrument(const TrackDataModel::RenderStructureSnapshot& structure, int numSamples) noexcept
 {
     const auto rate = dataModel != nullptr ? dataModel->getSampleRate() : 44100.0;
-    for (int sample = 0; sample < numSamples; ++sample)
+    for (size_t trackIndex = 0; trackIndex < structure.trackCount; ++trackIndex)
     {
-        for (size_t eventIndex = 0; eventIndex < scheduledMidiEvents.size(); ++eventIndex)
+        if (structure.tracks[trackIndex].type != TrackType::instrument)
+            continue;
+
+        juce::MidiBuffer::Iterator events(trackMidiBuffers[trackIndex]);
+        juce::MidiMessage message;
+        int eventSample = 0;
+        auto hasEvent = events.getNextEvent(message, eventSample);
+        auto& voice = instrumentVoices[trackIndex];
+        for (int sample = 0; sample < numSamples; ++sample)
         {
-            const auto& event = scheduledMidiEvents[eventIndex];
-            if (event.sampleOffset != sample) continue;
-            const auto trackIndex = structure.getTrackIndex(event.trackId);
-            if (trackIndex < 0) continue;
-            auto& voice = instrumentVoices[static_cast<size_t>(trackIndex)];
-            if (event.noteOn) { voice.active = true; voice.pitch = event.pitch; voice.velocity = event.velocity; }
-            else if (voice.pitch == event.pitch) voice.active = false;
-        }
-        for (size_t trackIndex = 0; trackIndex < structure.trackCount; ++trackIndex)
-        {
-            if (structure.tracks[trackIndex].type != TrackType::instrument)
-                continue;
-            auto& voice = instrumentVoices[trackIndex];
+            while (hasEvent && eventSample <= sample)
+            {
+                if (message.isNoteOn())
+                {
+                    voice.active = true;
+                    voice.pitch = message.getNoteNumber();
+                    voice.velocity = message.getFloatVelocity();
+                }
+                else if (message.isNoteOff() && voice.pitch == message.getNoteNumber())
+                {
+                    voice.active = false;
+                }
+                hasEvent = events.getNextEvent(message, eventSample);
+            }
             if (! voice.active) continue;
             const auto frequency = 440.0 * std::pow(2.0, (voice.pitch - 69) / 12.0);
             const auto value = static_cast<float>(std::sin(voice.phase) * voice.velocity * 0.2);

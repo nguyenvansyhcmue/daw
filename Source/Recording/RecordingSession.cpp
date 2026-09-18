@@ -15,50 +15,58 @@ RecordingSession::~RecordingSession()
 }
 
 juce::Result RecordingSession::start(size_t trackIndex, const juce::File& destination,
-                                     double startSample, double sampleRate, int inputChannels, int maximumBlockSize)
+                                     double startSample, double sampleRate, int inputChannel, int maximumBlockSize)
 {
     if (isRecording()) return juce::Result::fail("Recording is already active");
-    if (trackIndex >= model.getTrackCount() || sampleRate <= 0.0 || inputChannels <= 0 || maximumBlockSize <= 0)
+    if (trackIndex >= model.getTrackCount() || sampleRate <= 0.0 || inputChannel < 0 || maximumBlockSize <= 0)
         return juce::Result::fail("Recording input configuration is invalid");
     destination.deleteFile();
     auto stream = destination.createOutputStream();
     if (stream == nullptr) return juce::Result::fail("Cannot create recording file");
     juce::WavAudioFormat wav;
     auto* rawStream = stream.release();
-    auto* formatWriter = wav.createWriterFor(rawStream, sampleRate, static_cast<unsigned int>(inputChannels), 32, {}, 0);
+    auto* formatWriter = wav.createWriterFor(rawStream, sampleRate, 2, 32, {}, 0);
     if (formatWriter == nullptr)
     {
         delete rawStream;
         return juce::Result::fail("Cannot create WAV recording writer");
     }
-    captureBuffer.setSize(inputChannels, maximumBlockSize, false, true, true);
+    captureBuffer.setSize(2, maximumBlockSize, false, true, true);
     writer = std::make_unique<juce::AudioFormatWriter::ThreadedWriter>(formatWriter, writerThread,
                                                                          maximumBlockSize * 64);
     destinationFile = destination;
     targetTrack = trackIndex;
     targetStartSample = startSample;
+    sourceInputChannel = inputChannel;
     droppedBlocks.store(0, std::memory_order_relaxed);
     capturedSamples.store(0, std::memory_order_relaxed);
     activeWriter.store(writer.get(), std::memory_order_release);
     return juce::Result::ok();
 }
 
-void RecordingSession::capture(const float* const* input, int inputChannels, int numSamples) noexcept
+void RecordingSession::capture(const float* const* input, int inputChannels, int sourceOffset, int numSamples) noexcept
 {
     auto* currentWriter = activeWriter.load(std::memory_order_acquire);
     if (currentWriter == nullptr || input == nullptr || inputChannels <= 0 || numSamples <= 0
-        || numSamples > captureBuffer.getNumSamples()) return;
+        || sourceOffset < 0 || sourceOffset + numSamples > captureBuffer.getNumSamples()) return;
     callbackUsers.fetch_add(1, std::memory_order_acq_rel);
     if (currentWriter != activeWriter.load(std::memory_order_acquire))
     {
         callbackUsers.fetch_sub(1, std::memory_order_acq_rel);
         return;
     }
-    for (int channel = 0; channel < captureBuffer.getNumChannels(); ++channel)
+    const auto leftInputIndex = sourceInputChannel % inputChannels;
+    const auto rightInputIndex = (sourceInputChannel + 1) % inputChannels;
+    if (input[leftInputIndex] == nullptr)
     {
-        const auto sourceChannel = juce::jmin(channel, inputChannels - 1);
-        juce::FloatVectorOperations::copy(captureBuffer.getWritePointer(channel), input[sourceChannel], numSamples);
+        callbackUsers.fetch_sub(1, std::memory_order_acq_rel);
+        return;
     }
+    juce::FloatVectorOperations::copy(captureBuffer.getWritePointer(0), input[leftInputIndex] + sourceOffset, numSamples);
+    if (input[rightInputIndex] != nullptr)
+        juce::FloatVectorOperations::copy(captureBuffer.getWritePointer(1), input[rightInputIndex] + sourceOffset, numSamples);
+    else
+        juce::FloatVectorOperations::copy(captureBuffer.getWritePointer(1), input[leftInputIndex] + sourceOffset, numSamples);
     if (! currentWriter->write(captureBuffer.getArrayOfReadPointers(), numSamples))
         droppedBlocks.fetch_add(1, std::memory_order_relaxed);
     else

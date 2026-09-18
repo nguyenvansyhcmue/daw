@@ -74,6 +74,7 @@ public:
 
 private:
     void timerCallback() override;
+    void showPluginBrowser(int trackIndex, size_t slot);
 
     TrackDataModel* trackModel = nullptr;
     AudioEngine* audioEngine = nullptr;
@@ -86,5 +87,11 @@ private:
     std::array<juce::ToggleButton, TrackDataModel::maxTracks> soloButtons;
     std::array<std::array<FxSlotButton, TrackDataModel::maxFxSlots>, TrackDataModel::maxTracks> fxButtons;
     std::array<juce::Label, TrackDataModel::maxTracks> labels;
+    std::array<AudioPeakMeter, TrackDataModel::maxBuses> busMeters;
+    std::array<juce::Slider, TrackDataModel::maxBuses> busFaders;
+    std::array<juce::ToggleButton, TrackDataModel::maxBuses> busMuteButtons;
+    std::array<std::array<FxSlotButton, TrackDataModel::maxFxSlots>, TrackDataModel::maxBuses> busFxButtons;
+    std::array<juce::Label, TrackDataModel::maxBuses> busLabels;
     juce::Label titleLabel;
+    juce::Label busTitleLabel;
 };

@@ -3,6 +3,7 @@
 #include "ProjectState.h"
 #include "../Models/TrackDataModel.h"
 #include "../Media/MediaReloadService.h"
+#include "../Plugins/PluginHostService.h"
 
 #include <charconv>
 #include <cmath>
@@ -88,6 +89,91 @@ bool readBool(const juce::XmlElement& element, const char* name, bool& value)
     return false;
 }
 
+juce::Result readFxSlots(const juce::XmlElement& parent,
+                         std::array<PersistedTrackState::FxSlot, PersistedTrackState::maxFxSlots>& slots)
+{
+    const auto* effects = parent.getChildByName("Effects");
+    if (effects == nullptr)
+        return juce::Result::fail("FX rack is missing");
+
+    for (const auto* effect : effects->getChildIterator())
+    {
+        if (! effect->hasTagName("Effect"))
+            return juce::Result::fail("FX rack has an unknown element");
+
+        const auto slot = effect->getIntAttribute("slot", -1);
+        bool bypassed = false;
+        if (slot < 0 || slot >= static_cast<int>(slots.size()) || slots[static_cast<size_t>(slot)].persistentIdentifier.isNotEmpty()
+            || ! effect->hasAttribute("identifier") || ! readBool(*effect, "bypassed", bypassed))
+            return juce::Result::fail("FX slot is malformed");
+
+        auto& target = slots[static_cast<size_t>(slot)];
+        target.persistentIdentifier = effect->getStringAttribute("identifier").trim();
+        target.bypassed = bypassed;
+        if (target.persistentIdentifier.isEmpty() || ! target.state.fromBase64Encoding(effect->getAllSubText().trim()))
+            return juce::Result::fail("FX state is malformed");
+    }
+    return juce::Result::ok();
+}
+
+void writeFxSlots(juce::XmlElement& parent,
+                  const std::array<PersistedTrackState::FxSlot, PersistedTrackState::maxFxSlots>& slots)
+{
+    auto* effects = parent.createNewChildElement("Effects");
+    for (size_t slot = 0; slot < slots.size(); ++slot)
+    {
+        const auto& source = slots[slot];
+        if (source.persistentIdentifier.isEmpty())
+            continue;
+
+        auto* effect = effects->createNewChildElement("Effect");
+        effect->setAttribute("slot", static_cast<int>(slot));
+        effect->setAttribute("identifier", source.persistentIdentifier);
+        effect->setAttribute("bypassed", source.bypassed ? 1 : 0);
+        effect->addTextElement(source.state.toBase64Encoding());
+    }
+}
+
+void restoreFxSlots(TrackDataModel& model, PluginHostService& host, const ProjectState& state,
+                    juce::StringArray& unavailablePlugins)
+{
+    const auto restore = [&host, &unavailablePlugins] (const auto& slots, auto&& install)
+    {
+        for (size_t slot = 0; slot < slots.size(); ++slot)
+        {
+            const auto& saved = slots[slot];
+            if (saved.persistentIdentifier.isEmpty())
+                continue;
+
+            juce::String error;
+            auto effect = host.createEffect(saved.persistentIdentifier, 44100.0, 512, error);
+            if (effect == nullptr)
+            {
+                unavailablePlugins.addIfNotAlreadyThere("Plug-in unavailable: " + error);
+                continue;
+            }
+
+            if (! saved.state.isEmpty())
+                effect->setState(saved.state.getData(), saved.state.getSize());
+            install(slot, std::move(effect), saved.bypassed);
+        }
+    };
+
+    for (size_t trackIndex = 0; trackIndex < state.tracks.size(); ++trackIndex)
+        restore(state.tracks[trackIndex].fxSlots, [&model, trackIndex] (size_t slot, auto effect, bool bypassed)
+        {
+            model.setFxProcessor(trackIndex, slot, std::move(effect));
+            model.setFxBypassed(trackIndex, slot, bypassed);
+        });
+
+    for (const auto& bus : state.buses)
+        restore(bus.fxSlots, [&model, busId = bus.id] (size_t slot, auto effect, bool bypassed)
+        {
+            model.setBusFxProcessor(busId, slot, std::move(effect));
+            model.setBusFxBypassed(busId, slot, bypassed);
+        });
+}
+
 juce::Result parseProject(const juce::File& file, ProjectState& state)
 {
     juce::XmlDocument document(file);
@@ -104,6 +190,10 @@ juce::Result parseProject(const juce::File& file, ProjectState& state)
         || ! readBool(*root, "cycleActive", state.cycleActive) || ! readDouble(*root, "cycleStartSample", state.cycleStartSample)
         || ! readDouble(*root, "cycleEndSample", state.cycleEndSample))
         return juce::Result::fail("Project transport state is malformed");
+    if (version >= 11 && (! readBool(*root, "punchActive", state.punchActive)
+                          || ! readDouble(*root, "punchInSample", state.punchInSample)
+                          || ! readDouble(*root, "punchOutSample", state.punchOutSample)))
+        return juce::Result::fail("Project punch state is malformed");
 
     const auto* tempoMap = root->getChildByName("TempoMap");
     const auto* tracks = root->getChildByName("Tracks");
@@ -127,6 +217,8 @@ juce::Result parseProject(const juce::File& file, ProjectState& state)
             || ! readBool(*track, "solo", parsedTrack.solo))
             return juce::Result::fail("Track state is malformed");
         parsedTrack.id = { trackId };
+        if (version >= 12 && ! readBool(*track, "soloSafe", parsedTrack.soloSafe))
+            return juce::Result::fail("Track solo-safe state is malformed");
         if (version >= 5)
         {
             int type = 0;
@@ -159,6 +251,8 @@ juce::Result parseProject(const juce::File& file, ProjectState& state)
         {
             const auto* sends = track->getChildByName("Sends");
             if (sends == nullptr) return juce::Result::fail("Track is missing Sends");
+            parsedTrack.sends.fill({});
+            parsedTrack.activeSendCount = 0;
             for (const auto* send : sends->getChildIterator())
             {
                 if (! send->hasTagName("Send") || parsedTrack.activeSendCount >= PersistedTrackState::maxSends)
@@ -166,9 +260,45 @@ juce::Result parseProject(const juce::File& file, ProjectState& state)
                 uint64_t bus = 0; double level = 0.0; bool pre = false;
                 if (! readUnsigned(*send, "bus", bus) || ! readDouble(*send, "level", level) || ! readBool(*send, "preFader", pre))
                     return juce::Result::fail("Track send route is malformed");
-                parsedTrack.sends[parsedTrack.activeSendCount++] = { { bus }, static_cast<float>(level), pre };
+                const auto slot = version >= 9 ? send->getIntAttribute("slot", -1) : static_cast<int>(parsedTrack.activeSendCount);
+                if (slot < 0 || slot >= static_cast<int>(PersistedTrackState::maxSends)
+                    || parsedTrack.sends[static_cast<size_t>(slot)].targetBus.isValid())
+                    return juce::Result::fail("Track send slot is malformed");
+                parsedTrack.sends[static_cast<size_t>(slot)] = { { bus }, static_cast<float>(level), pre };
+                ++parsedTrack.activeSendCount;
             }
         }
+        if (version >= 10)
+        {
+            const auto* automation = track->getChildByName("Automation");
+            if (automation == nullptr) return juce::Result::fail("Track is missing Automation");
+            for (const auto* lane : automation->getChildIterator())
+            {
+                if (! lane->hasTagName("Lane")) return juce::Result::fail("Automation has an unknown element");
+                PersistedAutomationLane parsedLane;
+                if (! readInt(*lane, "parameter", parsedLane.parameter) || ! readInt(*lane, "mode", parsedLane.mode))
+                    return juce::Result::fail("Automation lane is malformed");
+                if (version >= 14)
+                    parsedLane.sendSlot = lane->getIntAttribute("sendSlot", -1);
+                double defaultValue = 0.0;
+                if (! readDouble(*lane, "defaultValue", defaultValue))
+                    return juce::Result::fail("Automation default value is malformed");
+                parsedLane.defaultValue = static_cast<float>(defaultValue);
+                for (const auto* point : lane->getChildIterator())
+                {
+                    if (! point->hasTagName("Point")) return juce::Result::fail("Automation lane has an unknown element");
+                    PersistedAutomationPoint parsedPoint;
+                    double value = 0.0;
+                    if (! readDouble(*point, "samplePosition", parsedPoint.samplePosition) || ! readDouble(*point, "value", value))
+                        return juce::Result::fail("Automation point is malformed");
+                    parsedPoint.value = static_cast<float>(value);
+                    parsedLane.points.push_back(parsedPoint);
+                }
+                parsedTrack.automationLanes.push_back(std::move(parsedLane));
+            }
+        }
+        if (version >= 13)
+            if (const auto result = readFxSlots(*track, parsedTrack.fxSlots); result.failed()) return result;
         if (version >= 4)
         {
             if (! track->hasAttribute("name")) return juce::Result::fail("Track name is missing");
@@ -224,7 +354,9 @@ juce::Result parseProject(const juce::File& file, ProjectState& state)
                 return juce::Result::fail("Bus state is malformed");
             parsedBus.id = { busId };
             parsedBus.gain = static_cast<float>(gain);
-            state.buses.push_back(parsedBus);
+        state.buses.push_back(parsedBus);
+        if (version >= 13)
+            if (const auto result = readFxSlots(*bus, state.buses.back().fxSlots); result.failed()) return result;
         }
     }
 
@@ -264,10 +396,8 @@ juce::Result parseProject(const juce::File& file, ProjectState& state)
 }
 }
 
-juce::Result ProjectSerializer::save(const TrackDataModel& model, const juce::File& file)
+juce::Result writeProjectState(const ProjectState& state, const juce::File& file)
 {
-    auto state = model.createProjectState();
-    if (const auto result = makeMediaPortable(state, file); result.failed()) return result;
     juce::XmlElement root(rootTag);
     root.setAttribute("formatVersion", ProjectState::formatVersion);
     root.setAttribute("bpm", state.bpm);
@@ -275,6 +405,9 @@ juce::Result ProjectSerializer::save(const TrackDataModel& model, const juce::Fi
     root.setAttribute("cycleActive", state.cycleActive ? 1 : 0);
     root.setAttribute("cycleStartSample", state.cycleStartSample);
     root.setAttribute("cycleEndSample", state.cycleEndSample);
+    root.setAttribute("punchActive", state.punchActive ? 1 : 0);
+    root.setAttribute("punchInSample", state.punchInSample);
+    root.setAttribute("punchOutSample", state.punchOutSample);
 
     auto* tempoMap = root.createNewChildElement("TempoMap");
     for (const auto& event : state.tempoMap)
@@ -294,19 +427,39 @@ juce::Result ProjectSerializer::save(const TrackDataModel& model, const juce::Fi
         element->setAttribute("pan", static_cast<double>(track.pan));
         element->setAttribute("muted", track.muted ? 1 : 0);
         element->setAttribute("solo", track.solo ? 1 : 0);
+        element->setAttribute("soloSafe", track.soloSafe ? 1 : 0);
         element->setAttribute("inputMonitoring", track.inputMonitoring ? 1 : 0);
         element->setAttribute("inputChannel", track.inputChannel);
         element->setAttribute("outputBus", juce::String(track.outputBus.value));
         element->setAttribute("sendBus", "0");
         element->setAttribute("sendAmount", 0.0);
         auto* sends = element->createNewChildElement("Sends");
-        for (size_t i = 0; i < track.activeSendCount; ++i)
+        for (size_t i = 0; i < PersistedTrackState::maxSends; ++i)
         {
+            if (! track.sends[i].targetBus.isValid())
+                continue;
             auto* send = sends->createNewChildElement("Send");
+            send->setAttribute("slot", static_cast<int>(i));
             send->setAttribute("bus", juce::String(track.sends[i].targetBus.value));
             send->setAttribute("level", static_cast<double>(track.sends[i].level));
             send->setAttribute("preFader", track.sends[i].preFader ? 1 : 0);
         }
+        auto* automation = element->createNewChildElement("Automation");
+        for (const auto& lane : track.automationLanes)
+        {
+            auto* savedLane = automation->createNewChildElement("Lane");
+            savedLane->setAttribute("parameter", lane.parameter);
+            savedLane->setAttribute("sendSlot", lane.sendSlot);
+            savedLane->setAttribute("mode", lane.mode);
+            savedLane->setAttribute("defaultValue", static_cast<double>(lane.defaultValue));
+            for (const auto& point : lane.points)
+            {
+                auto* savedPoint = savedLane->createNewChildElement("Point");
+                savedPoint->setAttribute("samplePosition", point.samplePosition);
+                savedPoint->setAttribute("value", static_cast<double>(point.value));
+            }
+        }
+        writeFxSlots(*element, track.fxSlots);
         auto* clips = element->createNewChildElement("Clips");
         for (const auto& clip : track.clips)
         {
@@ -330,6 +483,7 @@ juce::Result ProjectSerializer::save(const TrackDataModel& model, const juce::Fi
         element->setAttribute("id", juce::String(bus.id.value));
         element->setAttribute("gain", static_cast<double>(bus.gain));
         element->setAttribute("muted", bus.muted ? 1 : 0);
+        writeFxSlots(*element, bus.fxSlots);
     }
     auto* midiClips = root.createNewChildElement("MidiClips");
     for (const auto& clip : state.midiClips)
@@ -353,6 +507,18 @@ juce::Result ProjectSerializer::save(const TrackDataModel& model, const juce::Fi
     return juce::Result::ok();
 }
 
+juce::Result ProjectSerializer::save(const TrackDataModel& model, const juce::File& file)
+{
+    auto state = model.createProjectState();
+    if (const auto result = makeMediaPortable(state, file); result.failed()) return result;
+    return writeProjectState(state, file);
+}
+
+juce::Result ProjectSerializer::saveRecoverySnapshot(const TrackDataModel& model, const juce::File& file)
+{
+    return writeProjectState(model.createProjectState(), file);
+}
+
 juce::Result ProjectSerializer::load(TrackDataModel& model, const juce::File& file,
                                      juce::StringArray* missingMediaReferences)
 {
@@ -361,5 +527,23 @@ juce::Result ProjectSerializer::load(TrackDataModel& model, const juce::File& fi
     if (const auto result = model.applyProjectState(candidate); result.failed()) return result;
     const auto mediaReport = MediaReloadService::reloadProjectMedia(model);
     if (missingMediaReferences != nullptr) *missingMediaReferences = mediaReport.missingMediaReferences;
+    return juce::Result::ok();
+}
+
+juce::Result ProjectSerializer::load(TrackDataModel& model, PluginHostService& pluginHost, const juce::File& file,
+                                     juce::StringArray* missingReferences)
+{
+    ProjectState candidate;
+    if (const auto result = parseProject(file, candidate); result.failed()) return result;
+    if (const auto result = model.applyProjectState(candidate); result.failed()) return result;
+
+    const auto mediaReport = MediaReloadService::reloadProjectMedia(model);
+    juce::StringArray unavailablePlugins;
+    restoreFxSlots(model, pluginHost, candidate, unavailablePlugins);
+    if (missingReferences != nullptr)
+    {
+        *missingReferences = mediaReport.missingMediaReferences;
+        missingReferences->addArray(unavailablePlugins);
+    }
     return juce::Result::ok();
 }

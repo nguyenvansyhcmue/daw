@@ -1,5 +1,10 @@
 #include "PianoRoll.h"
 
+PianoRoll::PianoRoll(TrackDataModel* model) : trackModel(model)
+{
+    setWantsKeyboardFocus(true);
+}
+
 MidiClipId PianoRoll::ensureActiveClip()
 {
     if (trackModel == nullptr) return {};
@@ -61,6 +66,7 @@ void PianoRoll::paint(juce::Graphics& g)
 
 void PianoRoll::mouseDown(const juce::MouseEvent& event)
 {
+    grabKeyboardFocus();
     const auto clipId = ensureActiveClip(); if (! clipId.isValid() || trackModel == nullptr) return;
     if (event.position.x < 42.0f) return;
     const auto pitch = pitchForY(event.position.y); const auto sample = trackModel->getSnappedSamplePosition(sampleForX(event.position.x), 0.25);
@@ -95,4 +101,21 @@ void PianoRoll::mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDe
     for (const auto& clip : trackModel->getMidiClips()) if (clip.id == ensureActiveClip()) for (const auto& note : clip.notes) if (note.id == selectedNote)
         trackModel->setMidiNoteVelocity(activeClip, selectedNote, note.velocity + wheel.deltaY * 0.1f);
     repaint();
+}
+
+bool PianoRoll::keyPressed(const juce::KeyPress& key)
+{
+    if (trackModel == nullptr || ! ensureActiveClip().isValid())
+        return false;
+
+    if (key.getTextCharacter() == 'q' || key.getTextCharacter() == 'Q')
+    {
+        const auto gridSamples = trackModel->getSampleRate() * 60.0 / trackModel->getBpm() * 0.25;
+        return trackModel->quantizeMidiClip(activeClip, gridSamples);
+    }
+    if (key == juce::KeyPress::upKey)
+        return trackModel->transposeMidiClip(activeClip, 1);
+    if (key == juce::KeyPress::downKey)
+        return trackModel->transposeMidiClip(activeClip, -1);
+    return false;
 }

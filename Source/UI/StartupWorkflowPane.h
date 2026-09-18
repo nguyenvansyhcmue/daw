@@ -1,13 +1,14 @@
 #pragma once
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../Project/ProjectState.h"
+#include "../Project/ProjectTemplates.h"
 
 class StartupWorkflowPane final : public juce::Component, private juce::Timer
 {
 public:
     enum class Step { splash, chooseProject, createTrack };
     StartupWorkflowPane();
-    std::function<void()> onEmptyProject;
+    std::function<void(ProjectTemplate)> onTemplateSelected;
     std::function<void()> onOpenProject;
     std::function<void(const juce::File&)> onOpenRecentProject;
     // Returns the number of tracks that were actually created. This keeps the
@@ -35,8 +36,9 @@ private:
     int splashFramesRemaining = 27;
     float currentAlpha = 0.0f;
     TrackType selectedType = TrackType::instrument;
+    ProjectTemplate selectedProjectTemplate = ProjectTemplate::empty;
     juce::Label title;
-    juce::TextButton emptyProject { "Empty Project" }, openProject { "Open an existing project..." };
+    juce::TextButton emptyProject { "Empty Project" }, audioRecordingProject { "Audio Recording" }, midiProductionProject { "MIDI Production" }, openProject { "Open an existing project..." };
     juce::TextButton chooseProject { "Choose" };
     std::array<juce::TextButton, 5> recentProjectButtons;
     juce::StringArray recentProjects;

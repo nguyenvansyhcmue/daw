@@ -20,8 +20,21 @@ void AudioPeakMeter::updateStereoPeak(float leftLevel, float rightLevel) noexcep
                                                                         std::memory_order_relaxed,
                                                                         std::memory_order_relaxed)) {}
     };
+    if (leftLevel >= 0.999f || rightLevel >= 0.999f)
+        clipLatched.store(true, std::memory_order_relaxed);
     publishPeak(currentPeak, leftLevel);
     publishPeak(currentRightPeak, rightLevel);
+}
+
+void AudioPeakMeter::resetClipIndicator() noexcept
+{
+    clipLatched.store(false, std::memory_order_relaxed);
+}
+
+void AudioPeakMeter::mouseDown(const juce::MouseEvent&)
+{
+    resetClipIndicator();
+    repaint();
 }
 
 void AudioPeakMeter::timerCallback()
@@ -39,6 +52,13 @@ void AudioPeakMeter::paint(juce::Graphics& g)
     g.setColour(juce::Colour(0xff101010));
     g.fillRoundedRectangle(bounds, 3.0f);
 
+    g.setColour(juce::Colours::black.withAlpha(0.62f));
+    for (const auto fraction : { 0.25f, 0.5f, 0.75f })
+    {
+        const auto y = bounds.getBottom() - bounds.getHeight() * fraction;
+        g.drawHorizontalLine(juce::roundToInt(y), bounds.getX(), bounds.getRight());
+    }
+
     const auto leftBounds = bounds.withWidth((bounds.getWidth() - 2.0f) * 0.5f);
     const auto rightBounds = leftBounds.withX(leftBounds.getRight() + 2.0f);
     juce::ColourGradient gradient(juce::Colour(0xff23d18b), 0.0f, bounds.getBottom(),
@@ -54,7 +74,7 @@ void AudioPeakMeter::paint(juce::Graphics& g)
     drawLevel(leftBounds, displayedPeak);
     drawLevel(rightBounds, displayedRightPeak);
 
-    if (displayedPeak >= 0.999f || displayedRightPeak >= 0.999f)
+    if (clipLatched.load(std::memory_order_relaxed))
     {
         g.setColour(juce::Colours::red);
         g.fillRect(bounds.getX(), bounds.getY(), bounds.getWidth(), 3.0f);

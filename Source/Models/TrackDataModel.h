@@ -4,6 +4,7 @@
 #include <juce_events/juce_events.h>
 
 #include "AudioClipState.h"
+#include "../Core/Automation/AutomationRenderSnapshot.h"
 #include "../Media/AudioMediaPool.h"
 #include "../AudioEngine/AudioEffectProcessor.h"
 #include "../Project/ProjectState.h"
@@ -54,6 +55,7 @@ public:
         std::atomic<float> pan { 0.0f };
         std::atomic<bool> muted { false };
         std::atomic<bool> solo { false };
+        std::atomic<bool> soloSafe { false };
         std::atomic<bool> armed { false };
         std::atomic<bool> inputMonitoring { false };
         std::atomic<int> inputChannel { 0 };
@@ -61,7 +63,15 @@ public:
         std::vector<AudioClipState> clips;
         BusId outputBus;
         std::array<SendRoute, maxSendsPerTrack> sends {};
+        std::array<AutomationLane, maxSendsPerTrack> sendAutomation {
+            AutomationLane { AutomationParameter::sendLevel, 1.0f }, AutomationLane { AutomationParameter::sendLevel, 1.0f },
+            AutomationLane { AutomationParameter::sendLevel, 1.0f }, AutomationLane { AutomationParameter::sendLevel, 1.0f },
+            AutomationLane { AutomationParameter::sendLevel, 1.0f }, AutomationLane { AutomationParameter::sendLevel, 1.0f },
+            AutomationLane { AutomationParameter::sendLevel, 1.0f }, AutomationLane { AutomationParameter::sendLevel, 1.0f }
+        };
         uint8_t activeSendCount = 0;
+        AutomationLane volumeAutomation { AutomationParameter::trackVolume, 1.0f };
+        AutomationLane panAutomation { AutomationParameter::trackPan, 0.0f };
 
         TrackState() = default;
         TrackState(const TrackState& other) noexcept
@@ -70,9 +80,11 @@ public:
               pan(other.pan.load()),
               muted(other.muted.load()),
               solo(other.solo.load()),
+              soloSafe(other.soloSafe.load()),
               armed(other.armed.load()), inputMonitoring(other.inputMonitoring.load()),
               inputChannel(other.inputChannel.load()), name(other.name),
-              clips(other.clips), outputBus(other.outputBus), sends(other.sends), activeSendCount(other.activeSendCount)
+              clips(other.clips), outputBus(other.outputBus), sends(other.sends), activeSendCount(other.activeSendCount),
+              volumeAutomation(other.volumeAutomation), panAutomation(other.panAutomation), sendAutomation(other.sendAutomation)
         {
         }
 
@@ -83,12 +95,14 @@ public:
             pan.store(other.pan.load());
             muted.store(other.muted.load());
             solo.store(other.solo.load());
+            soloSafe.store(other.soloSafe.load());
             armed.store(other.armed.load());
             inputMonitoring.store(other.inputMonitoring.load());
             inputChannel.store(other.inputChannel.load());
             name = other.name;
             clips = other.clips;
             outputBus = other.outputBus; sends = other.sends; activeSendCount = other.activeSendCount;
+            volumeAutomation = other.volumeAutomation; panAutomation = other.panAutomation; sendAutomation = other.sendAutomation;
             return *this;
         }
 
@@ -98,19 +112,29 @@ public:
 
     struct RenderTrack
     {
-        struct SendRouteSnapshot { BusId targetBus; float level = 1.0f; bool preFader = false; };
+        struct SendRouteSnapshot
+        {
+            BusId targetBus;
+            float level = 1.0f;
+            bool preFader = false;
+            AutomationRenderLane automation;
+        };
         TrackId id;
         TrackType type = TrackType::audio;
         float volume = 1.0f;
         float pan = 0.0f;
         bool muted = false;
         bool solo = false;
+        bool soloSafe = false;
+        bool armed = false;
         bool inputMonitoring = false;
         int inputChannel = 0;
         const FxRackSnapshot* fxRack = nullptr;
         BusId outputBus;
         std::array<SendRouteSnapshot, maxSendsPerTrack> sends {};
         uint8_t activeSendCount = 0;
+        AutomationRenderLane volumeAutomation;
+        AutomationRenderLane panAutomation;
     };
     struct BusState { BusId id; float gain = 1.0f; bool muted = false; };
     struct RenderBus { BusId id; float gain = 1.0f; bool muted = false; const FxRackSnapshot* fxRack = nullptr; };
@@ -185,18 +209,28 @@ public:
     const std::vector<BusState>& getBuses() const noexcept { return busStates; }
     const FxRackSnapshot* getBusFxRackSnapshot(BusId bus) const noexcept;
     void setBusFxProcessor(BusId bus, size_t slot, std::shared_ptr<AudioEffectProcessor> processor);
-    void setBusFxBypassed(BusId bus, size_t slot, bool bypassed) noexcept;
+    void setBusFxBypassed(BusId bus, size_t slot, bool bypassed);
     bool setBusGain(BusId bus, float gain);
     bool setBusMuted(BusId bus, bool muted);
     bool setTrackOutputBus(TrackId track, BusId bus);
     bool setTrackSend(TrackId track, BusId bus, float amount);
     bool setTrackSendRoute(TrackId track, size_t route, BusId bus, float amount, bool preFader);
+    bool clearTrackSendRoute(TrackId track, size_t route);
     bool clearTrackSend(TrackId track);
-    void setTrackVolume(size_t index, float volume) noexcept;
+    void setTrackVolume(size_t index, float volume);
     void setTrackName(size_t index, const juce::String& name);
-    void setTrackPan(size_t index, float pan) noexcept;
+    void setTrackPan(size_t index, float pan);
+    bool upsertTrackAutomationPoint(size_t trackIndex, AutomationParameter parameter, double samplePosition, float value);
+    bool removeTrackAutomationPoint(size_t trackIndex, AutomationParameter parameter, double samplePosition);
+    bool setTrackAutomationMode(size_t trackIndex, AutomationParameter parameter, AutomationMode mode);
+    const AutomationLane* getTrackAutomationLane(size_t trackIndex, AutomationParameter parameter) const noexcept;
+    const AutomationLane* getTrackSendAutomationLane(size_t trackIndex, size_t sendSlot) const noexcept;
+    bool upsertTrackSendAutomationPoint(size_t trackIndex, size_t sendSlot, double samplePosition, float value);
+    bool setTrackSendAutomationMode(size_t trackIndex, size_t sendSlot, AutomationMode mode);
     void setTrackMuted(size_t index, bool muted) noexcept;
     void setTrackSolo(size_t index, bool solo) noexcept;
+    void setTrackSoloSafe(size_t index, bool safe) noexcept;
+    bool isTrackSoloSafe(size_t index) const noexcept;
     void setTrackArmed(size_t index, bool armed) noexcept;
     bool isTrackArmed(size_t index) const noexcept;
     void setTrackInputMonitoring(size_t index, bool enabled, int inputChannel = 0) noexcept;
@@ -204,10 +238,14 @@ public:
     int getFirstArmedTrackIndex() const noexcept;
     MidiClipId addMidiClip(TrackId track, double startSample);
     MidiEventId addMidiNote(MidiClipId clip, int pitch, float velocity, double startSample, double durationSamples, int channel);
+    MidiClipId addMidiRecording(TrackId track, double startSample, std::vector<MidiNoteEvent> notes);
+    juce::Result importMidiTracks(const std::vector<ImportedMidiTrack>& tracks, double startSample);
     bool deleteMidiNote(MidiClipId clip, MidiEventId note);
     bool moveMidiNote(MidiClipId clip, MidiEventId note, int pitch, double startSample);
     bool resizeMidiNote(MidiClipId clip, MidiEventId note, double durationSamples);
     bool setMidiNoteVelocity(MidiClipId clip, MidiEventId note, float velocity);
+    bool transposeMidiClip(MidiClipId clip, int semitones);
+    bool quantizeMidiClip(MidiClipId clip, double gridSamples);
     const std::vector<MidiClipState>& getMidiClips() const noexcept;
 
     ClipId addClipToTrack(int trackIndex, const juce::File& file, double startSample,
@@ -228,6 +266,11 @@ public:
     double getCycleEndSample() const noexcept;
     void setCycle(double startSample, double endSample) noexcept;
     void clearCycle() noexcept;
+    bool isPunchActive() const noexcept;
+    double getPunchInSample() const noexcept;
+    double getPunchOutSample() const noexcept;
+    void setPunchRange(double inSample, double outSample) noexcept;
+    void clearPunchRange() noexcept;
     void splitAudioClip(size_t trackIndex, size_t clipIndex, double splitSample);
     void trimAudioClip(size_t trackIndex, size_t clipIndex, double startSample, double durationSamples);
     void deleteAudioClip(size_t trackIndex, size_t clipIndex);
@@ -269,6 +312,9 @@ private:
         bool cycleActive = false;
         double cycleStartSample = 0.0;
         double cycleEndSample = 0.0;
+        bool punchActive = false;
+        double punchInSample = 0.0;
+        double punchOutSample = 0.0;
     };
 
     EditState captureEditState() const;
@@ -286,6 +332,7 @@ private:
     void publishFxRackSnapshot(size_t trackIndex, std::unique_ptr<const FxRackSnapshot> snapshot);
     void publishBusFxRackSnapshot(size_t busIndex, std::unique_ptr<const FxRackSnapshot> snapshot);
     void publishRenderStructureSnapshot();
+    AutomationLane* getMutableTrackAutomationLane(size_t trackIndex, AutomationParameter parameter) noexcept;
     int getFxRackSlot(TrackId trackId) const noexcept;
     bool canChangeTrackStructure() const noexcept;
 
@@ -320,10 +367,13 @@ private:
     std::vector<EditState> redoHistory;
     std::atomic<EditTool> activeTool { EditTool::Pointer };
     std::atomic<float> horizontalZoom { 1.0f };
-    std::atomic<int> trackHeight { 60 };
+    std::atomic<int> trackHeight { 42 };
     std::atomic<bool> cycleActive { false };
     std::atomic<double> cycleStartSample { 0.0 };
     std::atomic<double> cycleEndSample { 0.0 };
+    std::atomic<bool> punchActive { false };
+    std::atomic<double> punchInSample { 0.0 };
+    std::atomic<double> punchOutSample { 0.0 };
     std::atomic<bool> playing { false };
     std::atomic<double> playheadPosition { 0.0 };
 };

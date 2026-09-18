@@ -23,6 +23,8 @@ private:
     juce::TextButton bounceButton { "BOUNCE" };
     juce::ToggleButton automationVisible { "AUTOMATION" };
     juce::Label cpuLabel;
+    juce::Label deviceLabel;
+    juce::Label overloadLabel;
     double cpuLoad = 0.0;
     juce::ProgressBar cpuMeter { cpuLoad };
 };

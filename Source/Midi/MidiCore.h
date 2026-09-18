@@ -2,6 +2,8 @@
 
 #include "../Models/ProjectIdentifiers.h"
 
+#include <juce_core/juce_core.h>
+
 #include <array>
 #include <cstddef>
 #include <vector>
@@ -21,6 +23,12 @@ struct MidiClipState
     MidiClipId id;
     TrackId trackId;
     double startSample = 0.0;
+    std::vector<MidiNoteEvent> notes;
+};
+
+struct ImportedMidiTrack
+{
+    juce::String name;
     std::vector<MidiNoteEvent> notes;
 };
 

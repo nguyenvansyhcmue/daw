@@ -2,6 +2,7 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <array>
 #include <map>
 #include <vector>
 
@@ -14,8 +15,9 @@ public:
     explicit TrackHeaderPanel(TrackDataModel* model = nullptr);
 
     void paint(juce::Graphics& g) override;
-    void resized() override {}
+    void resized() override;
     void mouseDown(const juce::MouseEvent&) override;
+    void mouseDoubleClick(const juce::MouseEvent&) override;
     std::function<void(int)> onTrackSelected;
     void setSelectedTrack(int track) noexcept { selectedTrack = track; repaint(); }
 
@@ -26,6 +28,10 @@ private:
 
     TrackDataModel* trackModel = nullptr;
     int selectedTrack = 0;
+    std::array<juce::Slider, TrackDataModel::maxTracks> volumeControls;
+    std::array<juce::Slider, TrackDataModel::maxTracks> panControls;
+    size_t laidOutTrackCount = 0;
+    int laidOutTrackHeight = -1;
 };
 
 class TimelineGrid final : public juce::Component, private juce::Timer
@@ -38,16 +44,20 @@ public:
     void mouseDoubleClick(const juce::MouseEvent& event) override;
     void mouseDrag(const juce::MouseEvent& event) override;
     void mouseUp(const juce::MouseEvent& event) override;
+    void mouseWheelMove(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel) override;
     bool keyPressed(const juce::KeyPress& key) override;
     std::function<void(int)> onTrackSelected;
     std::function<void(ClipId)> onAudioClipSelected;
     std::function<void(MidiClipId)> onMidiClipSelected;
 
     void setSelectedTrack(int track) noexcept { selectedTrack = track; selectedClip = -1; repaint(); }
+    void setViewStartSample(double sample) noexcept;
+    double getViewStartSample() const noexcept { return viewStartSample; }
     void resized() override {}
 
     void setTrackModel(TrackDataModel* model) noexcept { trackModel = model; }
     void setWaveformCache(const WaveformThumbnailCache* cache) noexcept { waveformCache = cache; }
+    std::function<void(double, float)> onViewChanged;
 
 private:
     void timerCallback() override;
@@ -65,6 +75,17 @@ private:
     bool draggingClip = false;
     bool trimmingLeft = false;
     bool trimmingRight = false;
+    bool adjustingFadeIn = false;
+    bool adjustingFadeOut = false;
+    bool panningTimeline = false;
+    float panDragStartX = 0.0f;
+    double panDragStartSample = 0.0;
+
+    double sampleAt(const juce::Point<float>& position) const noexcept;
+    int trackAt(const juce::Point<float>& position) const noexcept;
+    void showContextMenu(const juce::MouseEvent& event, int track, ClipId clip, double sampleAtMouse);
+    void updateView(double startSample, float zoom);
+    TrackId createTrackAfter(TrackType type, int anchorTrack);
 };
 
 class TimelineRuler final : public juce::Component
@@ -75,10 +96,12 @@ public:
     void mouseDown(const juce::MouseEvent& event) override;
     void mouseDrag(const juce::MouseEvent& event) override;
     void mouseUp(const juce::MouseEvent&) override { dragging = false; }
+    void setViewStartSample(double sample) noexcept { viewStartSample = juce::jmax(0.0, sample); repaint(); }
 private:
     TrackDataModel* trackModel = nullptr;
     bool dragging = false;
     double dragStart = 0.0;
+    double viewStartSample = 0.0;
 };
 
 class ArrangeWindow final : public juce::Component, public juce::FileDragAndDropTarget
@@ -114,6 +137,7 @@ private:
     void completeAudioImport(const juce::File& sourceFile,
                              std::shared_ptr<juce::AudioBuffer<float>> decodedBuffer);
     int resolveAudioImportTrack(int requestedTrackIndex);
+    void setTimelineView(double startSample, float zoom);
 
     WaveformThumbnailCache waveformCache;
     juce::ThreadPool loader { 2 };

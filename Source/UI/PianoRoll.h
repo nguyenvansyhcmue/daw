@@ -6,13 +6,14 @@
 class PianoRoll final : public juce::Component
 {
 public:
-    explicit PianoRoll(TrackDataModel* model = nullptr) : trackModel(model) {}
+    explicit PianoRoll(TrackDataModel* model = nullptr);
     void setActiveClip(MidiClipId clip) noexcept { activeClip = clip; repaint(); }
     void paint(juce::Graphics&) override;
     void mouseDown(const juce::MouseEvent&) override;
     void mouseDrag(const juce::MouseEvent&) override;
     void mouseUp(const juce::MouseEvent&) override { selectedNote = {}; }
     void mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+    bool keyPressed(const juce::KeyPress&) override;
 private:
     MidiClipId ensureActiveClip();
     int pitchForY(float y) const noexcept;

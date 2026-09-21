@@ -68,6 +68,7 @@ target_sources(StudioForgeDAW PRIVATE
     Source/UI/AssetBrowserPane.cpp
     Source/UI/PerformanceFooter.cpp
     Source/UI/StartupWorkflowPane.cpp
+    Source/UI/VocalistRackComponent.cpp
 )
 
 target_include_directories(StudioForgeDAW PRIVATE

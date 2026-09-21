@@ -58,7 +58,7 @@ TrackCreationLayout getTrackCreationLayout(juce::Rectangle<int> dialog)
     };
     setCardControls(layout.midiCard, layout.midiTitle, layout.softwareInstrument, layout.externalMidi);
     setCardControls(layout.audioCard, layout.audioTitle, layout.micOrLine, layout.guitarOrBass);
-    layout.details = content.withTrimmedTop(12).withHeight(116);
+    layout.details = dialog.withTrimmedTop(280).withTrimmedBottom(52).reduced(22, 0);
     layout.footer = dialog.withTrimmedTop(dialog.getHeight() - 44);
     return layout;
 }
@@ -119,6 +119,35 @@ StartupWorkflowPane::StartupWorkflowPane()
     addChildComponent(count);
     addAndMakeVisible(decreaseTrackCount); addAndMakeVisible(trackCountDisplay); addAndMakeVisible(increaseTrackCount);
     addAndMakeVisible(create); addAndMakeVisible(cancel); addAndMakeVisible(progress);
+    for (auto& preset : performancePresets)
+    {
+        addAndMakeVisible(preset);
+        preset.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff202b35));
+        preset.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    }
+    const juce::StringArray setupTypes { "Vocal", "Guitar", "Bass", "Keyboard", "Drums", "Beat" };
+    for (size_t index = 0; index < setupLabels.size(); ++index)
+    {
+        setupLabels[index].setText(setupTypes[static_cast<int>(index)], juce::dontSendNotification);
+        setupLabels[index].setColour(juce::Label::textColourId, juce::Colour(0xff34414c));
+        setupNames[index].setText(setupTypes[static_cast<int>(index)] + " " + juce::String(index == 0 ? 1 : 1));
+        setupNames[index].setColour(juce::TextEditor::backgroundColourId, juce::Colours::white);
+        setupNames[index].setColour(juce::TextEditor::textColourId, juce::Colour(0xff34414c));
+        setupNames[index].setColour(juce::TextEditor::outlineColourId, juce::Colour(0xffd1d9e0));
+        setupCounts[index].setRange(0, 8, 1);
+        setupCounts[index].setValue(index == 0 ? 1 : 0, juce::dontSendNotification);
+        setupCounts[index].setSliderStyle(juce::Slider::IncDecButtons);
+        setupCounts[index].setTextBoxStyle(juce::Slider::TextBoxLeft, false, 28, 22);
+        setupMinus[index].setButtonText("−");
+        setupPlus[index].setButtonText("+");
+        setupMinus[index].onClick = [this, index] { setupCounts[index].setValue(juce::jmax(0.0, setupCounts[index].getValue() - 1.0)); };
+        setupPlus[index].onClick = [this, index] { setupCounts[index].setValue(juce::jmin(8.0, setupCounts[index].getValue() + 1.0)); };
+        addAndMakeVisible(setupLabels[index]);
+        addAndMakeVisible(setupNames[index]);
+        addAndMakeVisible(setupCounts[index]);
+        addAndMakeVisible(setupMinus[index]);
+        addAndMakeVisible(setupPlus[index]);
+    }
     title.setJustificationType(juce::Justification::centred);
     title.setFont(juce::Font(juce::FontOptions(14.0f, juce::Font::bold)));
     title.setColour(juce::Label::textColourId, juce::Colours::white);
@@ -146,7 +175,12 @@ StartupWorkflowPane::StartupWorkflowPane()
         cardButton->setColour(juce::TextButton::textColourOffId, juce::Colours::transparentBlack);
         cardButton->onStateChange = [this] { repaint(); };
     }
-    emptyProject.onClick = [this] { selectedProjectTemplate = ProjectTemplate::empty; repaint(); };
+    emptyProject.onClick = [this]
+    {
+        selectedProjectTemplate = ProjectTemplate::empty;
+        if (onTemplateSelected != nullptr)
+            onTemplateSelected(selectedProjectTemplate);
+    };
     audioRecordingProject.onClick = [this] { selectedProjectTemplate = ProjectTemplate::audioRecording; repaint(); };
     midiProductionProject.onClick = [this] { selectedProjectTemplate = ProjectTemplate::midiProduction; repaint(); };
     chooseProject.onClick = [this]
@@ -176,6 +210,16 @@ StartupWorkflowPane::StartupWorkflowPane()
     decreaseTrackCount.onClick = [this] { count.setValue(juce::jmax(1.0, count.getValue() - 1.0)); };
     increaseTrackCount.onClick = [this] { count.setValue(juce::jmin(static_cast<double>(juce::jmax(1, availableTrackSlots)), count.getValue() + 1.0)); };
     updateTrackCountDisplay();
+    for (size_t index = 0; index < performancePresets.size(); ++index)
+        performancePresets[index].onClick = [this, index]
+        {
+            selectedPerformancePreset = static_cast<int>(index);
+            selectedType = TrackType::audio;
+            guitarInputSelected = false;
+            count.setValue(index == 1 ? 2.0 : 1.0);
+            setType(selectedType);
+            repaint();
+        };
     create.onClick = [this]
     {
         if (onCreateTracks != nullptr && onCreateTracks(selectedType, juce::roundToInt(count.getValue())) > 0)
@@ -228,7 +272,7 @@ void StartupWorkflowPane::showTrackCreation(bool returnToWorkspace)
 {
     returnToWorkspaceOnCancel = returnToWorkspace;
     step = Step::createTrack;
-    title.setText("Create New Track", juce::dontSendNotification);
+    title.setText("Performance Room", juce::dontSendNotification);
     title.setColour(juce::Label::textColourId, juce::Colour(0xff2d343b));
     resized();
     repaint();
@@ -328,14 +372,39 @@ void StartupWorkflowPane::paint(juce::Graphics& g)
     if (step == Step::createTrack)
     {
         const auto layout = getTrackCreationLayout(getDialogBounds());
-        const auto midiActive = selectedType == TrackType::instrument || selectedType == TrackType::externalMidi;
-        const auto midiHovered = midi.isMouseOver(true);
-        const auto audioHovered = audio.isMouseOver(true);
-        drawTrackTypeCard(g, layout.midiCard.toFloat(), "MIDI", juce::Colour(0xff32a56a), midiActive || midiHovered, false);
-        drawTrackTypeCard(g, layout.audioCard.toFloat(), "Audio", juce::Colour(0xff3f82d3),
-                          selectedType == TrackType::audio || audioHovered, true);
+        // Track family cards are intentionally hidden from the primary setup
+        // flow; presets describe the performance in user language.
 
         const auto details = layout.details.toFloat();
+        const auto setup = juce::Rectangle<float>(dialog.getX() + 22.0f, dialog.getY() + 104.0f, 430.0f, 138.0f);
+        const auto preview = juce::Rectangle<float>(setup.getRight() + 12.0f, setup.getY(),
+                                                    dialog.getRight() - setup.getRight() - 22.0f, setup.getHeight());
+        g.setColour(juce::Colour(0xfff1f4f7));
+        g.fillRoundedRectangle(setup, 6.0f);
+        g.setColour(juce::Colour(0xffe8f0f8));
+        g.fillRoundedRectangle(preview, 6.0f);
+        g.setColour(juce::Colour(0xff68737c));
+        g.setFont(10.0f);
+        g.drawText("SETUP", setup.getX() + 12.0f, setup.getY() + 8.0f, 100.0f, 16.0f, juce::Justification::left, false);
+        g.drawText("LIVE STAGE", preview.getX() + 12.0f, preview.getY() + 8.0f, 120.0f, 16.0f, juce::Justification::left, false);
+        const juce::StringArray components = selectedPerformancePreset == 0
+            ? juce::StringArray { "Vocal 1", "Beat" }
+            : selectedPerformancePreset == 1
+                ? juce::StringArray { "Vocal 1", "Vocal 2", "Beat" }
+                : selectedPerformancePreset == 2
+                    ? juce::StringArray { "Vocal 1", "Guitar 1", "Bass 1", "Keys 1", "Drums 1" }
+                    : juce::StringArray { "Vocal 1" };
+        g.setColour(juce::Colour(0xff29333c));
+        g.setFont(11.0f);
+        for (int index = 0; index < components.size(); ++index)
+        {
+            const auto y = setup.getY() + 30.0f + static_cast<float>(index % 4) * 22.0f;
+            const auto& item = components[index];
+            g.drawText(item, setup.getX() + 14.0f + static_cast<float>(index / 4) * 150.0f,
+                       y, 130.0f, 18.0f, juce::Justification::left, false);
+            g.drawText(item, preview.getX() + 14.0f, y, preview.getWidth() - 24.0f, 18.0f,
+                       juce::Justification::left, false);
+        }
         g.setColour(juce::Colour(0xffe6e9ed));
         g.fillRoundedRectangle(details, 5.0f);
         g.setColour(juce::Colour(0xff6c7680));
@@ -411,23 +480,14 @@ void StartupWorkflowPane::paint(juce::Graphics& g)
 
     const auto content = juce::Rectangle<float>(sidebar.getRight(), dialog.getY() + 36.0f,
                                                 dialog.getRight() - sidebar.getRight(), dialog.getHeight() - 92.0f);
-    const std::array<ProjectTemplate, 3> templates { ProjectTemplate::empty, ProjectTemplate::audioRecording, ProjectTemplate::midiProduction };
-    for (size_t index = 0; index < templates.size(); ++index)
-    {
-        const auto tile = juce::Rectangle<float>(content.getX() + 26.0f + static_cast<float>(index) * 142.0f,
-                                                 content.getY() + 28.0f, 124.0f, 100.0f);
-        const auto selected = templates[index] == selectedProjectTemplate;
-        if (selected)
-        {
-            g.setColour(selectedBlue);
-            g.drawRoundedRectangle(tile.expanded(3.0f), 8.0f, 2.0f);
-        }
-        drawProjectGlyph(g, tile, templates[index] == ProjectTemplate::midiProduction);
-        g.setColour(selected ? selectedBlue : juce::Colour(0xff4f5962));
-        g.setFont(12.0f);
-        g.drawText(ProjectTemplates::getName(templates[index]), tile.translated(-10.0f, 114.0f).withWidth(144.0f),
-                   juce::Justification::centred, false);
-    }
+    const auto newProjectTile = juce::Rectangle<float>(content.getX() + 46.0f, content.getY() + 28.0f, 180.0f, 120.0f);
+    g.setColour(selectedBlue);
+    g.drawRoundedRectangle(newProjectTile.expanded(3.0f), 8.0f, 2.0f);
+    drawProjectGlyph(g, newProjectTile, false);
+    g.setColour(selectedBlue);
+    g.setFont(12.0f);
+    g.drawText("New Project", newProjectTile.translated(-10.0f, 132.0f).withWidth(200.0f),
+               juce::Justification::centred, false);
 
     const auto detailsY = dialog.getBottom() - footerHeight;
     g.setColour(juce::Colour(0xffdfe5eb));
@@ -435,8 +495,8 @@ void StartupWorkflowPane::paint(juce::Graphics& g)
     g.setColour(juce::Colour(0xff68737c));
     g.setFont(11.0f);
     g.drawText("›  Details", dialog.getX() + 12.0f, detailsY + 7.0f, 180.0f, 18.0f, juce::Justification::centredLeft, false);
-    g.drawText(ProjectTemplates::getDescription(selectedProjectTemplate), dialog.getCentreX() - 140.0f, detailsY + 7.0f,
-               300.0f, 18.0f, juce::Justification::centred, false);
+    g.drawText("Start a clean session, then add vocal, audio or MIDI lines as needed", dialog.getCentreX() - 190.0f,
+               detailsY + 7.0f, 400.0f, 18.0f, juce::Justification::centred, false);
     g.setColour(juce::Colour(0xffdfe5eb));
     g.fillRect(dialog.getX() + 1.0f, detailsY + 1.0f, 172.0f, 30.0f);
     g.setColour(juce::Colour(0xff68737c));
@@ -448,14 +508,24 @@ void StartupWorkflowPane::resized()
     auto card = getDialogBounds();
     title.setBounds(card.removeFromTop(36));
     const auto splash=step==Step::splash, chooser=step==Step::chooseProject, creating=!chooser && !splash;
-    emptyProject.setVisible(chooser); audioRecordingProject.setVisible(chooser); midiProductionProject.setVisible(chooser);
-    openProject.setVisible(chooser); chooseProject.setVisible(chooser);
-    midi.setVisible(creating); audio.setVisible(creating);
-    softwareInstrument.setVisible(creating); externalMidi.setVisible(creating);
-    micOrLine.setVisible(creating); guitarOrBass.setVisible(creating);
+    emptyProject.setVisible(chooser); audioRecordingProject.setVisible(false); midiProductionProject.setVisible(false);
+    openProject.setVisible(chooser); chooseProject.setVisible(false);
+    midi.setVisible(false); audio.setVisible(false);
+    softwareInstrument.setVisible(false); externalMidi.setVisible(false);
+    micOrLine.setVisible(false); guitarOrBass.setVisible(false);
     count.setVisible(false);
     decreaseTrackCount.setVisible(creating); trackCountDisplay.setVisible(creating); increaseTrackCount.setVisible(creating);
     create.setVisible(creating); cancel.setVisible(creating); progress.setVisible(splash);
+    for (auto& preset : performancePresets)
+        preset.setVisible(creating);
+    for (size_t index = 0; index < setupLabels.size(); ++index)
+    {
+        setupLabels[index].setVisible(creating);
+        setupNames[index].setVisible(creating);
+        setupCounts[index].setVisible(creating);
+        setupMinus[index].setVisible(creating);
+        setupPlus[index].setVisible(creating);
+    }
     for (size_t index = 0; index < recentProjectButtons.size(); ++index)
         recentProjectButtons[index].setVisible(chooser && index < static_cast<size_t>(recentProjects.size()));
     progress.setBounds(card.reduced(24));
@@ -463,9 +533,7 @@ void StartupWorkflowPane::resized()
     {
         const auto contentX = card.getX() + 168;
         const auto footerTop = card.getBottom() - 52;
-        emptyProject.setBounds(contentX + 20, card.getY() + 28, 130, 108);
-        audioRecordingProject.setBounds(contentX + 162, card.getY() + 28, 130, 108);
-        midiProductionProject.setBounds(contentX + 304, card.getY() + 28, 130, 108);
+        emptyProject.setBounds(contentX + 46, card.getY() + 28, 180, 120);
         openProject.setBounds(contentX + 12, footerTop + 25, 184, 24);
         chooseProject.setBounds(card.getRight() - 94, footerTop + 23, 82, 26);
         for (size_t index = 0; index < recentProjectButtons.size(); ++index)
@@ -475,6 +543,24 @@ void StartupWorkflowPane::resized()
     else
     {
         const auto layout = getTrackCreationLayout(getDialogBounds());
+        const auto presetArea = getDialogBounds().withTrimmedTop(42).reduced(28, 8).removeFromTop(42);
+        auto presetBounds = presetArea;
+        for (auto& preset : performancePresets)
+            preset.setBounds(presetBounds.removeFromLeft(presetArea.getWidth() / 5).reduced(3, 0));
+        const auto setupArea = juce::Rectangle<int>(getDialogBounds().getX() + 34, getDialogBounds().getY() + 130,
+                                                    406, 96);
+        for (size_t index = 0; index < setupLabels.size(); ++index)
+        {
+            const auto column = static_cast<int>(index / 3);
+            const auto rowIndex = static_cast<int>(index % 3);
+            const auto x = setupArea.getX() + column * 203;
+            const auto y = setupArea.getY() + rowIndex * 32;
+            setupLabels[index].setBounds(x, y, 54, 24);
+            setupNames[index].setBounds(x + 54, y, 76, 24);
+            setupMinus[index].setBounds(x + 133, y, 20, 24);
+            setupCounts[index].setBounds(x + 155, y, 28, 24);
+            setupPlus[index].setBounds(x + 185, y, 20, 24);
+        }
         // The family selectors deliberately cover each complete card.  The
         // option buttons were added after them and remain on top, so a click
         // on an option chooses that detail while any other card click selects

@@ -21,6 +21,10 @@ void operator delete(void* allocation) noexcept { std::free(allocation); }
 #include "AudioEngine/GainUtilityProcessor.h"
 #include "AudioEngine/TrackMixing.h"
 #include "AudioEngine/TransportUtils.h"
+#include "AudioEngine/GlobalScaleContext.h"
+#include "AudioEngine/VocalistProcessor.h"
+#include "AudioEngine/VocalistRack.h"
+#include "AudioEngine/AuxRouting.h"
 #include "Media/WaveformThumbnailCache.h"
 #include "Models/TrackDataModel.h"
 #include "Media/MediaReloadService.h"
@@ -40,6 +44,72 @@ void operator delete(void* allocation) noexcept { std::free(allocation); }
 namespace
 {
 bool expect(bool condition, const char* message);
+
+bool testGlobalScaleContext()
+{
+    GlobalScaleContext context;
+    const auto initial = context.read();
+    if (! expect(initial.rootNote == 0 && initial.scale == MusicalScale::chromatic,
+                 "scale context starts chromatic")) return false;
+
+    context.publish(9, MusicalScale::minor);
+    const auto updated = context.read();
+    return expect(updated.rootNote == 9 && updated.scale == MusicalScale::minor
+                  && updated.revision == initial.revision + 1,
+                  "scale context publishes a new immutable revision");
+}
+
+bool testVocalistProcessor()
+{
+    GlobalScaleContext scale;
+    scale.publish(7, MusicalScale::major);
+    VocalistProcessor vocalist;
+    vocalist.prepare(48000.0, 8, 2);
+    vocalist.setGain(0.5f);
+
+    juce::AudioBuffer<float> buffer(2, 8);
+    buffer.clear();
+    for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
+        for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+            buffer.setSample(channel, sample, 1.0f);
+    vocalist.process(buffer, scale);
+
+    const auto audioOk = buffer.getSample(0, 7) > 0.0f && buffer.getSample(0, 7) < 1.0f;
+    const auto scaleOk = vocalist.getLastScaleRevision() == scale.read().revision;
+    return expect(audioOk, "vocalist processor applies realtime gain")
+        && expect(scaleOk, "vocalist processor observes scale revision");
+}
+
+bool testVocalistRackSnapshots()
+{
+    VocalistRack rack;
+    uint32_t hostId = 0, guestId = 0;
+    if (! expect(rack.addVocalist(0, hostId) && rack.addVocalist(1, guestId), "vocalist rack adds inputs")) return false;
+    {
+        const auto read = rack.acquire();
+        if (! expect(read->count == 2 && read->vocalists[0].id == hostId,
+                     "vocalist rack publishes immutable snapshot")) return false;
+        rack.setGain(hostId, 0.75f);
+        if (! expect(read->vocalists[0].gain == 1.0f,
+                     "active vocalist reader keeps its snapshot")) return false;
+    }
+    rack.reclaim();
+    return expect(rack.removeVocalist(guestId) && rack.acquire()->count == 1,
+                  "vocalist rack removes a vocalist on the control thread");
+}
+
+bool testAuxRoutingSnapshots()
+{
+    AuxRouting routing;
+    uint32_t reverb = 0;
+    if (! expect(routing.addAux(reverb), "aux routing creates a shared return")) return false;
+    if (! expect(routing.setSend(0, 0, reverb, 0.6f, false),
+                 "aux routing connects a vocalist send")) return false;
+    const auto read = routing.acquire();
+    return expect(read->auxCount == 1 && read->sends[0][0].auxId == reverb
+                  && read->sends[0][0].level == 0.6f,
+                  "aux routing publishes immutable send snapshot");
+}
 
 bool testProjectTemplates()
 {
@@ -1465,6 +1535,7 @@ bool testMidiReachesTrackProcessor()
     engine.setFxProcessor(0, 0, probe);
     OfflineAudioDevice device;
     engine.audioDeviceAboutToStart(&device);
+    engine.setPlaybackState(true);
     model.setPlaying(true);
     float left[4] {}, right[4] {};
     float* outputs[] { left, right };
@@ -1739,7 +1810,10 @@ bool testRealtimeHostBenchmark()
     model.setPlaying(true);
     std::array<float, blockSize> left {}, right {};
     float* outputs[] { left.data(), right.data() };
-    engine.audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, blockSize, {});
+    // Prime the realtime path before measuring steady-state processing. This
+    // keeps one-time SIMD/runtime initialisation out of the callback budget.
+    for (int warmup = 0; warmup < 4; ++warmup)
+        engine.audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, blockSize, {});
     studioForgeAllocationCount.store(0, std::memory_order_relaxed);
     const auto started = std::chrono::steady_clock::now();
     for (int iteration = 0; iteration < iterations; ++iteration)
@@ -1760,10 +1834,30 @@ bool testRealtimeHostBenchmark()
 #endif
 }
 
+bool testVocalistAndAuxPluginSnapshots()
+{
+    TrackDataModel model;
+    AudioEngine engine(&model);
+    uint32_t vocalistId = 0;
+    if (! expect(engine.addVocalist(0, vocalistId), "vocalist plugin test creates vocalist")) return false;
+    if (! expect(engine.setVocalistFxProcessor(0, 0, std::make_shared<GainUtilityProcessor>()),
+                 "vocalist plugin snapshot accepts processor")) return false;
+    if (! expect(engine.setAuxFxProcessor(0, 0, std::make_shared<GainUtilityProcessor>()),
+                 "aux plugin snapshot accepts processor")) return false;
+    if (! expect(engine.setVocalistSend(0, 0.5f), "vocalist send reaches shared aux")) return false;
+
+    return expect(engine.getVocalistFxProcessor(0, 0) != nullptr,
+                  "vocalist plugin snapshot remains published after aux configuration");
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInitialiser;
     const auto passed = testTrackMixing()
+        && testGlobalScaleContext()
+        && testVocalistProcessor()
+        && testVocalistRackSnapshots()
+        && testAuxRoutingSnapshots()
         && testProjectTemplates()
         && testProjectTemplateStore()
         && testProjectAlternativeStore()
@@ -1814,6 +1908,7 @@ int main()
         && testMidiFxChain()
         && testMidiFxPersistence()
         && testPluginHostFoundation()
+        && testVocalistAndAuxPluginSnapshots()
         && testVst3EffectIntegration()
         && testOfflineAudioEnginePath();
 #ifdef STUDIOFORGE_PERF_BENCHMARK

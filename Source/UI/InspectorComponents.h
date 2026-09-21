@@ -53,9 +53,6 @@ private:
     juce::Label trackName;
     juce::Label inputDetails;
     juce::Label outputDetails;
-    juce::TextButton automationMode { "Automation: Read" };
-    juce::TextButton writeVolumeAutomation { "+ Vol" };
-    juce::TextButton writePanAutomation { "+ Pan" };
     juce::ToggleButton recordEnable { "R" }, inputMonitoring { "I" }, mute { "M" }, solo { "S" }, soloSafe { "SAFE" };
 };
 

@@ -21,12 +21,15 @@ private:
     void selectedRowsChanged(int) override;
     void updateResults();
     void closeWindow();
+    void choosePluginToScan();
 
     PluginHostService& pluginHost;
     SelectionCallback onPluginSelected;
     juce::TextEditor searchBox;
     juce::ListBox results { "Plugins", this };
     juce::TextButton insertButton { "Insert" };
+    juce::TextButton scanButton { "Scan VST3..." };
     juce::TextButton cancelButton { "Cancel" };
+    std::unique_ptr<juce::FileChooser> fileChooser;
     juce::Array<juce::PluginDescription> plugins;
 };

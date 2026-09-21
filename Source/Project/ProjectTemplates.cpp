@@ -18,6 +18,18 @@ ProjectState makeBaseProject()
     state.tempoMap.push_back({ 0.0, state.bpm });
     return state;
 }
+
+void addNumberedTracks(ProjectState& state, TrackType type, const juce::String& name,
+                       const juce::StringArray& customNames, int count,
+                       uint64_t& nextId, int& nextInput)
+{
+    for (int index = 1; index <= juce::jmax(0, count); ++index)
+    {
+        const auto customName = index <= customNames.size() ? customNames[index - 1].trim() : juce::String {};
+        const auto trackName = customName.isNotEmpty() ? customName : name + " " + juce::String(index);
+        state.tracks.push_back(makeTrack(nextId++, type, trackName, nextInput++));
+    }
+}
 }
 
 ProjectState ProjectTemplates::create(ProjectTemplate projectTemplate)
@@ -42,6 +54,36 @@ ProjectState ProjectTemplates::create(ProjectTemplate projectTemplate)
             state.tracks.push_back(makeTrack(3, TrackType::externalMidi, "External MIDI"));
             break;
     }
+
+    return state;
+}
+
+ProjectState ProjectTemplates::createLiveSetup(const LiveSetupConfig& setup)
+{
+    auto state = makeBaseProject();
+    auto nextId = uint64_t { 1 };
+    auto nextInput = 0;
+    const auto includesAudio = setup.sessionMode == LiveSessionMode::audio
+                            || setup.sessionMode == LiveSessionMode::audioAndMidi;
+    const auto includesMidi = setup.sessionMode == LiveSessionMode::midi
+                           || setup.sessionMode == LiveSessionMode::audioAndMidi;
+
+    if (includesAudio)
+        addNumberedTracks(state, TrackType::audio, "Vocal", setup.vocalNames, setup.vocalCount, nextId, nextInput);
+
+    if (includesMidi)
+    {
+        addNumberedTracks(state, TrackType::instrument, "Guitar", setup.guitarNames, setup.guitarCount, nextId, nextInput);
+        addNumberedTracks(state, TrackType::instrument, "Bass", setup.bassNames, setup.bassCount, nextId, nextInput);
+        addNumberedTracks(state, TrackType::instrument, "Keys", setup.keyboardNames, setup.keyboardCount, nextId, nextInput);
+        addNumberedTracks(state, TrackType::instrument, "Drums", setup.drumNames, setup.drumCount, nextId, nextInput);
+    }
+
+    if (setup.backingTrackCount > 0
+        && (setup.midiMode == MidiSessionMode::backingTrack
+            || setup.midiMode == MidiSessionMode::instrumentsAndBackingTrack))
+        addNumberedTracks(state, TrackType::audio, "Backing Track", setup.backingTrackNames,
+                          setup.backingTrackCount, nextId, nextInput);
 
     return state;
 }

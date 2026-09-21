@@ -23,19 +23,6 @@ void configureSectionLabel(juce::Label& label)
     label.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
 }
 
-juce::String automationModeName(AutomationMode mode)
-{
-    switch (mode)
-    {
-        case AutomationMode::read:  return "Read";
-        case AutomationMode::touch: return "Touch";
-        case AutomationMode::latch: return "Latch";
-        case AutomationMode::write: return "Write";
-    }
-
-    return "Read";
-}
-
 class PluginEditorHost final : public juce::Component
 {
 public:
@@ -145,44 +132,6 @@ TrackInspectorComponent::TrackInspectorComponent(TrackDataModel& model) : trackM
     mute.onClick = [this] { if (selectedTrack >= 0) trackModel.setTrackMuted(static_cast<size_t>(selectedTrack), mute.getToggleState()); };
     solo.onClick = [this] { if (selectedTrack >= 0) trackModel.setTrackSolo(static_cast<size_t>(selectedTrack), solo.getToggleState()); };
     soloSafe.onClick = [this] { if (selectedTrack >= 0) trackModel.setTrackSoloSafe(static_cast<size_t>(selectedTrack), soloSafe.getToggleState()); };
-    automationMode.setTooltip("Set the volume and pan automation mode for this track");
-    automationMode.onClick = [this]
-    {
-        if (selectedTrack < 0)
-            return;
-
-        juce::PopupMenu menu;
-        constexpr std::array<AutomationMode, 4> modes { AutomationMode::read, AutomationMode::touch, AutomationMode::latch, AutomationMode::write };
-        const auto* lane = trackModel.getTrackAutomationLane(static_cast<size_t>(selectedTrack), AutomationParameter::trackVolume);
-        for (size_t index = 0; index < modes.size(); ++index)
-            menu.addItem(static_cast<int>(index + 1), automationModeName(modes[index]), true,
-                         lane != nullptr && lane->getMode() == modes[index]);
-        menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&automationMode), [this, modes] (int choice)
-        {
-            if (choice < 1 || choice > static_cast<int>(modes.size()) || selectedTrack < 0)
-                return;
-            const auto mode = modes[static_cast<size_t>(choice - 1)];
-            trackModel.setTrackAutomationMode(static_cast<size_t>(selectedTrack), AutomationParameter::trackVolume, mode);
-            trackModel.setTrackAutomationMode(static_cast<size_t>(selectedTrack), AutomationParameter::trackPan, mode);
-            refresh();
-        });
-    };
-    writeVolumeAutomation.setTooltip("Write the current volume at the playhead");
-    writePanAutomation.setTooltip("Write the current pan at the playhead");
-    writeVolumeAutomation.onClick = [this]
-    {
-        if (selectedTrack < 0 || selectedTrack >= static_cast<int>(trackModel.getTrackCount())) return;
-        const auto& track = trackModel.getTrack(static_cast<size_t>(selectedTrack));
-        trackModel.upsertTrackAutomationPoint(static_cast<size_t>(selectedTrack), AutomationParameter::trackVolume,
-                                              trackModel.getPlayheadPosition(), track.volume.load(std::memory_order_relaxed));
-    };
-    writePanAutomation.onClick = [this]
-    {
-        if (selectedTrack < 0 || selectedTrack >= static_cast<int>(trackModel.getTrackCount())) return;
-        const auto& track = trackModel.getTrack(static_cast<size_t>(selectedTrack));
-        trackModel.upsertTrackAutomationPoint(static_cast<size_t>(selectedTrack), AutomationParameter::trackPan,
-                                              trackModel.getPlayheadPosition(), track.pan.load(std::memory_order_relaxed));
-    };
     for (auto* label : { &inputDetails, &outputDetails })
     {
         label->setColour(juce::Label::textColourId, StudioForgeTheme::secondaryText);
@@ -192,9 +141,6 @@ TrackInspectorComponent::TrackInspectorComponent(TrackDataModel& model) : trackM
     }
     addAndMakeVisible(heading);
     addAndMakeVisible(trackName);
-    addAndMakeVisible(automationMode);
-    addAndMakeVisible(writeVolumeAutomation);
-    addAndMakeVisible(writePanAutomation);
     startTimerHz(30);
 }
 
@@ -209,8 +155,6 @@ void TrackInspectorComponent::refresh()
     const auto state = InspectorViewStateBuilder::makeTrack(trackModel, selectedTrack);
     trackName.setEnabled(state.isSelected);
     for (auto* button : { &recordEnable, &inputMonitoring, &mute, &solo, &soloSafe }) button->setEnabled(state.isSelected);
-    writeVolumeAutomation.setEnabled(state.isSelected);
-    writePanAutomation.setEnabled(state.isSelected);
     if (! state.isSelected)
     {
         applyViewState(state);
@@ -225,8 +169,6 @@ void TrackInspectorComponent::refresh()
     solo.setToggleState(track.solo.load(), juce::dontSendNotification);
     soloSafe.setToggleState(track.soloSafe.load(), juce::dontSendNotification);
     applyViewState(state);
-    if (const auto* lane = trackModel.getTrackAutomationLane(static_cast<size_t>(selectedTrack), AutomationParameter::trackVolume))
-        automationMode.setButtonText("Automation: " + automationModeName(lane->getMode()));
 }
 
 void TrackInspectorComponent::applyViewState(const InspectorTrackViewState& state)
@@ -260,10 +202,6 @@ void TrackInspectorComponent::resized()
     trackName.setBounds(row.reduced(1, 0));
     for (auto* button : { &recordEnable, &inputMonitoring, &mute, &solo, &soloSafe }) button->setBounds(buttons.removeFromLeft(controlHeight).reduced(1));
     inputDetails.setBounds(bounds.removeFromTop(16));
-    auto automationRow = bounds.removeFromTop(controlHeight);
-    writePanAutomation.setBounds(automationRow.removeFromRight(34).reduced(1, 0));
-    writeVolumeAutomation.setBounds(automationRow.removeFromRight(34).reduced(1, 0));
-    automationMode.setBounds(automationRow.reduced(1, 0));
     outputDetails.setBounds(bounds.removeFromTop(16));
 }
 
@@ -527,17 +465,6 @@ void ChannelStripComponent::showSendMenu()
                                   juce::String(juce::roundToInt(levels[level] * 100.0f)) + "%",
                                   true, std::abs(track.sends[slot].level - levels[level]) < 0.005f);
             slotMenu.addSubMenu("Level", levelMenu);
-            juce::PopupMenu automationMenu;
-            constexpr std::array<AutomationMode, 4> automationModes {
-                AutomationMode::read, AutomationMode::touch, AutomationMode::latch, AutomationMode::write
-            };
-            const auto* automation = trackModel.getTrackSendAutomationLane(static_cast<size_t>(selectedTrack), slot);
-            for (size_t mode = 0; mode < automationModes.size(); ++mode)
-                automationMenu.addItem(static_cast<int>(5000 + slot * 10 + mode), automationModeName(automationModes[mode]),
-                                      true, automation != nullptr && automation->getMode() == automationModes[mode]);
-            automationMenu.addSeparator();
-            automationMenu.addItem(static_cast<int>(5100 + slot), "Write current level at playhead");
-            slotMenu.addSubMenu("Automation", automationMenu);
             slotMenu.addItem(static_cast<int>(3000 + slot), track.sends[slot].preFader ? "Switch to Post-Pan" : "Switch to Pre-Fader");
             slotMenu.addSeparator();
             slotMenu.addItem(static_cast<int>(4000 + slot), "Remove Send");
@@ -620,31 +547,6 @@ void ChannelStripComponent::showSendMenu()
         }
         else if (choice >= 4000 && choice < 5000)
             model.clearTrackSendRoute(trackId, static_cast<size_t>(choice - 4000));
-        else if (choice >= 5000 && choice < 5080)
-        {
-            constexpr std::array<AutomationMode, 4> automationModes {
-                AutomationMode::read, AutomationMode::touch, AutomationMode::latch, AutomationMode::write
-            };
-            const auto encoded = choice - 5000;
-            const auto slot = static_cast<size_t>(encoded / 10);
-            const auto mode = static_cast<size_t>(encoded % 10);
-            const auto trackIndex = model.getTrackIndex(trackId);
-            if (trackIndex >= 0 && slot < TrackDataModel::maxSendsPerTrack && mode < automationModes.size())
-                model.setTrackSendAutomationMode(static_cast<size_t>(trackIndex), slot, automationModes[mode]);
-        }
-        else if (choice >= 5100 && choice < 5100 + static_cast<int>(TrackDataModel::maxSendsPerTrack))
-        {
-            const auto slot = static_cast<size_t>(choice - 5100);
-            const auto trackIndex = model.getTrackIndex(trackId);
-            if (trackIndex >= 0)
-            {
-                const auto& track = model.getTrack(static_cast<size_t>(trackIndex));
-                if (slot < TrackDataModel::maxSendsPerTrack && track.sends[slot].targetBus.isValid())
-                    model.upsertTrackSendAutomationPoint(static_cast<size_t>(trackIndex), slot,
-                                                         model.getPlayheadPosition(), track.sends[slot].level);
-            }
-        }
-
         safeOwner->refreshRouting();
         safeOwner->refreshSendSummary();
     });

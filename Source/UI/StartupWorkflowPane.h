@@ -35,10 +35,13 @@ private:
     int audioOutputChannels = 0;
     int splashFramesRemaining = 27;
     float currentAlpha = 0.0f;
-    TrackType selectedType = TrackType::instrument;
+    // Most users start with a vocal microphone line; MIDI remains available
+    // as an explicit option for live-band projects.
+    TrackType selectedType = TrackType::audio;
     ProjectTemplate selectedProjectTemplate = ProjectTemplate::empty;
+    int selectedPerformancePreset = 0;
     juce::Label title;
-    juce::TextButton emptyProject { "Empty Project" }, audioRecordingProject { "Audio Recording" }, midiProductionProject { "MIDI Production" }, openProject { "Open an existing project..." };
+    juce::TextButton emptyProject { "New Project" }, audioRecordingProject { "Audio Recording" }, midiProductionProject { "MIDI Production" }, openProject { "Open an existing project..." };
     juce::TextButton chooseProject { "Choose" };
     std::array<juce::TextButton, 5> recentProjectButtons;
     juce::StringArray recentProjects;
@@ -52,5 +55,14 @@ private:
     juce::Slider count;
     juce::TextButton decreaseTrackCount { "-" }, trackCountDisplay { "1" }, increaseTrackCount { "+" };
     juce::TextButton create { "Create" }, cancel { "Cancel" };
+    std::array<juce::TextButton, 4> performancePresets {
+        juce::TextButton { "Solo Vocal" }, juce::TextButton { "Duet" },
+        juce::TextButton { "Vocal + Band" }, juce::TextButton { "Custom" }
+    };
+    std::array<juce::Label, 6> setupLabels;
+    std::array<juce::TextEditor, 6> setupNames;
+    std::array<juce::Slider, 6> setupCounts;
+    std::array<juce::TextButton, 6> setupMinus;
+    std::array<juce::TextButton, 6> setupPlus;
     juce::Label progress { {}, "Initializing audio device and project services…" };
 };

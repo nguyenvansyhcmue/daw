@@ -98,7 +98,7 @@ private:
 PluginHostService::PluginHostService(juce::File catalogFile) : catalog(std::move(catalogFile))
 {
     formatManager.addDefaultFormats();
-    loadCatalog();
+    loadCatalogFromDisk();
 }
 
 juce::File PluginHostService::defaultCatalogFile()
@@ -114,19 +114,14 @@ juce::Result PluginHostService::scanVst3(const juce::File& bundleOrModule)
     if (! bundleOrModule.exists())
         return juce::Result::fail("VST3 file or bundle does not exist");
 
-    for (auto* format : formatManager.getFormats())
-        if (format != nullptr && format->getName().equalsIgnoreCase("VST3"))
-        {
-            juce::OwnedArray<juce::PluginDescription> found;
-            if (knownPlugins.scanAndAddFile(bundleOrModule.getFullPathName(), true, found, *format))
-            {
-                saveCatalog();
-                return juce::Result::ok();
-            }
-            return juce::Result::fail("No VST3 plugin type was found");
-        }
-
-    return juce::Result::fail("VST3 hosting is not enabled in this build");
+    auto* vst3Format = findVst3Format();
+    if (vst3Format == nullptr)
+        return juce::Result::fail("VST3 hosting is not enabled in this build");
+    juce::OwnedArray<juce::PluginDescription> found;
+    if (! knownPlugins.scanAndAddFile(bundleOrModule.getFullPathName(), true, found, *vst3Format))
+        return juce::Result::fail("No VST3 plugin type was found");
+    saveCatalogToDisk();
+    return juce::Result::ok();
 }
 
 void PluginHostService::scanVst3Async(juce::File bundleOrModule, std::function<void(juce::Result)> completion)
@@ -136,15 +131,13 @@ void PluginHostService::scanVst3Async(juce::File bundleOrModule, std::function<v
 
 juce::Array<juce::PluginDescription> PluginHostService::getKnownPlugins() const
 {
-    const juce::ScopedLock lock(catalogLock);
-    return knownPlugins.getTypes();
+    return copyKnownPlugins();
 }
 
 juce::Array<juce::PluginDescription> PluginHostService::findKnownPlugins(const juce::String& query) const
 {
-    const juce::ScopedLock lock(catalogLock);
     const auto normalisedQuery = query.trim().toLowerCase();
-    const auto allPlugins = knownPlugins.getTypes();
+    const auto allPlugins = copyKnownPlugins();
     if (normalisedQuery.isEmpty())
         return allPlugins;
 
@@ -157,7 +150,7 @@ juce::Array<juce::PluginDescription> PluginHostService::findKnownPlugins(const j
     return matches;
 }
 
-void PluginHostService::loadCatalog()
+void PluginHostService::loadCatalogFromDisk()
 {
     if (! catalog.existsAsFile())
         return;
@@ -166,12 +159,26 @@ void PluginHostService::loadCatalog()
         knownPlugins.recreateFromXml(*document);
 }
 
-void PluginHostService::saveCatalog() const
+void PluginHostService::saveCatalogToDisk() const
 {
     if (! catalog.getParentDirectory().exists())
         catalog.getParentDirectory().createDirectory();
     if (const auto document = knownPlugins.createXml(); document != nullptr)
         document->writeTo(catalog);
+}
+
+juce::AudioPluginFormat* PluginHostService::findVst3Format() const noexcept
+{
+    for (auto* format : formatManager.getFormats())
+        if (format != nullptr && format->getName().equalsIgnoreCase("VST3"))
+            return format;
+    return nullptr;
+}
+
+juce::Array<juce::PluginDescription> PluginHostService::copyKnownPlugins() const
+{
+    const juce::ScopedLock lock(catalogLock);
+    return knownPlugins.getTypes();
 }
 
 std::shared_ptr<AudioEffectProcessor> PluginHostService::createEffect(const juce::PluginDescription& description,

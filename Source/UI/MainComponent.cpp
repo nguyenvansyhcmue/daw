@@ -5,7 +5,6 @@
 
 MainComponent::MainComponent()
 {
-    audioEngine.initialise();
     setLookAndFeel(&lookAndFeel);
     addAndMakeVisible(controlBar);
     addAndMakeVisible(arrangeWindow);
@@ -107,10 +106,9 @@ MainComponent::MainComponent()
         return created;
     };
     arrangeWindow.onTrackSelected = [this](int track) { selectTrack(track); };
-    arrangeWindow.onAudioClipSelected = [this](ClipId clip) { inspectorPane.setSelectedAudioClip(clip); };
+    arrangeWindow.onAudioClipSelected = [this](ClipId) {};
     arrangeWindow.onMidiClipSelected = [this](MidiClipId clip)
     {
-        inspectorPane.setSelectedMidiClip(clip);
         pianoRoll.setActiveClip(clip);
         pianoRoll.setVisible(true);
         controlBar.setPianoRollVisible(true);
@@ -125,6 +123,13 @@ MainComponent::MainComponent()
     // A project starts empty; tracks are created through the explicit New Track workflow.
     markProjectSaved();
     startTimerHz(30);
+
+    const juce::Component::SafePointer<MainComponent> safeThis(this);
+    juce::Timer::callAfterDelay(1, [safeThis]
+    {
+        if (safeThis != nullptr)
+            safeThis->audioEngine.initialise();
+    });
 }
 
 void MainComponent::showInitialTrackCreation()

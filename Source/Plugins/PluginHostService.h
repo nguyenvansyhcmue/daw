@@ -27,8 +27,10 @@ public:
     static juce::File defaultCatalogFile();
 
 private:
-    void loadCatalog();
-    void saveCatalog() const;
+    void loadCatalogFromDisk();
+    void saveCatalogToDisk() const;
+    juce::AudioPluginFormat* findVst3Format() const noexcept;
+    juce::Array<juce::PluginDescription> copyKnownPlugins() const;
 
     juce::AudioPluginFormatManager formatManager;
     juce::KnownPluginList knownPlugins;

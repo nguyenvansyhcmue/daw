@@ -16,8 +16,10 @@ class WaveformThumbnail final
 {
 public:
     explicit WaveformThumbnail(const juce::AudioBuffer<float>& source);
+    explicit WaveformThumbnail(std::shared_ptr<const juce::AudioBuffer<float>> source);
 
     WaveformPeak peakForSourceRange(double firstSample, double lastSample) const noexcept;
+    float getDisplayPeak() const noexcept { return displayPeak; }
     bool isEmpty() const noexcept;
 
 private:
@@ -28,9 +30,12 @@ private:
     };
 
     const ResolutionLevel& levelForRange(double rangeLength) const noexcept;
+    void buildPeakLevels(const juce::AudioBuffer<float>& source);
 
     std::vector<ResolutionLevel> resolutionLevels;
+    std::shared_ptr<const juce::AudioBuffer<float>> sourceBuffer;
     int sourceSampleCount = 0;
+    float displayPeak = 0.0f;
 };
 
 class WaveformThumbnailCache final

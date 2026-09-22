@@ -16,6 +16,13 @@ inline const juce::Colour accentCyan { 0xffb7c9d8 };
 inline const juce::Colour muteAmber { 0xffc99b45 };
 inline const juce::Colour soloYellow { 0xffd4bb50 };
 inline const juce::Colour recordRed { 0xffbd5b56 };
+inline const juce::Colour lcdBackground { 0xff071318 };
+inline const juce::Colour lcdCyan { 0xff55ddf4 };
+inline const juce::Colour meterCyan { 0xff22d9d0 };
+inline const juce::Colour meterGreen { 0xff35df8d };
+inline const juce::Colour warning { 0xffe7b34c };
+inline const juce::Colour clipRed { 0xffff5252 };
+inline const juce::Colour playhead { 0xffff4545 };
 
 struct UIMetrics
 {
@@ -37,4 +44,9 @@ public:
     void drawLinearSlider(juce::Graphics&, int x, int y, int width, int height, float sliderPosition,
                           float minimumPosition, float maximumPosition, juce::Slider::SliderStyle, juce::Slider&) override;
     void drawToggleButton(juce::Graphics&, juce::ToggleButton&, bool highlighted, bool down) override;
+    juce::AlertWindow* createAlertWindow(const juce::String& title, const juce::String& message,
+                                         const juce::String& button1, const juce::String& button2,
+                                         const juce::String& button3, juce::MessageBoxIconType iconType,
+                                         int numButtons, juce::Component* associatedComponent) override;
+    void drawAlertBox(juce::Graphics&, juce::AlertWindow&, const juce::Rectangle<int>&, juce::TextLayout&) override;
 };

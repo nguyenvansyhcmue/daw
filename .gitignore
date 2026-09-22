@@ -27,3 +27,6 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+
+# Local proprietary SDKs are required only by individual developer machines.
+/third_party/ASIO-SDK_*/

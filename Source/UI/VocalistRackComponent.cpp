@@ -1,4 +1,5 @@
 #include "VocalistRackComponent.h"
+#include "StudioForgeDialog.h"
 
 VocalistRackComponent::VocalistRackComponent(AudioEngine& engine, PluginHostService& host)
     : audioEngine(engine), pluginHost(host)
@@ -107,7 +108,7 @@ void VocalistRackComponent::showPluginBrowser()
         if (auto effect = pluginHost.createEffect(description, sampleRate, blockSize, error))
             audioEngine.setVocalistFxProcessor(vocalistIndex, selectedFxSlot, std::move(effect));
         else
-            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Plugin Load Failed", error);
+            StudioForgeDialog::showWarning(StudioForgeDialog::fromUtf8("Kh\u00F4ng th\u1EC3 m\u1EDF plugin"), error);
     });
     juce::DialogWindow::LaunchOptions options;
     options.content.setOwned(panel);

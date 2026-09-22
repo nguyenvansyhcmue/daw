@@ -367,7 +367,9 @@ private:
     std::vector<EditState> redoHistory;
     std::atomic<EditTool> activeTool { EditTool::Pointer };
     std::atomic<float> horizontalZoom { 1.0f };
-    std::atomic<int> trackHeight { 42 };
+    // A new project should open in a usable audio-editing height.  Compact
+    // track sizes remain available through the timeline height control.
+    std::atomic<int> trackHeight { 64 };
     std::atomic<bool> cycleActive { false };
     std::atomic<double> cycleStartSample { 0.0 };
     std::atomic<double> cycleEndSample { 0.0 };

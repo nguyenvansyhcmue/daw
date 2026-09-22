@@ -1,6 +1,7 @@
 #include "PerformanceFooter.h"
 
 #include "../AudioEngine/AudioEngine.h"
+#include "Theme/StudioForgeLookAndFeel.h"
 
 PerformanceFooter::PerformanceFooter(AudioEngine* engine) : audioEngine(engine)
 {
@@ -34,6 +35,7 @@ PerformanceFooter::PerformanceFooter(AudioEngine* engine) : audioEngine(engine)
     addAndMakeVisible(deviceLabel);
     addAndMakeVisible(overloadLabel);
     addAndMakeVisible(cpuMeter);
+    addAndMakeVisible(masterMeter);
     startTimerHz(15);
 }
 
@@ -45,6 +47,7 @@ void PerformanceFooter::timerCallback()
     cpuLabel.setText("CPU " + juce::String(juce::roundToInt(cpuLoad * 100.0)) + "%", juce::dontSendNotification);
     if (audioEngine != nullptr)
     {
+        masterMeter.updateStereoPeak(audioEngine->getMasterLeftPeak(), audioEngine->getMasterRightPeak());
         const auto diagnostics = audioEngine->getRealtimeDiagnostics();
         deviceLabel.setText(juce::String(juce::roundToInt(diagnostics.sampleRate)) + " Hz / "
                             + juce::String(diagnostics.bufferSize) + " smp", juce::dontSendNotification);
@@ -70,8 +73,8 @@ void PerformanceFooter::timerCallback()
 
 void PerformanceFooter::paint(juce::Graphics& g)
 {
-    g.fillAll(juce::Colour(0xff1c1c1e));
-    g.setColour(juce::Colours::white.withAlpha(0.13f));
+    g.fillAll(StudioForgeTheme::recessedSurface);
+    g.setColour(StudioForgeTheme::separator.withAlpha(0.72f));
     g.drawHorizontalLine(0, 0.0f, static_cast<float>(getWidth()));
 }
 
@@ -79,6 +82,7 @@ void PerformanceFooter::resized()
 {
     auto area = getLocalBounds().reduced(8, 5);
     masterLabel.setBounds(area.removeFromLeft(82));
+    masterMeter.setBounds(area.removeFromLeft(150).reduced(0, 4));
     masterGain.setBounds(area.removeFromLeft(180).reduced(0, 3));
     bounceButton.setBounds(area.removeFromLeft(76).reduced(3, 0));
     automationVisible.setBounds(area.removeFromRight(130));

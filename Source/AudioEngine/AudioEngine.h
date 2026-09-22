@@ -40,6 +40,7 @@ public:
 
     void initialise();
     void shutdown();
+    void saveAudioDeviceState() const;
 
     void setMasterGain(float gain) noexcept;
     float getMasterGain() const noexcept;

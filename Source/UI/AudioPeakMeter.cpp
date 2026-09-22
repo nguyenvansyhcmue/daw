@@ -1,5 +1,7 @@
 #include "AudioPeakMeter.h"
 
+#include "Theme/StudioForgeLookAndFeel.h"
+
 AudioPeakMeter::AudioPeakMeter()
 {
     startTimerHz(60);
@@ -59,20 +61,39 @@ void AudioPeakMeter::paint(juce::Graphics& g)
         g.drawHorizontalLine(juce::roundToInt(y), bounds.getX(), bounds.getRight());
     }
 
-    const auto leftBounds = bounds.withWidth((bounds.getWidth() - 2.0f) * 0.5f);
-    const auto rightBounds = leftBounds.withX(leftBounds.getRight() + 2.0f);
+    const auto horizontal = bounds.getWidth() > bounds.getHeight() * 2.5f;
+    auto horizontalLanes = bounds.reduced(16.0f, 4.0f);
+    const auto leftBounds = horizontal
+        ? horizontalLanes.removeFromTop((horizontalLanes.getHeight() - 2.0f) * 0.5f)
+        : bounds.withWidth((bounds.getWidth() - 2.0f) * 0.5f);
+    if (horizontal)
+        horizontalLanes.removeFromTop(2.0f);
+    const auto rightBounds = horizontal ? horizontalLanes
+                                       : leftBounds.withX(leftBounds.getRight() + 2.0f);
     juce::ColourGradient gradient(juce::Colour(0xff23d18b), 0.0f, bounds.getBottom(),
                                   juce::Colour(0xffffd166), 0.0f, bounds.getY(), false);
     gradient.addColour(0.65, juce::Colour(0xffffd166));
     gradient.addColour(0.88, juce::Colour(0xffef5350));
     g.setGradientFill(gradient);
-    const auto drawLevel = [&g, &gradient, bounds] (juce::Rectangle<float> channel, float peak)
+    const auto drawLevel = [&g, &gradient, bounds, horizontal] (juce::Rectangle<float> channel, float peak)
     {
         g.setGradientFill(gradient);
-        g.fillRoundedRectangle(channel.withTop(bounds.getBottom() - channel.getHeight() * peak), 2.0f);
+        if (horizontal)
+            g.fillRoundedRectangle(channel.withWidth(channel.getWidth() * peak), 1.5f);
+        else
+            g.fillRoundedRectangle(channel.withTop(bounds.getBottom() - channel.getHeight() * peak), 2.0f);
     };
     drawLevel(leftBounds, displayedPeak);
     drawLevel(rightBounds, displayedRightPeak);
+
+    if (horizontal)
+    {
+        g.setColour(StudioForgeTheme::secondaryText.withAlpha(0.78f));
+        g.setFont(juce::Font(juce::FontOptions(8.0f, juce::Font::bold)));
+        g.drawText("L", bounds.getX() + 2.0f, leftBounds.getY() - 1.0f, 10.0f, leftBounds.getHeight() + 2.0f, juce::Justification::centred, false);
+        g.drawText("R", bounds.getX() + 2.0f, rightBounds.getY() - 1.0f, 10.0f, rightBounds.getHeight() + 2.0f, juce::Justification::centred, false);
+        g.drawText("-60  -48  -36  -24  -12  -6   0", bounds.withTrimmedTop(bounds.getHeight() - 9.0f), juce::Justification::centredRight, false);
+    }
 
     if (clipLatched.load(std::memory_order_relaxed))
     {

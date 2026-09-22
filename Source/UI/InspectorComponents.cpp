@@ -274,7 +274,7 @@ ChannelStripComponent::ChannelStripComponent(ChannelRole role, TrackDataModel& m
     pan.textFromValueFunction = [] (double value)
     {
         const auto panValue = static_cast<float>(value);
-        if (std::abs(panValue) < 0.005f)
+        if (panValue == 0.0f)
             return juce::String("C");
         return (panValue < 0.0f ? "L " : "R ") + juce::String(juce::roundToInt(std::abs(panValue) * 100.0f));
     };
@@ -787,11 +787,13 @@ void ChannelStripComponent::resized()
             clearSendButtons[slot].setVisible(false);
         }
     }
-    const auto consoleHeight = juce::jmin(204, bounds.getHeight());
+    // Keep the console anchored to the bottom, while letting its meter/fader
+    // grow upward on tall Inspector panels instead of leaving unused space.
+    const auto consoleHeight = juce::jlimit(204, 320, bounds.getHeight());
     auto performance = bounds.removeFromBottom(consoleHeight).reduced(2, 2);
     panLabel.setBounds(performance.removeFromTop(sectionHeaderHeight));
-    auto panArea = performance.removeFromTop(50);
-    pan.setBounds(panArea.withSizeKeepingCentre(46, 46));
+    auto panArea = performance.removeFromTop(62);
+    pan.setBounds(panArea.withSizeKeepingCentre(50, 58).translated(0, -2));
     levelLabel.setBounds(performance.removeFromTop(sectionHeaderHeight));
     auto levelArea = performance.reduced(0, 2);
     auto console = levelArea.withSizeKeepingCentre(58, levelArea.getHeight());

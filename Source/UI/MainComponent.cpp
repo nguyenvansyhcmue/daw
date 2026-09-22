@@ -2,9 +2,11 @@
 #include "../Midi/MidiFileImporter.h"
 #include "../Project/ProjectSerializer.h"
 #include "../Project/ProjectState.h"
+#include "StudioForgeDialog.h"
 
 MainComponent::MainComponent()
 {
+    juce::LookAndFeel::setDefaultLookAndFeel(&lookAndFeel);
     setLookAndFeel(&lookAndFeel);
     addAndMakeVisible(controlBar);
     addAndMakeVisible(arrangeWindow);
@@ -90,20 +92,27 @@ MainComponent::MainComponent()
         if (onOpenRecentProjectRequested != nullptr)
             onOpenRecentProjectRequested(file);
     };
-    startupWorkflow.onCreateTracks = [this](TrackType type, int count)
+    startupWorkflow.onAudioDeviceSettingsRequested = [this]
     {
-        const auto firstNewTrack = static_cast<int>(trackDataModel.getTrackCount());
-        auto created = 0;
-        for (int index = 0; index < count; ++index)
-        {
-            if (! addTrackFromCommand(type))
-                break;
-            ++created;
-        }
-        configureTrackCreationDialog();
-        if (created > 0)
-            selectTrack(firstNewTrack);
-        return created;
+        if (onAudioDeviceSettingsRequested)
+            onAudioDeviceSettingsRequested();
+    };
+    startupWorkflow.onAudioInputChannelSelected = [this](int channel) { selectAudioInputChannel(channel); };
+    startupWorkflow.onAudioOutputChannelSelected = [this](int channel) { selectAudioOutputChannel(channel); };
+    startupWorkflow.onPerformanceConfigured = [this](const LiveSetupConfig& setup)
+    {
+        audioEngine.setPlaybackState(false);
+        const auto result = trackDataModel.applyProjectState(ProjectTemplates::createLiveSetup(setup));
+        if (result.failed())
+            return;
+
+        audioEngine.prepareActiveEffects();
+        selectTrack(0);
+        mixerPane.refreshFromModel();
+        arrangeWindow.repaint();
+        pianoRoll.repaint();
+        markProjectSaved();
+        showWorkspace();
     };
     arrangeWindow.onTrackSelected = [this](int track) { selectTrack(track); };
     arrangeWindow.onAudioClipSelected = [this](ClipId) {};
@@ -141,18 +150,40 @@ void MainComponent::showInitialTrackCreation()
 
 void MainComponent::configureTrackCreationDialog()
 {
-    const auto remaining = static_cast<int>(TrackDataModel::maxTracks - trackDataModel.getTrackCount());
-    startupWorkflow.setAvailableTrackSlots(remaining);
-
     const auto* device = audioEngine.getAudioDeviceManager().getCurrentAudioDevice();
     const auto inputs = device != nullptr ? device->getActiveInputChannels().countNumberOfSetBits() : 0;
     const auto outputs = device != nullptr ? device->getActiveOutputChannels().countNumberOfSetBits() : 0;
     startupWorkflow.setAudioDeviceChannels(inputs, outputs);
 }
 
+void MainComponent::selectAudioInputChannel(int oneBasedChannel)
+{
+    auto& deviceManager = audioEngine.getAudioDeviceManager();
+    auto setup = deviceManager.getAudioDeviceSetup();
+    setup.inputChannels.clear();
+    setup.inputChannels.setBit(oneBasedChannel - 1);
+    deviceManager.setAudioDeviceSetup(setup, true);
+    audioEngine.saveAudioDeviceState();
+    configureTrackCreationDialog();
+}
+
+void MainComponent::selectAudioOutputChannel(int oneBasedChannel)
+{
+    auto& deviceManager = audioEngine.getAudioDeviceManager();
+    auto setup = deviceManager.getAudioDeviceSetup();
+    setup.outputChannels.clear();
+    setup.outputChannels.setBit(oneBasedChannel - 1);
+    setup.outputChannels.setBit(oneBasedChannel);
+    deviceManager.setAudioDeviceSetup(setup, true);
+    audioEngine.saveAudioDeviceState();
+    configureTrackCreationDialog();
+}
+
 MainComponent::~MainComponent()
 {
     stopTimer();
+    if (&juce::LookAndFeel::getDefaultLookAndFeel() == &lookAndFeel)
+        juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
     setLookAndFeel(nullptr);
 }
 
@@ -360,8 +391,8 @@ void MainComponent::requestProjectBounce()
             options.sampleRate = safeOwner->trackDataModel.getSampleRate();
             const auto result = safeOwner->audioEngine.renderOfflineAudio(output, options);
             if (result.failed())
-                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
-                                                       "Bounce Failed", result.getErrorMessage());
+                StudioForgeDialog::showWarning(StudioForgeDialog::fromUtf8("Xu\u1EA5t audio ch\u01B0a ho\u00E0n t\u1EA5t"),
+                                               result.getErrorMessage());
         });
 }
 
@@ -508,8 +539,8 @@ void MainComponent::paint(juce::Graphics& g)
 void MainComponent::resized()
 {
     auto area = getLocalBounds();
-    controlBar.setBounds(area.removeFromTop(54));
-    performanceFooter.setBounds(area.removeFromBottom(38));
+    controlBar.setBounds(area.removeFromTop(62));
+    performanceFooter.setBounds(area.removeFromBottom(44));
 
     // Dock panes from a bounded budget so opening both lower editors never
     // collapses the arrange workspace or overlaps controls on smaller screens.
@@ -523,15 +554,16 @@ void MainComponent::resized()
     if (pianoRoll.isVisible())
         pianoRoll.setBounds(area.removeFromBottom(juce::roundToInt(250.0f * dockScale)));
 
-    const auto sideBudget = juce::jmax(0, area.getWidth() - 360);
-    const auto requestedSideWidth = (inspectorPane.isVisible() ? 250 : 0)
-                                  + (assetBrowser.isVisible() ? 250 : 0);
+    const auto sideBudget = juce::jmax(0, area.getWidth() - 420);
+    const auto targetSideWidth = juce::jlimit(220, 286, juce::roundToInt(static_cast<float>(getWidth()) * 0.16f));
+    const auto requestedSideWidth = (inspectorPane.isVisible() ? targetSideWidth : 0)
+                                  + (assetBrowser.isVisible() ? targetSideWidth : 0);
     const auto sideScale = requestedSideWidth > 0
         ? juce::jmin(1.0f, static_cast<float>(sideBudget) / static_cast<float>(requestedSideWidth)) : 0.0f;
     if (inspectorPane.isVisible())
-        inspectorPane.setBounds(area.removeFromLeft(juce::roundToInt(250.0f * sideScale)));
+        inspectorPane.setBounds(area.removeFromLeft(juce::roundToInt(static_cast<float>(targetSideWidth) * sideScale)));
     if (assetBrowser.isVisible())
-        assetBrowser.setBounds(area.removeFromRight(juce::roundToInt(250.0f * sideScale)));
+        assetBrowser.setBounds(area.removeFromRight(juce::roundToInt(static_cast<float>(targetSideWidth) * sideScale)));
 
     arrangeWindow.setBounds(area);
     startupWorkflow.setBounds(getLocalBounds());

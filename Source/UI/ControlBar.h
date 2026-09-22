@@ -2,6 +2,8 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../Project/ProjectState.h"
+#include "AudioPeakMeter.h"
+#include "TransportLCD.h"
 
 class TrackDataModel;
 class AudioEngine;
@@ -69,7 +71,8 @@ private:
     juce::ToggleButton metronomeButton { "Metronome" };
     juce::Slider bpmSlider;
     juce::Label bpmLabel;
-    juce::Label timecodeLabel;
+    TransportLCD transportLCD;
+    AudioPeakMeter masterMeter;
     juce::TextButton pointerTool { "POINTER" };
     juce::TextButton scissorsTool { "SCISSORS" };
     juce::TextButton eraserTool { "ERASER" };

@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 #include "UI/DeviceSettingsPanel.h"
 #include "UI/ProjectSettingsPanel.h"
+#include "UI/StudioForgeDialog.h"
 
 MainWindow::MainWindow(const juce::String& name)
     : juce::DocumentWindow(name,
@@ -19,6 +20,7 @@ MainWindow::MainWindow(const juce::String& name)
     if (mainComponent != nullptr)
     {
         mainComponent->onOpenProjectRequested = [this] { chooseProjectToOpen(); };
+        mainComponent->onAudioDeviceSettingsRequested = [this] { showDeviceSettings(); };
         mainComponent->onOpenRecentProjectRequested = [this](const juce::File& file)
         {
             confirmDiscardChanges([safeWindow = juce::Component::SafePointer<MainWindow>(this), file]
@@ -593,6 +595,7 @@ void MainWindow::showDeviceSettings()
     options.useNativeTitleBar = true;
     options.resizable = true;
     options.componentToCentreAround = this;
+    options.content->setSize(560, 420);
     options.launchAsync();
 }
 
@@ -715,7 +718,7 @@ void MainWindow::confirmDiscardChanges(std::function<void()> continuation)
 
 void MainWindow::showProjectError(const juce::String& title, const juce::Result& result) const
 {
-    juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, title, result.getErrorMessage());
+    StudioForgeDialog::showWarning(title, result.getErrorMessage());
 }
 
 void MainWindow::renderOpenGL()

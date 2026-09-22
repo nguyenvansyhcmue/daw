@@ -1,6 +1,7 @@
 #include "ControlBar.h"
 #include "../AudioEngine/AudioEngine.h"
 #include "../Models/TrackDataModel.h"
+#include "Theme/StudioForgeLookAndFeel.h"
 
 namespace
 {
@@ -98,7 +99,7 @@ void TransportIconButton::paintButton(juce::Graphics& graphics, bool highlighted
 }
 
 ControlBar::ControlBar(TrackDataModel* model, AudioEngine* engine)
-    : trackModel(model), audioEngine(engine)
+    : transportLCD(model), trackModel(model), audioEngine(engine)
 {
     addAndMakeVisible(playButton);
     addAndMakeVisible(stopButton);
@@ -116,7 +117,8 @@ ControlBar::ControlBar(TrackDataModel* model, AudioEngine* engine)
     addAndMakeVisible(goToBeginningButton);
     addAndMakeVisible(rewindButton);
     addAndMakeVisible(forwardButton);
-    addAndMakeVisible(timecodeLabel);
+    addAndMakeVisible(transportLCD);
+    addAndMakeVisible(masterMeter);
     addAndMakeVisible(pointerTool);
     addAndMakeVisible(scissorsTool);
     addAndMakeVisible(eraserTool);
@@ -213,13 +215,6 @@ ControlBar::ControlBar(TrackDataModel* model, AudioEngine* engine)
     inspectorButton.setColour(juce::TextButton::buttonColourId, darkPanel);
     mixerButton.setColour(juce::TextButton::buttonColourId, darkPanel);
     pianoRollButton.setColour(juce::TextButton::buttonColourId, darkPanel);
-    timecodeLabel.setText("00:00:00:00", juce::dontSendNotification);
-    timecodeLabel.setJustificationType(juce::Justification::centred);
-    timecodeLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xff0a0a0a));
-    timecodeLabel.setColour(juce::Label::textColourId, accentCyan);
-    timecodeLabel.setColour(juce::Label::outlineColourId, juce::Colour(0xff333333));
-    timecodeLabel.setFont(juce::Font(juce::FontOptions(14.0f, juce::Font::bold)));
-
     bpmSlider.setRange(60.0, 220.0, 1.0);
     bpmSlider.setValue(trackModel != nullptr ? trackModel->getBpm() : 120.0);
     bpmSlider.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
@@ -362,12 +357,8 @@ void ControlBar::timerCallback()
     if (trackModel == nullptr)
         return;
 
-    const auto seconds = static_cast<int>(trackModel->getPlayheadPosition() / trackModel->getSampleRate());
-    const auto hours = seconds / 3600;
-    const auto minutes = (seconds / 60) % 60;
-    const auto remainingSeconds = seconds % 60;
-    timecodeLabel.setText(juce::String::formatted("%02d:%02d:%02d", hours, minutes, remainingSeconds),
-                          juce::dontSendNotification);
+    if (audioEngine != nullptr)
+        masterMeter.updateStereoPeak(audioEngine->getMasterLeftPeak(), audioEngine->getMasterRightPeak());
     punchButton.setToggleState(trackModel->isPunchActive(), juce::dontSendNotification);
     cycleButton.setToggleState(trackModel->isCycleActive(), juce::dontSendNotification);
     metronomeButton.setToggleState(audioEngine != nullptr && audioEngine->isMetronomeEnabled(), juce::dontSendNotification);
@@ -375,21 +366,22 @@ void ControlBar::timerCallback()
 
 void ControlBar::paint(juce::Graphics& g)
 {
-    g.fillAll(darkPanel);
+    g.fillAll(StudioForgeTheme::panelBackground);
 
     const auto area = getLocalBounds().toFloat();
     g.setColour(juce::Colours::white.withAlpha(0.08f));
     g.drawLine(area.getX(), area.getBottom() - 1.0f, area.getRight(), area.getBottom() - 1.0f, 1.0f);
 
     auto topBar = area.reduced(0.0f, 0.0f);
-    auto glow = juce::ColourGradient(accentBlue, 0.0f, 0.0f, accentCyan, topBar.getWidth(), 0.0f, false);
+    auto glow = juce::ColourGradient(StudioForgeTheme::accentBlue, 0.0f, 0.0f,
+                                     StudioForgeTheme::lcdCyan.withAlpha(0.72f), topBar.getWidth(), 0.0f, false);
     g.setGradientFill(glow);
     g.fillRect(topBar.getX(), topBar.getY(), topBar.getWidth(), 2.0f);
 }
 
 void ControlBar::resized()
 {
-    const auto bounds = getLocalBounds().reduced(8, 7);
+    const auto bounds = getLocalBounds().reduced(10, 6);
     const auto buttonWidth = 30;
     const auto buttonHeight = 32;
 
@@ -399,30 +391,41 @@ void ControlBar::resized()
     browserButton.setBounds(bounds.getX() + 102, bounds.getY(), 30, buttonHeight);
     addTrackButton.setBounds(bounds.getX() + 136, bounds.getY(), 30, buttonHeight);
 
-    const auto centre = bounds.getCentreX();
-    const auto transportWidth = buttonWidth * 5 + 16;
-    const auto transportX = centre - transportWidth / 2;
-    timecodeLabel.setBounds(centre - 95, bounds.getY(), 190, 18);
-    goToBeginningButton.setBounds(transportX, bounds.getY() + 19, 30, 26);
-    rewindButton.setBounds(transportX + 34, bounds.getY() + 19, 30, 26);
-    playButton.setBounds(transportX + 68, bounds.getY() + 19, buttonWidth, 26);
-    stopButton.setBounds(transportX + 102, bounds.getY() + 19, buttonWidth, 26);
-    forwardButton.setBounds(transportX + 136, bounds.getY() + 19, 30, 26);
+    const auto rightControlsWidth = 374;
+    const auto rightX = bounds.getRight() - rightControlsWidth;
+    cycleButton.setBounds(rightX, bounds.getY() + 8, 62, 28);
+    countInButton.setBounds(rightX + 66, bounds.getY() + 8, 60, 28);
+    punchButton.setBounds(rightX + 130, bounds.getY() + 8, 62, 28);
+    metronomeButton.setBounds(rightX + 196, bounds.getY() + 8, 88, 28);
+    bpmSlider.setBounds(rightX + 288, bounds.getY() + 9, 48, 22);
+    bpmLabel.setBounds(rightX + 336, bounds.getY() + 6, 38, 28);
 
-    recordButton.setBounds(bounds.getRight() - 444, bounds.getY() + 3, 30, 26);
-    cycleButton.setBounds(bounds.getRight() - 410, bounds.getY(), 66, buttonHeight);
-    countInButton.setBounds(bounds.getRight() - 340, bounds.getY(), 64, buttonHeight);
-    punchButton.setBounds(bounds.getRight() - 270, bounds.getY(), 66, buttonHeight);
-    metronomeButton.setBounds(bounds.getRight() - 198, bounds.getY(), 86, buttonHeight);
-    bpmSlider.setBounds(bounds.getRight() - 108, bounds.getY() + 2, 62, 25);
-    bpmLabel.setBounds(bounds.getRight() - 46, bounds.getY(), 46, buttonHeight);
+    const auto wideLayout = getWidth() >= 1450;
+    const auto lcdWidth = wideLayout ? 276 : 220;
+    const auto meterWidth = wideLayout ? 168 : 0;
+    const auto clusterWidth = lcdWidth + meterWidth + 6 * 30 + 30;
+    const auto clusterMinX = bounds.getX() + 402;
+    const auto clusterMaxX = rightX - clusterWidth - 8;
+    const auto clusterX = clusterMaxX > clusterMinX
+        ? juce::jlimit(clusterMinX, clusterMaxX, bounds.getCentreX() - clusterWidth / 2)
+        : clusterMaxX;
+    transportLCD.setBounds(clusterX, bounds.getY(), lcdWidth, 42);
+    const auto transportX = clusterX + lcdWidth + 6;
+    goToBeginningButton.setBounds(transportX, bounds.getY() + 9, 26, 26);
+    rewindButton.setBounds(transportX + 29, bounds.getY() + 9, 26, 26);
+    playButton.setBounds(transportX + 58, bounds.getY() + 4, 34, 34);
+    stopButton.setBounds(transportX + 95, bounds.getY() + 9, 26, 26);
+    forwardButton.setBounds(transportX + 124, bounds.getY() + 9, 26, 26);
+    recordButton.setBounds(transportX + 155, bounds.getY() + 9, 26, 26);
+    masterMeter.setBounds(transportX + 187, bounds.getY() + 5, meterWidth, 34);
+    masterMeter.setVisible(wideLayout);
     pointerTool.setBounds(bounds.getX() + 174, bounds.getY(), 68, buttonHeight);
     scissorsTool.setBounds(bounds.getX() + 246, bounds.getY(), 78, buttonHeight);
     eraserTool.setBounds(bounds.getX() + 328, bounds.getY(), 64, buttonHeight);
 
     // The transport has priority on compact windows; tools remain accessible
     // through their shortcuts rather than overlapping its LCD and buttons.
-    const auto showToolStrip = getWidth() >= 1040;
+    const auto showToolStrip = getWidth() >= 1200;
     pointerTool.setVisible(showToolStrip);
     scissorsTool.setVisible(showToolStrip);
     eraserTool.setVisible(showToolStrip);

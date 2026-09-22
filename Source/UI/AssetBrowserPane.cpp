@@ -1,10 +1,12 @@
 #include "AssetBrowserPane.h"
 
+#include "Theme/StudioForgeLookAndFeel.h"
+
 AssetBrowserPane::AssetBrowserPane()
 {
-    title.setFont(juce::Font(juce::FontOptions(13.0f, juce::Font::bold)));
+    title.setFont(juce::Font(juce::FontOptions(12.0f, juce::Font::bold)));
     title.setJustificationType(juce::Justification::centredLeft);
-    title.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.78f));
+    title.setColour(juce::Label::textColourId, StudioForgeTheme::primaryText.withAlpha(0.86f));
     addAndMakeVisible(title);
     browser.addListener(this);
     addAndMakeVisible(browser);
@@ -17,16 +19,17 @@ AssetBrowserPane::~AssetBrowserPane()
 
 void AssetBrowserPane::paint(juce::Graphics& g)
 {
-    g.fillAll(juce::Colour(0xff252526));
-    g.setColour(juce::Colours::white.withAlpha(0.12f));
+    g.fillAll(StudioForgeTheme::panelBackground.darker(0.05f));
+    g.setColour(StudioForgeTheme::separator.withAlpha(0.72f));
     g.drawVerticalLine(0, 0.0f, static_cast<float>(getHeight()));
-    g.drawHorizontalLine(30, 8.0f, static_cast<float>(getWidth() - 8));
+    g.drawHorizontalLine(31, 8.0f, static_cast<float>(getWidth() - 8));
 }
 
 void AssetBrowserPane::resized()
 {
-    auto area = getLocalBounds().reduced(8);
-    title.setBounds(area.removeFromTop(22));
+    auto area = getLocalBounds().reduced(9, 8);
+    title.setBounds(area.removeFromTop(23));
+    area.removeFromTop(3);
     browser.setBounds(area);
 }
 

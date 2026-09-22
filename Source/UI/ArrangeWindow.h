@@ -9,10 +9,12 @@
 #include "../Models/TrackDataModel.h"
 #include "../Media/WaveformThumbnailCache.h"
 
+class AudioEngine;
+
 class TrackHeaderPanel final : public juce::Component, private juce::Timer
 {
 public:
-    explicit TrackHeaderPanel(TrackDataModel* model = nullptr);
+    explicit TrackHeaderPanel(TrackDataModel* model = nullptr, AudioEngine* engine = nullptr);
 
     void paint(juce::Graphics& g) override;
     void resized() override;
@@ -27,6 +29,7 @@ private:
     void timerCallback() override;
 
     TrackDataModel* trackModel = nullptr;
+    AudioEngine* audioEngine = nullptr;
     int selectedTrack = 0;
     std::array<juce::Slider, TrackDataModel::maxTracks> volumeControls;
     std::array<juce::Slider, TrackDataModel::maxTracks> panControls;
@@ -52,6 +55,7 @@ public:
 
     void setSelectedTrack(int track) noexcept { selectedTrack = track; selectedClip = -1; repaint(); }
     void setViewStartSample(double sample) noexcept;
+    void setDisplayPlayheadSample(double sample) noexcept { displayPlayheadSample = sample; repaint(); }
     double getViewStartSample() const noexcept { return viewStartSample; }
     void resized() override {}
 
@@ -65,11 +69,13 @@ private:
     TrackDataModel* trackModel = nullptr;
     const WaveformThumbnailCache* waveformCache = nullptr;
     double viewStartSample = 0.0;
+    double displayPlayheadSample = 0.0;
     double zoomFactor = 1.0;
     int selectedTrack = -1;
     int selectedClip = -1;
     ClipId selectedClipId;
     double clipDragStartSample = 0.0;
+    double clipDragGrabOffsetSamples = 0.0;
     double clipDragPreviewSample = 0.0;
     int clipDragPreviewTrack = -1;
     bool draggingClip = false;
@@ -91,23 +97,32 @@ private:
 class TimelineRuler final : public juce::Component
 {
 public:
-    explicit TimelineRuler(TrackDataModel* model = nullptr) : trackModel(model) {}
+    explicit TimelineRuler(TrackDataModel* model = nullptr);
     void paint(juce::Graphics& g) override;
     void mouseDown(const juce::MouseEvent& event) override;
     void mouseDrag(const juce::MouseEvent& event) override;
-    void mouseUp(const juce::MouseEvent&) override { dragging = false; }
+    void mouseUp(const juce::MouseEvent&) override;
     void setViewStartSample(double sample) noexcept { viewStartSample = juce::jmax(0.0, sample); repaint(); }
+    void setDisplayPlayheadSample(double sample) noexcept { displayPlayheadSample = sample; repaint(); }
+    void setReservedTrailingWidth(int width) noexcept { reservedTrailingWidth = juce::jmax(0, width); repaint(); }
 private:
+    enum class DragMode { none, scrubPlayhead, selectCycle };
+
+    double sampleAt(const juce::Point<float>& position) const noexcept;
+    double snappedSampleAt(const juce::Point<float>& position) const noexcept;
+
     TrackDataModel* trackModel = nullptr;
-    bool dragging = false;
-    double dragStart = 0.0;
+    DragMode dragMode = DragMode::none;
+    double dragAnchorSample = 0.0;
     double viewStartSample = 0.0;
+    double displayPlayheadSample = 0.0;
+    int reservedTrailingWidth = 0;
 };
 
-class ArrangeWindow final : public juce::Component, public juce::FileDragAndDropTarget
+class ArrangeWindow final : public juce::Component, public juce::FileDragAndDropTarget, private juce::Timer
 {
 public:
-    explicit ArrangeWindow(TrackDataModel* model = nullptr);
+    explicit ArrangeWindow(TrackDataModel* model = nullptr, AudioEngine* engine = nullptr);
 
     std::function<void(int)> onTrackSelected;
     std::function<void(ClipId)> onAudioClipSelected;
@@ -128,6 +143,7 @@ public:
     void requestWaveformPreparation();
 
 private:
+    void timerCallback() override;
     struct PendingAudioImport
     {
         TrackId trackId;
@@ -144,8 +160,11 @@ private:
     TrackHeaderPanel trackHeaderPanel;
     TimelineRuler timelineRuler;
     TimelineGrid timelineGrid;
+    double lastDisplayPlayheadSample = -1.0;
     juce::Slider horizontalZoomSlider;
     juce::Slider trackHeightSlider;
+    juce::Label zoomReadout;
+    juce::Label trackHeightReadout;
     TrackDataModel* trackModel = nullptr;
     bool isDraggingOver = false;
     int draggedTrack = 0;

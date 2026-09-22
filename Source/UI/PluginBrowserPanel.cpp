@@ -1,4 +1,5 @@
 #include "PluginBrowserPanel.h"
+#include "StudioForgeDialog.h"
 
 PluginBrowserPanel::PluginBrowserPanel(PluginHostService& host, SelectionCallback onSelection)
     : pluginHost(host), onPluginSelected(std::move(onSelection))
@@ -92,8 +93,8 @@ void PluginBrowserPanel::choosePluginToScan()
         {
             scanButton.setEnabled(true);
             if (result.failed())
-                juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
-                                                       "Plugin Scan Failed", result.getErrorMessage());
+                StudioForgeDialog::showWarning(StudioForgeDialog::fromUtf8("Qu\u00E9t plugin ch\u01B0a ho\u00E0n t\u1EA5t"),
+                                               result.getErrorMessage());
             updateResults();
         });
     });

@@ -9,6 +9,9 @@ StudioForgeLookAndFeel::StudioForgeLookAndFeel()
     setColour(juce::Slider::backgroundColourId, StudioForgeTheme::panelBackground);
     setColour(juce::Slider::trackColourId, StudioForgeTheme::accentBlue);
     setColour(juce::Slider::thumbColourId, StudioForgeTheme::accentCyan);
+    setColour(juce::AlertWindow::backgroundColourId, juce::Colour(0xff26343a));
+    setColour(juce::AlertWindow::outlineColourId, juce::Colours::white.withAlpha(0.13f));
+    setColour(juce::AlertWindow::textColourId, StudioForgeTheme::primaryText);
 }
 
 void StudioForgeLookAndFeel::drawButtonBackground(juce::Graphics& g, juce::Button& button,
@@ -38,7 +41,10 @@ void StudioForgeLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, i
     const auto bounds = juce::Rectangle<float>(static_cast<float>(x), static_cast<float>(y), static_cast<float>(width), static_cast<float>(height));
     const auto radius = juce::jmax(4.0f, juce::jmin(bounds.getWidth(), bounds.getHeight()) * 0.5f - 4.0f);
     const auto centre = bounds.getCentre();
-    const auto angle = startAngle + (endAngle - startAngle) * sliderPosition;
+    // Pan convention: centre is 12 o'clock; left and right move symmetrically
+    // toward 10:30 and 1:30, respectively.
+    const auto angle = -juce::MathConstants<float>::halfPi
+                     + (sliderPosition - 0.5f) * juce::MathConstants<float>::halfPi;
     const auto socketRadius = radius + 2.0f;
     g.setColour(StudioForgeTheme::recessedSurface); g.fillEllipse(centre.x - socketRadius, centre.y - socketRadius, socketRadius * 2.0f, socketRadius * 2.0f);
     g.setColour(juce::Colours::black.withAlpha(0.70f)); g.drawEllipse(centre.x - socketRadius, centre.y - socketRadius, socketRadius * 2.0f, socketRadius * 2.0f, 1.0f);
@@ -92,4 +98,47 @@ void StudioForgeLookAndFeel::drawToggleButton(juce::Graphics& g, juce::ToggleBut
     g.setColour(down ? juce::Colours::black.withAlpha(0.55f) : juce::Colours::white.withAlpha(highlighted ? 0.28f : 0.12f));
     g.drawRoundedRectangle(area.reduced(1.0f), StudioForgeTheme::UIMetrics::cornerRadius, 1.0f);
     g.setColour(juce::Colours::white); g.drawText(button.getButtonText(), area.reduced(4.0f), juce::Justification::centred, true);
+}
+
+juce::AlertWindow* StudioForgeLookAndFeel::createAlertWindow(const juce::String& title, const juce::String& message,
+                                                              const juce::String& button1, const juce::String& button2,
+                                                              const juce::String& button3, juce::MessageBoxIconType iconType,
+                                                              int numButtons, juce::Component* associatedComponent)
+{
+    return juce::LookAndFeel_V2::createAlertWindow(title, message, button1, button2, button3,
+                                                    iconType, numButtons, associatedComponent);
+}
+
+void StudioForgeLookAndFeel::drawAlertBox(juce::Graphics& g, juce::AlertWindow& alert,
+                                          const juce::Rectangle<int>&, juce::TextLayout& textLayout)
+{
+    constexpr auto cornerRadius = 7.0f;
+    auto bounds = alert.getLocalBounds().reduced(1);
+
+    g.setColour(alert.findColour(juce::AlertWindow::backgroundColourId));
+    g.fillRoundedRectangle(bounds.toFloat(), cornerRadius);
+    g.setColour(alert.findColour(juce::AlertWindow::outlineColourId));
+    g.drawRoundedRectangle(bounds.toFloat(), cornerRadius, 1.0f);
+
+    auto content = bounds.reduced(24, 18);
+    if (alert.getAlertType() == juce::MessageBoxIconType::WarningIcon)
+    {
+        const auto iconArea = juce::Rectangle<int>(content.getX(), content.getY() + 4, 20, 18);
+        content.removeFromLeft(30);
+        juce::Path icon;
+        icon.addTriangle(iconArea.getCentreX(), static_cast<float>(iconArea.getY()),
+                         static_cast<float>(iconArea.getRight()), static_cast<float>(iconArea.getBottom()),
+                         static_cast<float>(iconArea.getX()), static_cast<float>(iconArea.getBottom()));
+        icon = icon.createPathWithRoundedCorners(3.0f);
+        g.setColour(StudioForgeTheme::recordRed.withAlpha(0.86f));
+        g.fillPath(icon);
+        g.setColour(juce::Colours::white.withAlpha(0.94f));
+        g.setFont(13.0f);
+        g.drawText("!", iconArea, juce::Justification::centred, true);
+        content.removeFromLeft(4);
+    }
+
+    const auto textBounds = content.withTrimmedBottom(getAlertWindowButtonHeight() + 12);
+    g.setColour(alert.findColour(juce::AlertWindow::textColourId));
+    textLayout.draw(g, textBounds.toFloat());
 }

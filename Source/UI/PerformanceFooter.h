@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
+#include "AudioPeakMeter.h"
 
 class AudioEngine;
 
@@ -25,6 +26,7 @@ private:
     juce::Label cpuLabel;
     juce::Label deviceLabel;
     juce::Label overloadLabel;
+    AudioPeakMeter masterMeter;
     double cpuLoad = 0.0;
     juce::ProgressBar cpuMeter { cpuLoad };
 };

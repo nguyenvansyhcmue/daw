@@ -2,6 +2,24 @@ cmake_minimum_required(VERSION 3.22)
 
 project(StudioForgeDAW VERSION 1.0.0 LANGUAGES CXX)
 option(STUDIOFORGE_PERF_BENCHMARK "Enable deterministic host audio benchmark" OFF)
+set(STUDIOFORGE_ASIO_SDK_DIR "" CACHE PATH "Path to a licensed Steinberg ASIO SDK root")
+
+find_file(STUDIOFORGE_ASIO_HEADER
+    NAMES iasiodrv.h
+    PATHS "${STUDIOFORGE_ASIO_SDK_DIR}"
+    PATH_SUFFIXES common
+)
+
+set(STUDIOFORGE_ENABLE_ASIO 0)
+if (STUDIOFORGE_ASIO_HEADER)
+    get_filename_component(STUDIOFORGE_ASIO_INCLUDE_DIR
+        "${STUDIOFORGE_ASIO_HEADER}" DIRECTORY
+    )
+    set(STUDIOFORGE_ENABLE_ASIO 1)
+    message(STATUS "StudioForge: ASIO enabled using ${STUDIOFORGE_ASIO_INCLUDE_DIR}")
+else()
+    message(STATUS "StudioForge: ASIO disabled (set STUDIOFORGE_ASIO_SDK_DIR to enable it)")
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -57,6 +75,7 @@ target_sources(StudioForgeDAW PRIVATE
     Source/UI/ProjectSettingsPanel.cpp
     Source/UI/PluginBrowserPanel.cpp
     Source/UI/Theme/StudioForgeLookAndFeel.cpp
+    Source/UI/TransportLCD.cpp
     Source/UI/ControlBar.cpp
     Source/UI/ArrangeWindow.cpp
     Source/UI/MixerPane.cpp
@@ -65,8 +84,11 @@ target_sources(StudioForgeDAW PRIVATE
     Source/UI/InspectorPane.cpp
     Source/UI/InspectorComponents.cpp
     Source/UI/AudioPeakMeter.cpp
+    Source/UI/AudioDeviceErrorLocalizer.cpp
+    Source/UI/StudioForgeDialog.cpp
     Source/UI/AssetBrowserPane.cpp
     Source/UI/PerformanceFooter.cpp
+    Source/UI/PerformanceRoomIconLibrary.cpp
     Source/UI/StartupWorkflowPane.cpp
     Source/UI/VocalistRackComponent.cpp
 )
@@ -74,6 +96,10 @@ target_sources(StudioForgeDAW PRIVATE
 target_include_directories(StudioForgeDAW PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Source
 )
+
+if (STUDIOFORGE_ENABLE_ASIO)
+    target_include_directories(StudioForgeDAW PRIVATE ${STUDIOFORGE_ASIO_INCLUDE_DIR})
+endif()
 
 target_link_libraries(StudioForgeDAW PRIVATE
     juce::juce_audio_basics
@@ -95,12 +121,14 @@ target_compile_definitions(StudioForgeDAW PRIVATE
     JUCE_DISPLAY_SPLASH_SCREEN=0
     JUCE_PROJUCER_INCLUDE_JUCE_HEADER=0
     JUCE_PLUGINHOST_VST3=1
+    JUCE_ASIO=${STUDIOFORGE_ENABLE_ASIO}
 )
 
 if (MSVC)
     target_compile_options(StudioForgeDAW PRIVATE
         /Oi
         /FS
+        /utf-8
         $<$<CONFIG:Release>:/O2>
     )
 endif()

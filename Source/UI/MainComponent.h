@@ -55,6 +55,7 @@ public:
     void setRecentProjects(juce::StringArray paths) { startupWorkflow.setRecentProjects(std::move(paths)); }
     std::function<void()> onOpenProjectRequested;
     std::function<void(const juce::File&)> onOpenRecentProjectRequested;
+    std::function<void()> onAudioDeviceSettingsRequested;
 
     TrackDataModel& getTrackDataModel() noexcept { return trackDataModel; }
     AudioEngine& getAudioEngine() noexcept { return audioEngine; }
@@ -63,6 +64,8 @@ private:
     void selectTrack(int trackIndex);
     int getSelectedTrackIndex() const noexcept;
     void configureTrackCreationDialog();
+    void selectAudioInputChannel(int oneBasedChannel);
+    void selectAudioOutputChannel(int oneBasedChannel);
     void toggleRecording();
     void startRecordingNow(int trackIndex, const juce::File& destination,
                            double timelineStartSample = -1.0);
@@ -74,7 +77,7 @@ private:
     AudioEngine audioEngine { &trackDataModel };
     PluginHostService pluginHost;
     ControlBar controlBar { &trackDataModel, &audioEngine };
-    ArrangeWindow arrangeWindow { &trackDataModel };
+    ArrangeWindow arrangeWindow { &trackDataModel, &audioEngine };
     InspectorPane inspectorPane { trackDataModel, audioEngine, pluginHost };
     AssetBrowserPane assetBrowser;
     PerformanceFooter performanceFooter { &audioEngine };

@@ -141,7 +141,8 @@ double TrackDataModel::sampleToXPosition(double samplePos, double pixelsPerSecon
 double TrackDataModel::getSnappedSamplePosition(double rawSamplePos, double snapResolution) const noexcept
 {
     const auto samplesPerBeat = (getSampleRate() * 60.0) / std::max(1.0, getBpm());
-    const auto interval = std::max(1.0, samplesPerBeat * std::max(0.0625, snapResolution * 4.0));
+    // snapResolution is measured in beats: 0.25 means one quarter beat.
+    const auto interval = std::max(1.0, samplesPerBeat * std::max(1.0 / 960.0, snapResolution));
     return std::max(0.0, std::round(rawSamplePos / interval) * interval);
 }
 
@@ -849,7 +850,7 @@ const TrackDataModel::FxRackSnapshot* TrackDataModel::getFxRackSnapshot(size_t t
 TrackDataModel::EditTool TrackDataModel::getActiveTool() const noexcept { return activeTool.load(); }
 void TrackDataModel::setActiveTool(EditTool tool) noexcept { activeTool.store(tool); sendChangeMessage(); }
 float TrackDataModel::getHorizontalZoom() const noexcept { return horizontalZoom.load(); }
-void TrackDataModel::setHorizontalZoom(float zoom) noexcept { horizontalZoom.store(std::clamp(zoom, 0.5f, 5.0f)); sendChangeMessage(); }
+void TrackDataModel::setHorizontalZoom(float zoom) noexcept { horizontalZoom.store(std::clamp(zoom, 0.5f, 4096.0f)); sendChangeMessage(); }
 int TrackDataModel::getTrackHeight() const noexcept { return trackHeight.load(); }
 void TrackDataModel::setTrackHeight(int height) noexcept { trackHeight.store(std::clamp(height, 36, 96)); sendChangeMessage(); }
 bool TrackDataModel::isCycleActive() const noexcept { return cycleActive.load(); }

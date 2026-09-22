@@ -1,6 +1,7 @@
 #include "DeviceSettingsPanel.h"
 
 #include "../AudioEngine/AudioEngine.h"
+#include "AudioDeviceErrorLocalizer.h"
 
 DeviceSettingsPanel::DeviceSettingsPanel(AudioEngine& engine)
     : audioEngine(engine),
@@ -10,8 +11,13 @@ DeviceSettingsPanel::DeviceSettingsPanel(AudioEngine& engine)
     summary.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.75f));
     addAndMakeVisible(summary);
     addAndMakeVisible(selector);
-    startTimerHz(5);
+    startTimerHz(4);
     timerCallback();
+}
+
+DeviceSettingsPanel::~DeviceSettingsPanel()
+{
+    audioEngine.saveAudioDeviceState();
 }
 
 void DeviceSettingsPanel::resized()
@@ -23,10 +29,22 @@ void DeviceSettingsPanel::resized()
 
 void DeviceSettingsPanel::timerCallback()
 {
+    localizeAudioDeviceErrors();
+
     const auto diagnostics = audioEngine.getRealtimeDiagnostics();
-    summary.setText("Active: " + juce::String(juce::roundToInt(diagnostics.sampleRate)) + " Hz, "
-                        + juce::String(diagnostics.bufferSize) + " samples, "
-                        + "input latency " + juce::String(diagnostics.inputLatencySamples) + " samples, "
-                        + "output latency " + juce::String(diagnostics.outputLatencySamples) + " samples",
-                    juce::dontSendNotification);
+    const auto currentSummary = "Active: " + juce::String(juce::roundToInt(diagnostics.sampleRate)) + " Hz, "
+                              + juce::String(diagnostics.bufferSize) + " samples, "
+                              + "input latency " + juce::String(diagnostics.inputLatencySamples) + " samples, "
+                              + "output latency " + juce::String(diagnostics.outputLatencySamples) + " samples";
+
+    if (currentSummary != lastSummary)
+    {
+        lastSummary = currentSummary;
+        summary.setText(lastSummary, juce::dontSendNotification);
+    }
+}
+
+void DeviceSettingsPanel::localizeAudioDeviceErrors()
+{
+    AudioDeviceErrorLocalizer::localizePendingOpenDeviceFailure();
 }

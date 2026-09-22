@@ -6,6 +6,14 @@
 
 namespace
 {
+juce::File getAudioDeviceStateFile()
+{
+    auto settingsFolder = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                              .getChildFile("StudioForge");
+    settingsFolder.createDirectory();
+    return settingsFolder.getChildFile("audio-device.xml");
+}
+
 float peakForChannel(const juce::AudioBuffer<float>& buffer, int channel, int numSamples) noexcept
 {
     if (channel >= buffer.getNumChannels()) return 0.0f;
@@ -42,7 +50,9 @@ AudioEngine::~AudioEngine()
 
 void AudioEngine::initialise()
 {
-    deviceManager.initialiseWithDefaultDevices(2, 2);
+    const auto stateFile = getAudioDeviceStateFile();
+    const auto savedState = stateFile.existsAsFile() ? juce::parseXML(stateFile) : nullptr;
+    deviceManager.initialise(2, 2, savedState.get(), true);
     deviceManager.addAudioCallback(this);
     deviceManager.addMidiInputDeviceCallback({}, this);
     setMasterGain(1.0f);
@@ -72,6 +82,13 @@ void AudioEngine::setTempo(double newTempo) noexcept
 {
     if (dataModel != nullptr)
         dataModel->setBpm(newTempo);
+}
+
+void AudioEngine::saveAudioDeviceState() const
+{
+    const auto state = deviceManager.createStateXml();
+    if (state != nullptr)
+        state->writeTo(getAudioDeviceStateFile());
 }
 
 bool AudioEngine::addVocalist(int inputChannel, uint32_t& createdId)

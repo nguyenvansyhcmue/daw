@@ -11,7 +11,6 @@
 #include "PianoRoll.h"
 #include "InspectorPane.h"
 #include "AssetBrowserPane.h"
-#include "PerformanceFooter.h"
 #include "StartupWorkflowPane.h"
 #include "Theme/StudioForgeLookAndFeel.h"
 #include "../Plugins/PluginHostService.h"
@@ -39,6 +38,7 @@ public:
     void markProjectRecovered() noexcept;
     bool undoEdit();
     bool redoEdit();
+    void requestRecordToggle();
     void setInspectorPanelVisible(bool visible);
     void setBrowserPanelVisible(bool visible);
     void setMixerPanelVisible(bool visible);
@@ -80,7 +80,6 @@ private:
     ArrangeWindow arrangeWindow { &trackDataModel, &audioEngine };
     InspectorPane inspectorPane { trackDataModel, audioEngine, pluginHost };
     AssetBrowserPane assetBrowser;
-    PerformanceFooter performanceFooter { &audioEngine };
     MixerPane mixerPane { &trackDataModel, &audioEngine, &pluginHost };
     PianoRoll pianoRoll { &trackDataModel };
     StartupWorkflowPane startupWorkflow;

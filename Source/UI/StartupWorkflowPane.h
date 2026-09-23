@@ -31,9 +31,15 @@ public:
 
     void paint(juce::Graphics&) override;
     void resized() override;
+    void mouseDown(const juce::MouseEvent&) override;
+    bool keyPressed(const juce::KeyPress&) override;
 
 private:
+    enum class ProjectPage { newProject, history };
+
     void timerCallback() override;
+    void dismissToWorkspace();
+    void showProjectPage(ProjectPage page);
     void showPerformancePreset(PerformancePreset preset);
     void synchronisePerformanceControls();
     void beginFadeIn();
@@ -41,6 +47,7 @@ private:
 
     Step step = Step::chooseProject;
     bool returnToWorkspaceOnCancel = false;
+    ProjectPage projectPage = ProjectPage::newProject;
     int audioInputChannels = 0;
     int audioOutputChannels = 0;
     int splashFramesRemaining = 27;
@@ -48,9 +55,11 @@ private:
     PerformanceRoomModel performanceRoom;
 
     juce::Label title;
-    juce::TextButton newProject { "New Project" };
+    juce::TextButton newProjectNavigation { "New Project" };
+    juce::TextButton historyNavigation { "History" };
+    juce::TextButton newProjectCard;
     juce::TextButton openProject { "Open an existing project..." };
-    std::array<juce::TextButton, 5> recentProjectButtons;
+    std::array<juce::TextButton, 6> recentProjectButtons;
     juce::StringArray recentProjects;
 
     std::array<juce::TextButton, 4> performancePresets {

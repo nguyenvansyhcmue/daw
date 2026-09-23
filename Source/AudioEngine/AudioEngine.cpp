@@ -133,7 +133,9 @@ bool AudioEngine::getVocalistConfig(size_t index, VocalistConfig& config) const 
 
 float AudioEngine::getVocalistPeak(size_t index) const noexcept
 {
-    return index < vocalistPeaks.size() ? vocalistPeaks[index].load(std::memory_order_relaxed) : 0.0f;
+    if (! isPlaying() || index >= vocalistPeaks.size())
+        return 0.0f;
+    return vocalistPeaks[index].load(std::memory_order_relaxed);
 }
 
 bool AudioEngine::setVocalistSend(size_t index, float level)
@@ -429,27 +431,31 @@ juce::AudioDeviceManager& AudioEngine::getAudioDeviceManager() noexcept
 
 float AudioEngine::getTrackPeak(size_t trackIndex) const noexcept
 {
-    return trackIndex < trackPeaks.size() ? trackPeaks[trackIndex].load(std::memory_order_relaxed) : 0.0f;
+    if (! isPlaying() || trackIndex >= trackPeaks.size())
+        return 0.0f;
+    return trackPeaks[trackIndex].load(std::memory_order_relaxed);
 }
 
 float AudioEngine::getBusPeak(size_t busIndex) const noexcept
 {
-    return busIndex < busPeaks.size() ? busPeaks[busIndex].load(std::memory_order_relaxed) : 0.0f;
+    if (! isPlaying() || busIndex >= busPeaks.size())
+        return 0.0f;
+    return busPeaks[busIndex].load(std::memory_order_relaxed);
 }
 
 float AudioEngine::getMasterPeak() const noexcept
 {
-    return masterPeak.load(std::memory_order_relaxed);
+    return isPlaying() ? masterPeak.load(std::memory_order_relaxed) : 0.0f;
 }
 
 float AudioEngine::getMasterLeftPeak() const noexcept
 {
-    return masterLeftPeak.load(std::memory_order_relaxed);
+    return isPlaying() ? masterLeftPeak.load(std::memory_order_relaxed) : 0.0f;
 }
 
 float AudioEngine::getMasterRightPeak() const noexcept
 {
-    return masterRightPeak.load(std::memory_order_relaxed);
+    return isPlaying() ? masterRightPeak.load(std::memory_order_relaxed) : 0.0f;
 }
 
 AudioEngine::RealtimeDiagnostics AudioEngine::getRealtimeDiagnostics() const noexcept
@@ -784,7 +790,7 @@ void AudioEngine::processTrackAudio(const TrackDataModel::RenderStructureSnapsho
         };
         for (size_t route = 0; route < TrackDataModel::maxSendsPerTrack; ++route)
             if (track.sends[route].targetBus.isValid() && track.sends[route].preFader)
-                addTrackToBus(track, trackBuffer, structure, route, sendLevel(route), numSamples);
+                addTrackToBus(track, trackIndex, trackBuffer, structure, route, sendLevel(route), numSamples);
 
         const auto volume = track.volumeAutomation.mode == AutomationMode::read && track.volumeAutomation.pointCount > 0
             ? track.volumeAutomation.evaluate(automationSample) : track.volume;
@@ -799,7 +805,7 @@ void AudioEngine::processTrackAudio(const TrackDataModel::RenderStructureSnapsho
             juce::FloatVectorOperations::add(destination.getWritePointer(channel), trackBuffer.getReadPointer(channel), numSamples);
         for (size_t route = 0; route < TrackDataModel::maxSendsPerTrack; ++route)
             if (track.sends[route].targetBus.isValid() && ! track.sends[route].preFader)
-                addTrackToBus(track, trackBuffer, structure, route, sendLevel(route), numSamples);
+                addTrackToBus(track, trackIndex, trackBuffer, structure, route, sendLevel(route), numSamples);
     }
 }
 
@@ -823,16 +829,19 @@ void AudioEngine::processBusReturns(const TrackDataModel::RenderStructureSnapsho
 }
 
 void AudioEngine::addTrackToBus(const TrackDataModel::RenderTrack& track,
+                                size_t trackIndex,
                                 const juce::AudioBuffer<float>& source,
                                 const TrackDataModel::RenderStructureSnapshot* structure,
                                 size_t route, float level, int numSamples) noexcept
 {
-    if (level <= 0.0f) return;
     const auto busIndex = structure->getBusIndex(track.sends[route].targetBus);
     if (busIndex < 0) return;
     auto& destination = busBuffers[static_cast<size_t>(busIndex)];
+    const auto targetGain = juce::jlimit(0.0f, TrackDataModel::maximumSendGain, level);
+    auto& previousGain = smoothedSendGains[trackIndex][route];
     for (int channel = 0; channel < juce::jmin(source.getNumChannels(), destination.getNumChannels()); ++channel)
-        juce::FloatVectorOperations::addWithMultiply(destination.getWritePointer(channel), source.getReadPointer(channel), level, numSamples);
+        destination.addFromWithRamp(channel, 0, source.getReadPointer(channel), numSamples, previousGain, targetGain);
+    previousGain = targetGain;
 }
 
 void AudioEngine::processTrackMidiEffects(const TrackDataModel::RenderStructureSnapshot* structure) noexcept

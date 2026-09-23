@@ -11,7 +11,8 @@
 
 class MainWindow final : public juce::DocumentWindow,
                          public juce::MenuBarModel,
-                         private juce::OpenGLRenderer
+                         private juce::OpenGLRenderer,
+                         private juce::Timer
 {
 public:
     explicit MainWindow(const juce::String& name);
@@ -19,6 +20,7 @@ public:
 
     void closeButtonPressed() override;
     bool keyPressed(const juce::KeyPress& key) override;
+    void resized() override;
     juce::StringArray getMenuBarNames() override;
     juce::PopupMenu getMenuForIndex(int topLevelMenuIndex, const juce::String& menuName) override;
     void menuItemSelected(int menuItemID, int topLevelMenuIndex) override;
@@ -28,6 +30,9 @@ public:
     void openGLContextClosing() override {}
 
 private:
+    class WindowControls;
+
+    void timerCallback() override;
     enum MenuItem
     {
         newProject = 1,
@@ -89,4 +94,6 @@ private:
     ProjectTemplateStore projectTemplates;
     ProjectAlternativeStore projectAlternatives;
     std::unique_ptr<AutosaveService> autosaveService;
+    std::unique_ptr<WindowControls> windowControls;
+    float menuBarAlpha = 1.0f;
 };

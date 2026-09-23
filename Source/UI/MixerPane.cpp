@@ -241,6 +241,7 @@ void MixerPane::showPluginBrowser(int trackIndex, size_t slot)
     options.content.setOwned(panel);
     options.dialogTitle = "Plug-in Browser";
     options.dialogBackgroundColour = juce::Colour(0xff25282d);
+    options.escapeKeyTriggersCloseButton = true;
     options.useNativeTitleBar = true;
     options.resizable = true;
     options.componentToCentreAround = this;

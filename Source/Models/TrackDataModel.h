@@ -4,6 +4,7 @@
 #include <juce_events/juce_events.h>
 
 #include "AudioClipState.h"
+#include "../Core/AudioGainRange.h"
 #include "../Core/Automation/AutomationRenderSnapshot.h"
 #include "../Media/AudioMediaPool.h"
 #include "../AudioEngine/AudioEffectProcessor.h"
@@ -22,13 +23,23 @@ public:
     // device starts while allowing the full Logic-style visible track list.
     static constexpr size_t maxTracks = 14;
     static constexpr size_t maxBuses = 8;
-    static constexpr size_t maxFxSlots = 4;
+    // Eight inserts cover a complete live vocal chain while preserving fixed,
+    // preallocated realtime snapshots.
+    static constexpr size_t maxFxSlots = 8;
+    static constexpr size_t maxFxScenes = 4;
     static constexpr size_t maxSendsPerTrack = 8;
+    static constexpr float maximumSendGain = AudioGainRange::maximumSendGain;
     enum class EditTool { Pointer, Scissors, Eraser };
 
     struct FxRackSnapshot
     {
         std::array<std::shared_ptr<AudioEffectProcessor>, maxFxSlots> processors;
+        std::array<bool, maxFxSlots> bypass {};
+    };
+
+    struct FxScene
+    {
+        juce::String name;
         std::array<bool, maxFxSlots> bypass {};
     };
 
@@ -60,6 +71,7 @@ public:
         std::atomic<bool> inputMonitoring { false };
         std::atomic<int> inputChannel { 0 };
         juce::String name;
+        std::vector<FxScene> fxScenes;
         std::vector<AudioClipState> clips;
         BusId outputBus;
         std::array<SendRoute, maxSendsPerTrack> sends {};
@@ -82,7 +94,7 @@ public:
               solo(other.solo.load()),
               soloSafe(other.soloSafe.load()),
               armed(other.armed.load()), inputMonitoring(other.inputMonitoring.load()),
-              inputChannel(other.inputChannel.load()), name(other.name),
+              inputChannel(other.inputChannel.load()), name(other.name), fxScenes(other.fxScenes),
               clips(other.clips), outputBus(other.outputBus), sends(other.sends), activeSendCount(other.activeSendCount),
               volumeAutomation(other.volumeAutomation), panAutomation(other.panAutomation), sendAutomation(other.sendAutomation)
         {
@@ -100,6 +112,7 @@ public:
             inputMonitoring.store(other.inputMonitoring.load());
             inputChannel.store(other.inputChannel.load());
             name = other.name;
+            fxScenes = other.fxScenes;
             clips = other.clips;
             outputBus = other.outputBus; sends = other.sends; activeSendCount = other.activeSendCount;
             volumeAutomation = other.volumeAutomation; panAutomation = other.panAutomation; sendAutomation = other.sendAutomation;
@@ -255,6 +268,9 @@ public:
     void setFxProcessor(size_t trackIndex, size_t slot,
                         std::shared_ptr<AudioEffectProcessor> processor);
     void setFxBypassed(size_t trackIndex, size_t slot, bool bypassed) noexcept;
+    const std::vector<FxScene>& getFxScenes(size_t trackIndex) const noexcept;
+    bool captureFxScene(size_t trackIndex, const juce::String& name);
+    bool recallFxScene(size_t trackIndex, size_t sceneIndex) noexcept;
     EditTool getActiveTool() const noexcept;
     void setActiveTool(EditTool tool) noexcept;
     float getHorizontalZoom() const noexcept;
@@ -369,7 +385,7 @@ private:
     std::atomic<float> horizontalZoom { 1.0f };
     // A new project should open in a usable audio-editing height.  Compact
     // track sizes remain available through the timeline height control.
-    std::atomic<int> trackHeight { 64 };
+    std::atomic<int> trackHeight { 72 };
     std::atomic<bool> cycleActive { false };
     std::atomic<double> cycleStartSample { 0.0 };
     std::atomic<double> cycleEndSample { 0.0 };

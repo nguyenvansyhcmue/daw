@@ -152,6 +152,7 @@ private:
     void processMasterOutput(float* const* outputChannelData, int numOutputChannels,
                              int numSamples, bool isPlaying, double blockStartSample) noexcept;
     void addTrackToBus(const TrackDataModel::RenderTrack& track,
+                       size_t trackIndex,
                        const juce::AudioBuffer<float>& source,
                        const TrackDataModel::RenderStructureSnapshot* structure,
                        size_t route, float level, int numSamples) noexcept;
@@ -179,6 +180,7 @@ private:
     std::vector<std::unique_ptr<const TrackDataModel::FxRackSnapshot>> retiredMasterFxRacks;
     std::array<juce::AudioBuffer<float>, TrackDataModel::maxTracks> trackBuffers;
     std::array<juce::AudioBuffer<float>, TrackDataModel::maxBuses> busBuffers;
+    std::array<std::array<float, TrackDataModel::maxSendsPerTrack>, TrackDataModel::maxTracks> smoothedSendGains {};
     VocalistRack vocalistRack;
     AuxRouting auxRouting;
     uint32_t sharedAuxId = 0;

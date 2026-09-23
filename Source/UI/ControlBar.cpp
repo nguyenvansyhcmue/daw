@@ -1,4 +1,5 @@
 #include "ControlBar.h"
+#include "BinaryData.h"
 #include "../AudioEngine/AudioEngine.h"
 #include "../Models/TrackDataModel.h"
 #include "Theme/StudioForgeLookAndFeel.h"
@@ -8,6 +9,50 @@ namespace
 const auto darkPanel = juce::Colour(0xff353535);
 const auto accentBlue = juce::Colour(0xff6f88a8);
 const auto accentCyan = juce::Colour(0xffa7c5df);
+constexpr float logoForegroundBrightness = 0.12f;
+constexpr float logoAlphaScale = 3188.0f;
+constexpr float idleLogoBrightnessBoost = 0.28f;
+constexpr float illuminatedLogoBrightnessBoost = 0.72f;
+
+juce::Rectangle<int> findVisibleLogoBounds(const juce::Image& source)
+{
+    juce::Rectangle<int> visibleBounds;
+    for (int y = 0; y < source.getHeight(); ++y)
+        for (int x = 0; x < source.getWidth(); ++x)
+            if (source.getPixelAt(x, y).getBrightness() > logoForegroundBrightness)
+                visibleBounds = visibleBounds.getUnion({ x, y, 1, 1 });
+
+    return visibleBounds;
+}
+
+juce::Image createTransparentLogo(const juce::Image& source, float brightnessBoost)
+{
+    const auto visibleBounds = findVisibleLogoBounds(source);
+    if (visibleBounds.isEmpty())
+        return {};
+
+    const auto croppedSource = source.getClippedImage(visibleBounds.expanded(4).getIntersection(source.getBounds()));
+    juce::Image transparentLogo(juce::Image::ARGB, croppedSource.getWidth(), croppedSource.getHeight(), true);
+    for (int y = 0; y < croppedSource.getHeight(); ++y)
+        for (int x = 0; x < croppedSource.getWidth(); ++x)
+        {
+            const auto colour = croppedSource.getPixelAt(x, y);
+            if (colour.getBrightness() <= logoForegroundBrightness)
+                continue;
+
+            const auto alpha = juce::jlimit(0, 255,
+                juce::roundToInt((colour.getBrightness() - logoForegroundBrightness) * logoAlphaScale));
+            transparentLogo.setPixelAt(x, y, colour.brighter(brightnessBoost)
+                                                  .withAlpha(static_cast<uint8_t>(alpha)));
+        }
+    return transparentLogo;
+}
+
+juce::Image loadBrandLogoSource()
+{
+    return juce::ImageFileFormat::loadFrom(BinaryData::LiveDawLogo_png,
+                                            BinaryData::LiveDawLogo_pngSize);
+}
 }
 
 TransportIconButton::TransportIconButton(Icon requestedIcon)
@@ -22,19 +67,23 @@ void TransportIconButton::paintButton(juce::Graphics& graphics, bool highlighted
     const auto active = getToggleState();
     auto background = isColourSpecified(juce::TextButton::buttonColourId)
         ? findColour(juce::TextButton::buttonColourId)
-        : juce::Colour(0xff30363a);
+        : juce::Colour(0xff243139);
 
     if (icon == Icon::record && active)
-        background = juce::Colour(0xffb94141);
+        background = juce::Colour(0xffb64d56);
+    else if (icon == Icon::play && active)
+        background = juce::Colour(0xff258c9d);
     else if (active)
-        background = juce::Colour(0xff447eae);
+        background = juce::Colour(0xff366d7d);
     else if (down)
-        background = background.brighter(0.22f);
+        background = background.brighter(0.16f);
     else if (highlighted)
-        background = background.brighter(0.12f);
+        background = background.brighter(0.08f);
 
     graphics.setColour(background);
-    graphics.fillRoundedRectangle(bounds, 4.0f);
+    graphics.fillRoundedRectangle(bounds, 5.0f);
+    graphics.setColour(juce::Colours::white.withAlpha(active ? 0.16f : 0.06f));
+    graphics.drawRoundedRectangle(bounds, 5.0f, 1.0f);
     graphics.setColour(juce::Colours::white.withAlpha(highlighted || active ? 0.96f : 0.78f));
 
     const auto iconBounds = bounds.reduced(7.0f);
@@ -101,6 +150,10 @@ void TransportIconButton::paintButton(juce::Graphics& graphics, bool highlighted
 ControlBar::ControlBar(TrackDataModel* model, AudioEngine* engine)
     : transportLCD(model), trackModel(model), audioEngine(engine)
 {
+    const auto logoSource = loadBrandLogoSource();
+    brandLogo = createTransparentLogo(logoSource, idleLogoBrightnessBoost);
+    illuminatedBrandLogo = createTransparentLogo(logoSource, illuminatedLogoBrightnessBoost);
+
     addAndMakeVisible(playButton);
     addAndMakeVisible(stopButton);
     addAndMakeVisible(recordButton);
@@ -208,9 +261,8 @@ ControlBar::ControlBar(TrackDataModel* model, AudioEngine* engine)
             audioEngine->setMetronomeEnabled(metronomeButton.getToggleState());
     };
 
-    playButton.setColour(juce::TextButton::buttonColourId, accentCyan.withAlpha(0.16f));
-    stopButton.setColour(juce::TextButton::buttonColourId, juce::Colours::white.withAlpha(0.08f));
-    recordButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xffdc4d4d).withAlpha(0.15f));
+    for (auto* button : { &goToBeginningButton, &rewindButton, &playButton, &stopButton, &forwardButton, &recordButton })
+        button->setColour(juce::TextButton::buttonColourId, juce::Colour(0xff243139));
     punchButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xffde9b42).withAlpha(0.18f));
     inspectorButton.setColour(juce::TextButton::buttonColourId, darkPanel);
     mixerButton.setColour(juce::TextButton::buttonColourId, darkPanel);
@@ -235,6 +287,14 @@ ControlBar::ControlBar(TrackDataModel* model, AudioEngine* engine)
     bpmLabel.setFont(juce::Font(16.0f, juce::Font::bold));
     bpmLabel.setColour(juce::Label::textColourId, juce::Colours::white);
     addAndMakeVisible(bpmLabel);
+
+    transportTimeLabel.setJustificationType(juce::Justification::centred);
+    transportTimeLabel.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 13.0f, juce::Font::bold)));
+    transportTimeLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xff10171b));
+    transportTimeLabel.setColour(juce::Label::textColourId, StudioForgeTheme::lcdCyan.withAlpha(0.92f));
+    transportTimeLabel.setColour(juce::Label::outlineColourId, juce::Colour(0xff26343a));
+    transportTimeLabel.setOpaque(true);
+    addAndMakeVisible(transportTimeLabel);
     startTimerHz(30);
 }
 
@@ -354,14 +414,43 @@ void ControlBar::setRecordCountdown(bool active) noexcept
 
 void ControlBar::timerCallback()
 {
-    if (trackModel == nullptr)
-        return;
+    const auto isPerforming = audioEngine != nullptr
+        && (audioEngine->isPlaying() || audioEngine->isRecording() || audioEngine->isMidiRecording());
+    updateLogoPlaybackGlow(isPerforming);
 
     if (audioEngine != nullptr)
         masterMeter.updateStereoPeak(audioEngine->getMasterLeftPeak(), audioEngine->getMasterRightPeak());
+    playButton.setToggleState(audioEngine != nullptr && audioEngine->isPlaying(), juce::dontSendNotification);
+
+    if (trackModel == nullptr)
+        return;
+
+    const auto sampleRate = trackModel->getSampleRate();
+    const auto totalCentiseconds = sampleRate > 0.0
+        ? static_cast<long long>(trackModel->getPlayheadPosition() * 100.0 / sampleRate + 0.5)
+        : 0LL;
+    const auto totalSeconds = totalCentiseconds / 100;
+    transportTimeLabel.setText(juce::String::formatted("%02d:%02d:%02d.%02d",
+                                  static_cast<int>(totalSeconds / 3600),
+                                  static_cast<int>((totalSeconds / 60) % 60),
+                                  static_cast<int>(totalSeconds % 60),
+                                  static_cast<int>(totalCentiseconds % 100)),
+                               juce::dontSendNotification);
     punchButton.setToggleState(trackModel->isPunchActive(), juce::dontSendNotification);
     cycleButton.setToggleState(trackModel->isCycleActive(), juce::dontSendNotification);
     metronomeButton.setToggleState(audioEngine != nullptr && audioEngine->isMetronomeEnabled(), juce::dontSendNotification);
+}
+
+void ControlBar::updateLogoPlaybackGlow(bool shouldGlow) noexcept
+{
+    constexpr float glowStep = 0.10f;
+    const auto targetGlow = shouldGlow ? 1.0f : 0.0f;
+    const auto nextGlow = logoPlaybackGlow + (targetGlow - logoPlaybackGlow) * glowStep;
+    if (std::abs(nextGlow - logoPlaybackGlow) < 0.002f)
+        return;
+
+    logoPlaybackGlow = nextGlow;
+    repaint(20, 5, 204, 54);
 }
 
 void ControlBar::paint(juce::Graphics& g)
@@ -372,11 +461,34 @@ void ControlBar::paint(juce::Graphics& g)
     g.setColour(juce::Colours::white.withAlpha(0.08f));
     g.drawLine(area.getX(), area.getBottom() - 1.0f, area.getRight(), area.getBottom() - 1.0f, 1.0f);
 
-    auto topBar = area.reduced(0.0f, 0.0f);
-    auto glow = juce::ColourGradient(StudioForgeTheme::accentBlue, 0.0f, 0.0f,
-                                     StudioForgeTheme::lcdCyan.withAlpha(0.72f), topBar.getWidth(), 0.0f, false);
-    g.setGradientFill(glow);
-    g.fillRect(topBar.getX(), topBar.getY(), topBar.getWidth(), 2.0f);
+    if (brandLogo.isValid())
+    {
+        constexpr float idleLogoOpacity = 0.32f;
+        constexpr float activeLogoOpacity = 0.92f;
+        g.setImageResamplingQuality(juce::Graphics::highResamplingQuality);
+        const auto logoBounds = juce::Rectangle<float>(20.0f, 5.0f, 204.0f, 54.0f);
+        juce::Graphics::ScopedSaveState logoState(g);
+        g.setOpacity(idleLogoOpacity);
+        g.drawImageWithin(brandLogo, logoBounds.getX(), logoBounds.getY(), logoBounds.getWidth(), logoBounds.getHeight(),
+                          juce::RectanglePlacement::centred | juce::RectanglePlacement::onlyReduceInSize);
+        if (logoPlaybackGlow > 0.001f)
+        {
+            g.setOpacity(activeLogoOpacity * logoPlaybackGlow);
+            g.drawImageWithin(illuminatedBrandLogo, logoBounds.getX(), logoBounds.getY(), logoBounds.getWidth(), logoBounds.getHeight(),
+                              juce::RectanglePlacement::centred | juce::RectanglePlacement::onlyReduceInSize);
+        }
+    }
+
+    auto transportBounds = goToBeginningButton.getBounds();
+    for (auto* button : { &rewindButton, &playButton, &stopButton, &forwardButton, &recordButton })
+        transportBounds = transportBounds.getUnion(button->getBounds());
+    // The transport shell deliberately encloses only the button row. Keeping
+    // the time readout outside it prevents two outlines from visually merging
+    // with the ControlBar divider on compact-height layouts.
+    g.setColour(juce::Colour(0xff111b21));
+    g.fillRoundedRectangle(transportBounds.expanded(5, 4).toFloat(), 7.0f);
+    g.setColour(juce::Colour(0xff26343a));
+    g.drawRoundedRectangle(transportBounds.expanded(5, 4).toFloat(), 7.0f, 1.0f);
 }
 
 void ControlBar::resized()
@@ -385,20 +497,20 @@ void ControlBar::resized()
     const auto buttonWidth = 30;
     const auto buttonHeight = 32;
 
-    inspectorButton.setBounds(bounds.getX(), bounds.getY(), 30, buttonHeight);
-    mixerButton.setBounds(bounds.getX() + 34, bounds.getY(), 30, buttonHeight);
-    pianoRollButton.setBounds(bounds.getX() + 68, bounds.getY(), 30, buttonHeight);
-    browserButton.setBounds(bounds.getX() + 102, bounds.getY(), 30, buttonHeight);
-    addTrackButton.setBounds(bounds.getX() + 136, bounds.getY(), 30, buttonHeight);
+    inspectorButton.setVisible(false);
+    mixerButton.setVisible(false);
+    pianoRollButton.setVisible(false);
+    browserButton.setVisible(false);
+    addTrackButton.setVisible(false);
 
-    const auto rightControlsWidth = 374;
+    const auto rightControlsWidth = 0;
     const auto rightX = bounds.getRight() - rightControlsWidth;
-    cycleButton.setBounds(rightX, bounds.getY() + 8, 62, 28);
-    countInButton.setBounds(rightX + 66, bounds.getY() + 8, 60, 28);
-    punchButton.setBounds(rightX + 130, bounds.getY() + 8, 62, 28);
-    metronomeButton.setBounds(rightX + 196, bounds.getY() + 8, 88, 28);
-    bpmSlider.setBounds(rightX + 288, bounds.getY() + 9, 48, 22);
-    bpmLabel.setBounds(rightX + 336, bounds.getY() + 6, 38, 28);
+    cycleButton.setVisible(false);
+    countInButton.setVisible(false);
+    punchButton.setVisible(false);
+    metronomeButton.setVisible(false);
+    bpmSlider.setVisible(false);
+    bpmLabel.setVisible(false);
 
     const auto wideLayout = getWidth() >= 1450;
     const auto lcdWidth = wideLayout ? 276 : 220;
@@ -409,15 +521,18 @@ void ControlBar::resized()
     const auto clusterX = clusterMaxX > clusterMinX
         ? juce::jlimit(clusterMinX, clusterMaxX, bounds.getCentreX() - clusterWidth / 2)
         : clusterMaxX;
-    transportLCD.setBounds(clusterX, bounds.getY(), lcdWidth, 42);
-    const auto transportX = clusterX + lcdWidth + 6;
-    goToBeginningButton.setBounds(transportX, bounds.getY() + 9, 26, 26);
-    rewindButton.setBounds(transportX + 29, bounds.getY() + 9, 26, 26);
-    playButton.setBounds(transportX + 58, bounds.getY() + 4, 34, 34);
-    stopButton.setBounds(transportX + 95, bounds.getY() + 9, 26, 26);
-    forwardButton.setBounds(transportX + 124, bounds.getY() + 9, 26, 26);
-    recordButton.setBounds(transportX + 155, bounds.getY() + 9, 26, 26);
-    masterMeter.setBounds(transportX + 187, bounds.getY() + 5, meterWidth, 34);
+    transportLCD.setBounds(clusterX, bounds.getY(), lcdWidth, 52);
+    const auto transportX = clusterX + lcdWidth + 18;
+    goToBeginningButton.setBounds(transportX, bounds.getY() + 7, 28, 28);
+    rewindButton.setBounds(transportX + 32, bounds.getY() + 7, 28, 28);
+    playButton.setBounds(transportX + 64, bounds.getY() + 6, 30, 30);
+    stopButton.setBounds(transportX + 98, bounds.getY() + 7, 28, 28);
+    forwardButton.setBounds(transportX + 130, bounds.getY() + 7, 28, 28);
+    recordButton.setBounds(transportX + 162, bounds.getY() + 7, 28, 28);
+    // Keep the compact time readout visually separate from the control bar's
+    // bottom edge; its enclosing transport frame still has a calm dark rim.
+    transportTimeLabel.setBounds(transportX + 3, bounds.getY() + 40, 184, 12);
+    masterMeter.setBounds(transportX + 200, bounds.getY() + 5, meterWidth, 34);
     masterMeter.setVisible(wideLayout);
     pointerTool.setBounds(bounds.getX() + 174, bounds.getY(), 68, buttonHeight);
     scissorsTool.setBounds(bounds.getX() + 246, bounds.getY(), 78, buttonHeight);
@@ -425,8 +540,7 @@ void ControlBar::resized()
 
     // The transport has priority on compact windows; tools remain accessible
     // through their shortcuts rather than overlapping its LCD and buttons.
-    const auto showToolStrip = getWidth() >= 1200;
-    pointerTool.setVisible(showToolStrip);
-    scissorsTool.setVisible(showToolStrip);
-    eraserTool.setVisible(showToolStrip);
+    pointerTool.setVisible(false);
+    scissorsTool.setVisible(false);
+    eraserTool.setVisible(false);
 }

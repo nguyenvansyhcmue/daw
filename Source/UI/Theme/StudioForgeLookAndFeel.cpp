@@ -36,7 +36,7 @@ void StudioForgeLookAndFeel::drawButtonBackground(juce::Graphics& g, juce::Butto
 }
 
 void StudioForgeLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, int width, int height,
-                                               float sliderPosition, float startAngle, float endAngle, juce::Slider&)
+                                               float sliderPosition, float startAngle, float endAngle, juce::Slider& slider)
 {
     const auto bounds = juce::Rectangle<float>(static_cast<float>(x), static_cast<float>(y), static_cast<float>(width), static_cast<float>(height));
     const auto radius = juce::jmax(4.0f, juce::jmin(bounds.getWidth(), bounds.getHeight()) * 0.5f - 4.0f);
@@ -53,6 +53,15 @@ void StudioForgeLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, i
     g.setGradientFill(body); g.fillEllipse(centre.x - radius, centre.y - radius, radius * 2.0f, radius * 2.0f);
     g.setColour(juce::Colours::white.withAlpha(0.18f)); g.drawEllipse(centre.x - radius + 0.5f, centre.y - radius + 0.5f, radius * 2.0f - 1.0f, radius * 2.0f - 1.0f, 1.0f);
     g.setColour(juce::Colours::black.withAlpha(0.55f)); g.drawEllipse(centre.x - radius - 0.5f, centre.y - radius - 0.5f, radius * 2.0f + 1.0f, radius * 2.0f + 1.0f, 1.0f);
+    if (slider.isColourSpecified(juce::Slider::rotarySliderFillColourId))
+    {
+        const auto arcRadius = radius + 3.0f;
+        juce::Path progressArc;
+        progressArc.addCentredArc(centre.x, centre.y, arcRadius, arcRadius, 0.0f, startAngle,
+                                  startAngle + (endAngle - startAngle) * sliderPosition, true);
+        g.setColour(slider.findColour(juce::Slider::rotarySliderFillColourId));
+        g.strokePath(progressArc, juce::PathStrokeType(2.0f));
+    }
     const auto notchEnd = juce::Point<float>(centre.x + std::cos(angle) * radius * 0.72f, centre.y + std::sin(angle) * radius * 0.72f);
     g.setColour(StudioForgeTheme::primaryText.withAlpha(0.88f));
     g.drawLine(centre.x, centre.y, notchEnd.x, notchEnd.y, 1.5f);
@@ -98,6 +107,26 @@ void StudioForgeLookAndFeel::drawToggleButton(juce::Graphics& g, juce::ToggleBut
     g.setColour(down ? juce::Colours::black.withAlpha(0.55f) : juce::Colours::white.withAlpha(highlighted ? 0.28f : 0.12f));
     g.drawRoundedRectangle(area.reduced(1.0f), StudioForgeTheme::UIMetrics::cornerRadius, 1.0f);
     g.setColour(juce::Colours::white); g.drawText(button.getButtonText(), area.reduced(4.0f), juce::Justification::centred, true);
+}
+
+void StudioForgeLookAndFeel::drawMenuBarBackground(juce::Graphics&, int, int, bool,
+                                                    juce::MenuBarComponent&)
+{
+}
+
+void StudioForgeLookAndFeel::drawMenuBarItem(juce::Graphics& g, int width, int height, int,
+                                              const juce::String& itemText, bool isMouseOverItem,
+                                              bool isMenuOpen, bool, juce::MenuBarComponent&)
+{
+    const auto bounds = juce::Rectangle<float>(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height));
+    if (isMouseOverItem || isMenuOpen)
+    {
+        g.setColour(juce::Colours::white.withAlpha(0.10f));
+        g.fillRoundedRectangle(bounds.reduced(2.0f, 3.0f), 3.0f);
+    }
+    g.setColour(StudioForgeTheme::primaryText.withAlpha(0.84f));
+    g.setFont(juce::Font(juce::FontOptions(13.0f)));
+    g.drawText(itemText, bounds.reduced(8.0f, 1.0f), juce::Justification::centred, false);
 }
 
 juce::AlertWindow* StudioForgeLookAndFeel::createAlertWindow(const juce::String& title, const juce::String& message,

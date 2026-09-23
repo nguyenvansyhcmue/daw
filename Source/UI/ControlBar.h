@@ -53,12 +53,13 @@ public:
 
 private:
     void timerCallback() override;
+    void updateLogoPlaybackGlow(bool shouldGlow) noexcept;
 
     juce::TextButton inspectorButton { "I" };
     juce::TextButton mixerButton { "X" };
     juce::TextButton pianoRollButton { "P" };
-    juce::TextButton browserButton { "B" };
-    juce::TextButton addTrackButton { "+" };
+    juce::TextButton browserButton { "MEDIA" };
+    juce::TextButton addTrackButton { "+ TRACK" };
     TransportIconButton goToBeginningButton { TransportIconButton::Icon::goToBeginning };
     TransportIconButton rewindButton { TransportIconButton::Icon::rewind };
     TransportIconButton forwardButton { TransportIconButton::Icon::forward };
@@ -71,7 +72,11 @@ private:
     juce::ToggleButton metronomeButton { "Metronome" };
     juce::Slider bpmSlider;
     juce::Label bpmLabel;
+    juce::Image brandLogo;
+    juce::Image illuminatedBrandLogo;
+    float logoPlaybackGlow = 0.0f;
     TransportLCD transportLCD;
+    juce::Label transportTimeLabel;
     AudioPeakMeter masterMeter;
     juce::TextButton pointerTool { "POINTER" };
     juce::TextButton scissorsTool { "SCISSORS" };

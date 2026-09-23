@@ -4,9 +4,6 @@
 
 class TrackDataModel;
 
-// A read-only transport display. The project model remains the owner of
-// tempo, meter and playhead state; this component only samples it on the UI
-// thread and repaints the compact LCD surface.
 class TransportLCD final : public juce::Component, private juce::Timer
 {
 public:

@@ -2,6 +2,18 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
+class AssetFileFilter final : public juce::FileFilter
+{
+public:
+    AssetFileFilter();
+    void setSearchTerm(juce::String searchTerm);
+    bool isFileSuitable(const juce::File& file) const override;
+    bool isDirectorySuitable(const juce::File& directory) const override;
+
+private:
+    juce::String searchTerm;
+};
+
 class AssetBrowserPane final : public juce::Component, private juce::FileBrowserListener
 {
 public:
@@ -14,15 +26,28 @@ public:
     void resized() override;
 
 private:
-    void selectionChanged() override {}
+    void selectionChanged() override { refreshPreviewDetails(); }
     void fileClicked(const juce::File&, const juce::MouseEvent&) override {}
     void fileDoubleClicked(const juce::File& file) override;
     void browserRootChanged(const juce::File&) override {}
+    void activateCategory(const juce::String& categoryName);
+    void refreshCategorySelection();
+    void refreshSearchResults();
+    void refreshPreviewDetails();
 
-    juce::WildcardFileFilter audioFilter { "*.wav;*.aif;*.aiff;*.mp3", "*", "Audio files" };
+    AssetFileFilter audioFilter;
+    juce::File mediaRoot { juce::File::getSpecialLocation(juce::File::userMusicDirectory) };
     juce::FileBrowserComponent browser { juce::FileBrowserComponent::openMode
                                              | juce::FileBrowserComponent::canSelectFiles,
-                                         juce::File::getSpecialLocation(juce::File::userMusicDirectory),
+                                         mediaRoot,
                                          &audioFilter, nullptr };
     juce::Label title { {}, "LOOPS & MEDIA" };
+    juce::TextButton loopsTab { "LOOPS" };
+    juce::TextButton samplesTab { "SAMPLES" };
+    juce::TextButton presetsTab { "PRESETS" };
+    juce::TextButton goUpButton { "UP" };
+    juce::TextEditor searchEditor;
+    juce::Label previewDetails { {}, "No preview selected" };
+    juce::Label fileDetails { {}, "file:" };
+    juce::String activeCategory { "Loops" };
 };

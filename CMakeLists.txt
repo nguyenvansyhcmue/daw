@@ -40,6 +40,12 @@ juce_add_gui_app(StudioForgeDAW
     COMPANY_NAME "StudioForge"
     PRODUCT_NAME "StudioForge DAW"
     VERSION "1.0.0"
+    ICON_BIG Assets/LiveDawAppIcon.png
+    ICON_SMALL Assets/LiveDawAppIcon.png
+)
+
+juce_add_binary_data(StudioForgeBrandAssets
+    SOURCES Assets/LiveDawLogo.png
 )
 
 # Keep the development binary distinct from the distributable.  On Windows this
@@ -87,7 +93,6 @@ target_sources(StudioForgeDAW PRIVATE
     Source/UI/AudioDeviceErrorLocalizer.cpp
     Source/UI/StudioForgeDialog.cpp
     Source/UI/AssetBrowserPane.cpp
-    Source/UI/PerformanceFooter.cpp
     Source/UI/PerformanceRoomIconLibrary.cpp
     Source/UI/StartupWorkflowPane.cpp
     Source/UI/VocalistRackComponent.cpp
@@ -102,6 +107,7 @@ if (STUDIOFORGE_ENABLE_ASIO)
 endif()
 
 target_link_libraries(StudioForgeDAW PRIVATE
+    StudioForgeBrandAssets
     juce::juce_audio_basics
     juce::juce_audio_devices
     juce::juce_audio_formats

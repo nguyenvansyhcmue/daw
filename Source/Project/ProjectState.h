@@ -48,7 +48,7 @@ struct PersistedTrackState
         bool bypassed = false;
     };
     static constexpr size_t maxSends = 8;
-    static constexpr size_t maxFxSlots = 4;
+    static constexpr size_t maxFxSlots = 8;
     TrackId id;
     TrackType type = TrackType::audio;
     juce::String name;
@@ -101,7 +101,7 @@ struct PersistedMidiClipState
 
 struct ProjectState
 {
-    static constexpr int formatVersion = 14;
+    static constexpr int formatVersion = 15;
 
     double bpm = 120.0;
     int timeSignatureNumerator = 4;

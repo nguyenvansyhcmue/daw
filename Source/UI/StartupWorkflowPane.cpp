@@ -4,12 +4,17 @@
 namespace
 {
 const auto overlay = juce::Colour(0x99000000);
-const auto dialog = juce::Colour(0xfff7f8fa);
-const auto panel = juce::Colour(0xffedf0f3);
-const auto stagePanel = juce::Colour(0xffe8eff8);
-const auto text = juce::Colour(0xff2f3942);
-const auto muted = juce::Colour(0xff68747e);
-const auto blue = juce::Colour(0xff2f6398);
+const auto dialog = juce::Colour(0xff16232c);
+const auto panel = juce::Colour(0xff1f2e38);
+const auto stagePanel = juce::Colour(0xff172833);
+const auto text = juce::Colour(0xffe7eff2);
+const auto muted = juce::Colour(0xff9aabb4);
+const auto blue = juce::Colour(0xff3c98a4);
+
+juce::String recentProjectLocation(const juce::File& projectFile)
+{
+    return projectFile.getParentDirectory().getFullPathName();
+}
 
 juce::String roleName(PerformanceRole role)
 {
@@ -27,7 +32,8 @@ void drawChevron(juce::Graphics& g, float x, float y)
 
 StartupWorkflowPane::StartupWorkflowPane()
 {
-    for (juce::Component* component : { static_cast<juce::Component*>(&title), static_cast<juce::Component*>(&newProject), static_cast<juce::Component*>(&openProject), static_cast<juce::Component*>(&enterPerformance), static_cast<juce::Component*>(&cancel), static_cast<juce::Component*>(&progress), static_cast<juce::Component*>(&audioInputSelector), static_cast<juce::Component*>(&audioOutputSelector), static_cast<juce::Component*>(&configureAudioDevice) })
+    setWantsKeyboardFocus(true);
+    for (juce::Component* component : { static_cast<juce::Component*>(&title), static_cast<juce::Component*>(&newProjectNavigation), static_cast<juce::Component*>(&historyNavigation), static_cast<juce::Component*>(&newProjectCard), static_cast<juce::Component*>(&openProject), static_cast<juce::Component*>(&enterPerformance), static_cast<juce::Component*>(&cancel), static_cast<juce::Component*>(&progress), static_cast<juce::Component*>(&audioInputSelector), static_cast<juce::Component*>(&audioOutputSelector), static_cast<juce::Component*>(&configureAudioDevice) })
         addAndMakeVisible(component);
 
     title.setJustificationType(juce::Justification::centred);
@@ -35,13 +41,15 @@ StartupWorkflowPane::StartupWorkflowPane()
     title.setColour(juce::Label::textColourId, juce::Colours::white);
     progress.setJustificationType(juce::Justification::centred);
     progress.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.8f));
-    newProject.setColour(juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
-    newProject.setColour(juce::TextButton::textColourOffId, juce::Colours::transparentBlack);
-    openProject.setColour(juce::TextButton::buttonColourId, juce::Colours::white);
+    newProjectNavigation.setColour(juce::TextButton::textColourOffId, text);
+    historyNavigation.setColour(juce::TextButton::textColourOffId, muted);
+    newProjectCard.setColour(juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
+    newProjectCard.setColour(juce::TextButton::textColourOffId, juce::Colours::transparentBlack);
+    openProject.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff293c47));
     openProject.setColour(juce::TextButton::textColourOffId, text);
     enterPerformance.setColour(juce::TextButton::buttonColourId, blue);
     enterPerformance.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
-    cancel.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff303b44));
+    cancel.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff293c47));
     cancel.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
 
     for (size_t i = 0; i < recentProjectButtons.size(); ++i)
@@ -49,7 +57,7 @@ StartupWorkflowPane::StartupWorkflowPane()
         auto& button = recentProjectButtons[i];
         addAndMakeVisible(button);
         button.setColour(juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
-        button.setColour(juce::TextButton::textColourOffId, muted);
+        button.setColour(juce::TextButton::textColourOffId, juce::Colours::transparentBlack);
         button.onClick = [this, i] { if (i < static_cast<size_t>(recentProjects.size()) && onOpenRecentProject) onOpenRecentProject(juce::File(recentProjects[static_cast<int>(i)])); };
     }
     for (size_t i = 0; i < performancePresets.size(); ++i)
@@ -73,13 +81,13 @@ StartupWorkflowPane::StartupWorkflowPane()
         };
         auto& quantity = setupQuantities[i];
         quantity.setJustificationType(juce::Justification::centred);
-        quantity.setColour(juce::Label::backgroundColourId, juce::Colours::white);
+        quantity.setColour(juce::Label::backgroundColourId, juce::Colour(0xff132029));
         quantity.setColour(juce::Label::textColourId, text);
-        quantity.setColour(juce::Label::outlineColourId, juce::Colour(0xffcfd7df));
+        quantity.setColour(juce::Label::outlineColourId, juce::Colour(0xff46606b));
         for (auto* button : { &setupMinus[i], &setupPlus[i] })
         {
             addAndMakeVisible(button);
-            button->setColour(juce::TextButton::buttonColourId, juce::Colour(0xff35434e));
+            button->setColour(juce::TextButton::buttonColourId, juce::Colour(0xff304854));
             button->setColour(juce::TextButton::textColourOffId, juce::Colours::white);
         }
         setupMinus[i].setButtonText("-");
@@ -96,9 +104,11 @@ StartupWorkflowPane::StartupWorkflowPane()
         addAndMakeVisible(label);
         addAndMakeVisible(quantity);
     }
-    newProject.onClick = [this] { if (onTemplateSelected) onTemplateSelected(ProjectTemplate::empty); };
+    newProjectNavigation.onClick = [this] { showProjectPage(ProjectPage::newProject); };
+    historyNavigation.onClick = [this] { showProjectPage(ProjectPage::history); };
+    newProjectCard.onClick = [this] { if (onTemplateSelected) onTemplateSelected(ProjectTemplate::empty); };
     openProject.onClick = [this] { if (onOpenProject) onOpenProject(); };
-    configureAudioDevice.setColour(juce::TextButton::buttonColourId, juce::Colour(0xffdbe2e9));
+    configureAudioDevice.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff293c47));
     configureAudioDevice.setColour(juce::TextButton::textColourOffId, text);
     configureAudioDevice.onClick = [this] { if (onAudioDeviceSettingsRequested) onAudioDeviceSettingsRequested(); };
     audioInputSelector.onChange = [this]
@@ -121,6 +131,7 @@ StartupWorkflowPane::StartupWorkflowPane()
         resized(); repaint();
     };
     showPerformancePreset(PerformancePreset::vocalAndBand);
+    showProjectPage(ProjectPage::newProject);
     step = Step::splash;
     title.setText("StudioForge DAW", juce::dontSendNotification);
     setAlpha(0.0f);
@@ -149,14 +160,51 @@ void StartupWorkflowPane::showTrackCreation(bool returnToWorkspace)
     title.setText("Performance Room", juce::dontSendNotification);
     title.setFont(juce::Font(juce::FontOptions(18.0f, juce::Font::bold)));
     title.setColour(juce::Label::textColourId, text);
-    resized(); repaint(); beginFadeIn();
+    resized(); repaint(); beginFadeIn(); grabKeyboardFocus();
+}
+
+void StartupWorkflowPane::mouseDown(const juce::MouseEvent& event)
+{
+    if (! getDialogBounds().contains(event.getPosition()))
+        dismissToWorkspace();
+}
+
+bool StartupWorkflowPane::keyPressed(const juce::KeyPress& key)
+{
+    if (key != juce::KeyPress::escapeKey || ! returnToWorkspaceOnCancel)
+        return false;
+
+    dismissToWorkspace();
+    return true;
+}
+
+void StartupWorkflowPane::dismissToWorkspace()
+{
+    if (returnToWorkspaceOnCancel)
+        setVisible(false);
+}
+
+void StartupWorkflowPane::showProjectPage(ProjectPage page)
+{
+    projectPage = page;
+    const auto isNewProject = page == ProjectPage::newProject;
+    newProjectNavigation.setColour(juce::TextButton::buttonColourId, isNewProject ? juce::Colour(0xff2b404b) : juce::Colours::transparentBlack);
+    historyNavigation.setColour(juce::TextButton::buttonColourId, isNewProject ? juce::Colours::transparentBlack : juce::Colour(0xff2b404b));
+    newProjectNavigation.setColour(juce::TextButton::textColourOffId, isNewProject ? text : muted);
+    historyNavigation.setColour(juce::TextButton::textColourOffId, isNewProject ? muted : text);
+    resized();
+    repaint();
 }
 
 void StartupWorkflowPane::setRecentProjects(juce::StringArray paths)
 {
     recentProjects = std::move(paths);
     for (size_t i = 0; i < recentProjectButtons.size(); ++i)
-        recentProjectButtons[i].setButtonText(i < static_cast<size_t>(recentProjects.size()) ? juce::File(recentProjects[static_cast<int>(i)]).getFileNameWithoutExtension() : juce::String {});
+    {
+        const auto hasProject = i < static_cast<size_t>(recentProjects.size());
+        recentProjectButtons[i].setButtonText({});
+        recentProjectButtons[i].setTooltip(hasProject ? recentProjects[static_cast<int>(i)] : juce::String {});
+    }
     resized(); repaint();
 }
 
@@ -190,8 +238,8 @@ void StartupWorkflowPane::showPerformancePreset(PerformancePreset preset)
     for (size_t i = 0; i < performancePresets.size(); ++i)
     {
         const auto selected = i == static_cast<size_t>(preset);
-        performancePresets[i].setColour(juce::TextButton::buttonColourId, selected ? blue : juce::Colour(0xffdde3e8));
-        performancePresets[i].setColour(juce::TextButton::textColourOffId, selected ? juce::Colours::white : text);
+        performancePresets[i].setColour(juce::TextButton::buttonColourId, selected ? blue : juce::Colour(0xff293c47));
+        performancePresets[i].setColour(juce::TextButton::textColourOffId, text);
     }
     synchronisePerformanceControls();
 }
@@ -228,8 +276,8 @@ void StartupWorkflowPane::paint(juce::Graphics& g)
     const auto bounds = getDialogBounds().toFloat();
     if (step == Step::splash)
     {
-        g.setColour(juce::Colour(0xff202a31)); g.fillRoundedRectangle(bounds, 12.0f);
-        g.setColour(juce::Colour(0xff4b9dea)); g.fillRoundedRectangle(bounds.withHeight(4.0f), 2.0f); return;
+        g.setColour(dialog); g.fillRoundedRectangle(bounds, 12.0f);
+        g.setColour(blue); g.fillRoundedRectangle(bounds.withHeight(4.0f), 2.0f); return;
     }
     g.setColour(juce::Colours::black.withAlpha(0.20f)); g.fillRoundedRectangle(bounds.translated(0.0f, 5.0f).expanded(5.0f), 10.0f);
     g.setColour(dialog); g.fillRoundedRectangle(bounds, 10.0f);
@@ -237,25 +285,42 @@ void StartupWorkflowPane::paint(juce::Graphics& g)
     {
         constexpr auto footerHeight = 52.0f;
         const auto sidebar = juce::Rectangle<float>(bounds.getX(), bounds.getY() + 38.0f, 168.0f, bounds.getHeight() - 38.0f - footerHeight);
-        g.setColour(juce::Colour(0xffe5e8eb));
+        g.setColour(juce::Colour(0xff1d2b34));
         g.fillRect(sidebar);
-        g.setColour(juce::Colour(0xffd0d6dc));
-        g.fillRoundedRectangle(sidebar.getX() + 10.0f, sidebar.getY() + 14.0f, sidebar.getWidth() - 20.0f, 23.0f, 4.0f);
-        g.setColour(text); g.setFont(12.0f);
-        g.drawText("New Project", sidebar.getX() + 20.0f, sidebar.getY() + 14.0f, sidebar.getWidth() - 40.0f, 23.0f, juce::Justification::centredLeft, false);
-        if (! recentProjects.isEmpty())
+        const auto content = juce::Rectangle<float>(sidebar.getRight() + 34.0f, bounds.getY() + 58.0f, bounds.getRight() - sidebar.getRight() - 64.0f, bounds.getHeight() - footerHeight - 78.0f);
+        if (projectPage == ProjectPage::newProject)
         {
-            g.setColour(muted); g.setFont(10.0f);
-            g.drawText("RECENT", sidebar.getX() + 18.0f, sidebar.getY() + 66.0f, sidebar.getWidth() - 36.0f, 16.0f, juce::Justification::centredLeft, false);
+            const auto tile = juce::Rectangle<float>(content.getX() + 12.0f, content.getY() + 10.0f, 172.0f, 112.0f);
+            g.setColour(blue); g.fillRoundedRectangle(tile, 8.0f);
+            g.setColour(text.withAlpha(0.94f));
+            for (int row = 0; row < 3; ++row)
+                g.fillRoundedRectangle(tile.getX() + 20.0f, tile.getY() + 18.0f + row * 18.0f, row == 0 ? 48.0f : 78.0f, 10.0f, 2.0f);
+            g.setColour(blue); g.setFont(12.0f);
+            g.drawText("New Project", tile.translated(-10.0f, 132.0f).withWidth(200.0f), juce::Justification::centred, false);
         }
-        const auto tile = juce::Rectangle<float>(sidebar.getRight() + 46.0f, bounds.getY() + 64.0f, 180.0f, 120.0f);
-        g.setColour(blue); g.fillRoundedRectangle(tile, 8.0f);
-        g.setColour(juce::Colours::white.withAlpha(0.94f));
-        for (int row = 0; row < 3; ++row)
-            g.fillRoundedRectangle(tile.getX() + 20.0f, tile.getY() + 18.0f + row * 18.0f, row == 0 ? 48.0f : 78.0f, 10.0f, 2.0f);
-        g.setColour(blue); g.setFont(12.0f);
-        g.drawText("New Project", tile.translated(-10.0f, 132.0f).withWidth(200.0f), juce::Justification::centred, false);
-        g.setColour(juce::Colour(0xffdfe5eb));
+        else
+        {
+            g.setColour(text); g.setFont(13.0f);
+            g.drawText("Performance History", content.getX(), content.getY(), content.getWidth(), 20.0f, juce::Justification::centredLeft, false);
+            for (size_t i = 0; i < recentProjectButtons.size() && i < static_cast<size_t>(recentProjects.size()); ++i)
+            {
+                const auto column = static_cast<float>(i % 2);
+                const auto row = static_cast<float>(i / 2);
+                const auto tile = juce::Rectangle<float>(content.getX() + column * 196.0f, content.getY() + 38.0f + row * 116.0f, 180.0f, 102.0f);
+                const auto active = recentProjectButtons[i].isMouseOver();
+                g.setColour(active ? juce::Colour(0xff2b4852) : panel);
+                g.fillRoundedRectangle(tile, 7.0f);
+                g.setColour(active ? blue : juce::Colour(0xff46606b));
+                g.drawRoundedRectangle(tile, 7.0f, 1.0f);
+                const auto projectFile = juce::File(recentProjects[static_cast<int>(i)]);
+                g.setColour(blue.withAlpha(0.22f)); g.fillRoundedRectangle(tile.reduced(12.0f).withHeight(38.0f), 4.0f);
+                g.setColour(text); g.setFont(12.0f);
+                g.drawFittedText(projectFile.getFileNameWithoutExtension(), tile.getX() + 12.0f, tile.getY() + 59.0f, tile.getWidth() - 24.0f, 18.0f, juce::Justification::centredLeft, 1);
+                g.setColour(muted); g.setFont(9.0f);
+                g.drawFittedText(recentProjectLocation(projectFile), tile.getX() + 12.0f, tile.getY() + 78.0f, tile.getWidth() - 24.0f, 13.0f, juce::Justification::centredLeft, 1);
+            }
+        }
+        g.setColour(juce::Colour(0xff1c2a32));
         g.fillRect(bounds.getX(), bounds.getBottom() - footerHeight, bounds.getWidth(), footerHeight);
         return;
     }
@@ -263,7 +328,7 @@ void StartupWorkflowPane::paint(juce::Graphics& g)
     const auto setup = juce::Rectangle<float>(bounds.getX() + 22.0f, bounds.getY() + 110.0f, bounds.getWidth() * 0.57f, 150.0f);
     const auto stage = juce::Rectangle<float>(setup.getRight() + 16.0f, setup.getY(), bounds.getRight() - setup.getRight() - 38.0f, 150.0f);
     const auto details = juce::Rectangle<float>(bounds.getX() + 22.0f, setup.getBottom() + 16.0f, bounds.getWidth() - 44.0f, 96.0f);
-    g.setColour(juce::Colour(0xffcfd8e1)); g.fillRect(bounds.getCentreX() - 45.0f, bounds.getY() + 43.0f, 90.0f, 2.0f);
+    g.setColour(juce::Colour(0xff46606b)); g.fillRect(bounds.getCentreX() - 45.0f, bounds.getY() + 43.0f, 90.0f, 2.0f);
     g.setColour(panel); g.fillRoundedRectangle(setup, 7.0f); g.fillRoundedRectangle(details, 7.0f);
     g.setColour(stagePanel); g.fillRoundedRectangle(stage, 7.0f);
     g.setColour(muted); g.setFont(10.0f);
@@ -281,7 +346,7 @@ void StartupWorkflowPane::paint(juce::Graphics& g)
     for (const auto& member : performanceRoom.getMembers())
         for (int copy = 0; copy < member.quantity && y < stage.getBottom() - 20.0f; ++copy, y += 24.0f)
         {
-            g.setColour(juce::Colours::white); g.fillRoundedRectangle(stage.getX() + 9.0f, y, stage.getWidth() - 18.0f, 21.0f, 4.0f);
+            g.setColour(juce::Colour(0xff263944)); g.fillRoundedRectangle(stage.getX() + 9.0f, y, stage.getWidth() - 18.0f, 21.0f, 4.0f);
             PerformanceRoomIconLibrary::draw(g, { stage.getX() + 16.0f, y + 2.0f, 16.0f, 16.0f }, member.role);
             g.setColour(text); g.setFont(11.0f); g.drawText(member.displayName + " " + juce::String(copy + 1), stage.getX() + 39.0f, y, stage.getWidth() - 52.0f, 21.0f, juce::Justification::centredLeft, true);
         }
@@ -300,17 +365,26 @@ void StartupWorkflowPane::resized()
     title.setBounds(bounds.getX(), bounds.getY(), bounds.getWidth(), 38);
     const auto splash = step == Step::splash, chooser = step == Step::chooseProject, room = step == Step::performanceRoom;
     progress.setBounds(bounds.reduced(24)); progress.setVisible(splash);
-    newProject.setVisible(chooser); openProject.setVisible(chooser); enterPerformance.setVisible(room); cancel.setVisible(room);
+    newProjectNavigation.setVisible(chooser); historyNavigation.setVisible(chooser); newProjectCard.setVisible(chooser && projectPage == ProjectPage::newProject); openProject.setVisible(chooser); enterPerformance.setVisible(room); cancel.setVisible(room);
     audioInputSelector.setVisible(room); audioOutputSelector.setVisible(room); configureAudioDevice.setVisible(room);
-    for (size_t i = 0; i < recentProjectButtons.size(); ++i) recentProjectButtons[i].setVisible(chooser && i < static_cast<size_t>(recentProjects.size()));
+    for (size_t i = 0; i < recentProjectButtons.size(); ++i) recentProjectButtons[i].setVisible(chooser && projectPage == ProjectPage::history && i < static_cast<size_t>(recentProjects.size()));
     for (auto& button : performancePresets) button.setVisible(room);
     for (size_t i = 0; i < PerformanceRoomModel::memberCount; ++i)
         for (juce::Component* component : { static_cast<juce::Component*>(&setupLabels[i]), static_cast<juce::Component*>(&setupQuantities[i]), static_cast<juce::Component*>(&setupMinus[i]), static_cast<juce::Component*>(&setupPlus[i]) }) component->setVisible(room);
     if (chooser)
     {
-        const auto contentX = bounds.getX() + 168, footerY = bounds.getBottom() - 52;
-        newProject.setBounds(contentX + 46, bounds.getY() + 64, 180, 120); openProject.setBounds(contentX + 12, footerY + 14, 184, 24);
-        for (size_t i = 0; i < recentProjectButtons.size(); ++i) recentProjectButtons[i].setBounds(bounds.getX() + 14, bounds.getY() + 98 + static_cast<int>(i) * 24, 140, 22);
+        const auto sidebarRight = bounds.getX() + 168;
+        const auto contentX = sidebarRight + 34;
+        newProjectNavigation.setBounds(bounds.getX() + 10, bounds.getY() + 52, 148, 26);
+        historyNavigation.setBounds(bounds.getX() + 10, bounds.getY() + 84, 148, 26);
+        newProjectCard.setBounds(contentX + 12, bounds.getY() + 68, 172, 112);
+        openProject.setBounds(sidebarRight + 12, bounds.getBottom() - 38, 184, 24);
+        for (size_t i = 0; i < recentProjectButtons.size(); ++i)
+        {
+            const auto column = static_cast<int>(i % 2);
+            const auto row = static_cast<int>(i / 2);
+            recentProjectButtons[i].setBounds(contentX + column * 196, bounds.getY() + 96 + row * 116, 180, 102);
+        }
         return;
     }
     if (! room) return;

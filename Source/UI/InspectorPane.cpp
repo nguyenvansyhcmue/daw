@@ -8,7 +8,7 @@ namespace
 {
 constexpr int inspectorPadding = 4;
 constexpr int sectionGap = 3;
-constexpr int trackInspectorHeight = 104;
+constexpr int trackInspectorHeight = 136;
 }
 
 InspectorPane::InspectorPane(TrackDataModel& model, AudioEngine& engine, PluginHostService& pluginHost)

@@ -344,7 +344,7 @@ bool TrackDataModel::setTrackSendRoute(TrackId trackId, size_t route, BusId bus,
     if (route >= maxSendsPerTrack || ! bus.isValid() || std::none_of(busStates.begin(), busStates.end(), [bus] (const BusState& state) { return state.id == bus; })) return false;
     const auto index = getTrackIndex(trackId); if (index < 0) return false;
     auto& track = trackStates[static_cast<size_t>(index)];
-    const auto constrainedAmount = juce::jlimit(0.0f, 1.0f, amount);
+    const auto constrainedAmount = juce::jlimit(0.0f, maximumSendGain, amount);
     track.sends[route] = { bus, constrainedAmount, preFader };
     if (isPlaying() && track.sendAutomation[route].getMode() != AutomationMode::read)
         try { track.sendAutomation[route].upsertPoint(getPlayheadPosition(), constrainedAmount); }
@@ -1353,7 +1353,7 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
         for (const auto& send : track.sends)
             if (send.targetBus.isValid()
                 && (std::find(busIds.begin(), busIds.end(), send.targetBus) == busIds.end()
-                    || ! std::isfinite(send.level) || send.level < 0.0f || send.level > 1.0f))
+                    || ! std::isfinite(send.level) || send.level < 0.0f || send.level > maximumSendGain))
                 return juce::Result::fail("Project track send routing is invalid");
         if (track.automationLanes.size() > 2 + maxSendsPerTrack)
             return juce::Result::fail("Project has too many automation lanes per track");
@@ -1573,6 +1573,49 @@ void TrackDataModel::setFxBypassed(size_t trackIndex, size_t slot, bool bypassed
     updated->bypass[slot] = bypassed;
     publishFxRackSnapshot(static_cast<size_t>(rackSlot), std::move(updated));
     publishRenderStructureSnapshot();
+}
+
+const std::vector<TrackDataModel::FxScene>& TrackDataModel::getFxScenes(size_t trackIndex) const noexcept
+{
+    static const std::vector<FxScene> emptyScenes;
+    return trackIndex < trackStates.size() ? trackStates[trackIndex].fxScenes : emptyScenes;
+}
+
+bool TrackDataModel::captureFxScene(size_t trackIndex, const juce::String& name)
+{
+    if (trackIndex >= trackStates.size() || trackStates[trackIndex].fxScenes.size() >= maxFxScenes)
+        return false;
+
+    FxScene scene;
+    scene.name = name.trim().substring(0, 32);
+    if (scene.name.isEmpty())
+        scene.name = "Scene " + juce::String(static_cast<int>(trackStates[trackIndex].fxScenes.size() + 1));
+    if (const auto* rack = getFxRackSnapshot(trackIndex); rack != nullptr)
+        scene.bypass = rack->bypass;
+
+    trackStates[trackIndex].fxScenes.push_back(std::move(scene));
+    markProjectModified();
+    sendChangeMessage();
+    return true;
+}
+
+bool TrackDataModel::recallFxScene(size_t trackIndex, size_t sceneIndex) noexcept
+{
+    if (trackIndex >= trackStates.size() || sceneIndex >= trackStates[trackIndex].fxScenes.size())
+        return false;
+
+    const auto rackSlot = getFxRackSlot(trackStates[trackIndex].id);
+    if (rackSlot < 0)
+        return false;
+
+    auto updated = std::make_unique<FxRackSnapshot>();
+    if (const auto* current = getFxRackSnapshot(trackIndex); current != nullptr)
+        *updated = *current;
+    updated->bypass = trackStates[trackIndex].fxScenes[sceneIndex].bypass;
+    publishFxRackSnapshot(static_cast<size_t>(rackSlot), std::move(updated));
+    publishRenderStructureSnapshot();
+    sendChangeMessage();
+    return true;
 }
 
 void TrackDataModel::publishAudioClipSnapshot()

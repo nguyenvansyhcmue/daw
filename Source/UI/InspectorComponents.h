@@ -71,6 +71,7 @@ private:
     void timerCallback() override;
     void synchroniseControlsFromState();
     void refreshAudioFx();
+    void refreshFxScenes();
     void refreshRouting();
     void showAudioFxMenu(size_t slot);
     void showPluginBrowser(size_t slot);
@@ -90,12 +91,16 @@ private:
     int selectedTrack = -1;
     std::array<BusId, TrackDataModel::maxBuses> routeBusIds {};
     juce::Rectangle<int> audioFxRackBounds;
+    juce::Rectangle<int> sceneBounds;
     juce::Rectangle<int> sendsBounds;
     juce::Rectangle<int> routingBounds;
     std::array<juce::TextButton, TrackDataModel::maxFxSlots> audioFxSlots;
     juce::Label heading;
     juce::Label fxHeading { {}, "AUDIO FX" };
     juce::TextButton addAudioFx { "+ Add Audio FX" };
+    juce::Label sceneHeading { {}, "SCENES" };
+    std::array<juce::TextButton, TrackDataModel::maxFxScenes> sceneButtons;
+    juce::TextButton captureScene { "+ Save Scene" };
     juce::Label sendsHeading { {}, "SENDS" };
     juce::TextButton sendSummary { "No Sends  +" };
     std::array<juce::ComboBox, TrackDataModel::maxSendsPerTrack> sendRoutes;
@@ -106,6 +111,7 @@ private:
     juce::ComboBox outputRoute;
     juce::Label panLabel { {}, "PAN" };
     juce::Label levelLabel { {}, "LEVEL" };
+    juce::Label panValue;
     juce::Slider pan;
     juce::Slider fader;
     AudioPeakMeter meter;

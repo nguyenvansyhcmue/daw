@@ -3,13 +3,114 @@
 #include "UI/ProjectSettingsPanel.h"
 #include "UI/StudioForgeDialog.h"
 
+namespace
+{
+enum class WindowControlIcon
+{
+    minimise,
+    maximise,
+    close
+};
+
+class WindowControlButton final : public juce::Button
+{
+public:
+    explicit WindowControlButton(WindowControlIcon buttonIcon)
+        : juce::Button({}), icon(buttonIcon)
+    {
+        setMouseCursor(juce::MouseCursor::PointingHandCursor);
+    }
+
+private:
+    static constexpr float idleAlpha = 0.34f;
+    static constexpr float hoverAlpha = 0.92f;
+    static constexpr int minimiseWidth = 10;
+    static constexpr int iconHalfSize = 4;
+
+    void paintButton(juce::Graphics& g, bool isMouseOver, bool isMouseDown) override
+    {
+        const auto bounds = getLocalBounds().toFloat().reduced(2.0f);
+        const auto emphasis = isMouseOver ? hoverAlpha : idleAlpha;
+        const auto isClose = icon == WindowControlIcon::close;
+        const auto iconColour = (isClose && isMouseOver ? juce::Colour(0xffe08888)
+                                                         : juce::Colours::white)
+                                    .withAlpha(emphasis);
+
+        if (isMouseOver)
+        {
+            const auto hoverColour = isClose ? juce::Colour(0xff8b3e43) : juce::Colour(0xff4d5d66);
+            g.setColour(hoverColour.withAlpha(isMouseDown ? 0.72f : 0.48f));
+            g.fillRoundedRectangle(bounds, 4.0f);
+        }
+
+        g.setColour(iconColour);
+        const auto centre = getLocalBounds().getCentre();
+        if (icon == WindowControlIcon::minimise)
+        {
+            g.fillRect(centre.x - minimiseWidth / 2, centre.y - 1, minimiseWidth, 2);
+            return;
+        }
+
+        if (icon == WindowControlIcon::maximise)
+        {
+            const auto iconBounds = juce::Rectangle<int>(0, 0, 10, 8).withCentre(centre);
+            g.drawRect(iconBounds, 1);
+            return;
+        }
+
+        const auto left = centre.x - iconHalfSize;
+        const auto right = centre.x + iconHalfSize;
+        const auto top = centre.y - iconHalfSize;
+        const auto bottom = centre.y + iconHalfSize;
+        g.drawLine(static_cast<float>(left), static_cast<float>(top),
+                   static_cast<float>(right), static_cast<float>(bottom), 1.6f);
+        g.drawLine(static_cast<float>(right), static_cast<float>(top),
+                   static_cast<float>(left), static_cast<float>(bottom), 1.6f);
+    }
+
+    WindowControlIcon icon;
+};
+}
+
+class MainWindow::WindowControls final : public juce::Component
+{
+public:
+    explicit WindowControls(MainWindow& ownerWindow)
+        : owner(ownerWindow), minimise(WindowControlIcon::minimise), maximise(WindowControlIcon::maximise), close(WindowControlIcon::close)
+    {
+        addAndMakeVisible(minimise);
+        addAndMakeVisible(maximise);
+        addAndMakeVisible(close);
+
+        minimise.onClick = [this] { owner.minimiseButtonPressed(); };
+        maximise.onClick = [this] { owner.maximiseButtonPressed(); };
+        close.onClick = [this] { owner.closeButtonPressed(); };
+    }
+
+    void resized() override
+    {
+        auto controls = getLocalBounds();
+        minimise.setBounds(controls.removeFromLeft(controlWidth));
+        maximise.setBounds(controls.removeFromLeft(controlWidth));
+        close.setBounds(controls.removeFromLeft(controlWidth));
+    }
+
+private:
+    static constexpr int controlWidth = 30;
+
+    MainWindow& owner;
+    WindowControlButton minimise;
+    WindowControlButton maximise;
+    WindowControlButton close;
+};
+
 MainWindow::MainWindow(const juce::String& name)
     : juce::DocumentWindow(name,
           juce::Colour(0xff1d1f21),
           juce::DocumentWindow::allButtons)
 {
     setUsingNativeTitleBar(false);
-    setTitleBarHeight(28);
+    setTitleBarHeight(0);
     setColour(juce::DocumentWindow::backgroundColourId, juce::Colour(0xff1d1f21));
     setColour(juce::DocumentWindow::textColourId, juce::Colours::white.withAlpha(0.92f));
     setResizable(true, true);
@@ -32,13 +133,17 @@ MainWindow::MainWindow(const juce::String& name)
         autosaveService = std::make_unique<AutosaveService>(mainComponent->getTrackDataModel());
     }
     setMenuBar(this, 24);
+    windowControls = std::make_unique<WindowControls>(*this);
+    addAndMakeVisible(windowControls.get());
     centreWithSize(1600, 920);
     setVisible(true);
+    startTimerHz(30);
 
 }
 
 MainWindow::~MainWindow()
 {
+    stopTimer();
     setMenuBar(nullptr);
     projectFileChooser.reset();
 }
@@ -51,10 +156,56 @@ void MainWindow::closeButtonPressed()
     });
 }
 
+void MainWindow::resized()
+{
+    juce::DocumentWindow::resized();
+    if (windowControls != nullptr)
+        windowControls->setBounds(getWidth() - 98, 0, 92, 24);
+}
+
+void MainWindow::timerCallback()
+{
+    auto* menuBar = getMenuBarComponent();
+    if (menuBar == nullptr)
+        return;
+
+    const auto targetAlpha = menuBar->isMouseOverOrDragging(true) ? 1.0f : 0.36f;
+    if (std::abs(targetAlpha - menuBarAlpha) < 0.01f)
+        return;
+
+    menuBarAlpha = targetAlpha;
+    menuBar->setAlpha(menuBarAlpha);
+}
+
 bool MainWindow::keyPressed(const juce::KeyPress& key)
 {
-    if (key.getModifiers().isCommandDown())
+    const auto modifiers = key.getModifiers();
+    const auto usesShortcutModifier = modifiers.isCommandDown() || modifiers.isCtrlDown();
+    if (usesShortcutModifier)
     {
+        if (key.getKeyCode() == 'z' || key.getKeyCode() == 'Z')
+        {
+            if (mainComponent != nullptr)
+            {
+                if (modifiers.isShiftDown())
+                    mainComponent->redoEdit();
+                else
+                    mainComponent->undoEdit();
+            }
+            return true;
+        }
+        if (key.getKeyCode() == 'y' || key.getKeyCode() == 'Y')
+        {
+            if (mainComponent != nullptr)
+                mainComponent->redoEdit();
+            return true;
+        }
+        if (key.getKeyCode() == 'r' || key.getKeyCode() == 'R')
+        {
+            if (mainComponent != nullptr)
+                mainComponent->requestRecordToggle();
+            return true;
+        }
         if (key.getKeyCode() == 'n' || key.getKeyCode() == 'N')
         {
             menuItemSelected(newProject, 0);
@@ -67,7 +218,7 @@ bool MainWindow::keyPressed(const juce::KeyPress& key)
         }
         if (key.getKeyCode() == 's' || key.getKeyCode() == 'S')
         {
-            if (key.getModifiers().isShiftDown())
+            if (modifiers.isShiftDown())
                 chooseProjectToSave();
             else
                 saveCurrentProject();
@@ -166,8 +317,16 @@ juce::PopupMenu MainWindow::getMenuForIndex(int topLevelMenuIndex, const juce::S
     }
     else if (topLevelMenuIndex == 1)
     {
-        menu.addItem(undoEdit, "Undo", mainComponent != nullptr && mainComponent->getTrackDataModel().canUndo());
-        menu.addItem(redoEdit, "Redo", mainComponent != nullptr && mainComponent->getTrackDataModel().canRedo());
+        juce::PopupMenu::Item undoItem("Undo");
+        undoItem.itemID = undoEdit;
+        undoItem.isEnabled = mainComponent != nullptr && mainComponent->getTrackDataModel().canUndo();
+        undoItem.shortcutKeyDescription = "Ctrl/Cmd+Z";
+        menu.addItem(std::move(undoItem));
+        juce::PopupMenu::Item redoItem("Redo");
+        redoItem.itemID = redoEdit;
+        redoItem.isEnabled = mainComponent != nullptr && mainComponent->getTrackDataModel().canRedo();
+        redoItem.shortcutKeyDescription = "Ctrl/Cmd+Shift+Z, Ctrl+Y";
+        menu.addItem(std::move(redoItem));
     }
     else if (topLevelMenuIndex == 2)
     {

@@ -12,7 +12,6 @@ MainComponent::MainComponent()
     addAndMakeVisible(arrangeWindow);
     addChildComponent(inspectorPane);
     addChildComponent(assetBrowser);
-    addAndMakeVisible(performanceFooter);
     addChildComponent(mixerPane);
     addChildComponent(pianoRoll);
     addAndMakeVisible(startupWorkflow);
@@ -21,8 +20,8 @@ MainComponent::MainComponent()
     // arrangement-first workflow rather than starting with a blank left rail.
     inspectorPane.setVisible(true);
     controlBar.setInspectorVisible(true);
-    assetBrowser.setVisible(true);
-    controlBar.setBrowserVisible(true);
+    assetBrowser.setVisible(false);
+    controlBar.setBrowserVisible(false);
 
     controlBar.onMixerToggle = [this]
     {
@@ -115,6 +114,12 @@ MainComponent::MainComponent()
         showWorkspace();
     };
     arrangeWindow.onTrackSelected = [this](int track) { selectTrack(track); };
+    arrangeWindow.onPerformanceSetupRequested = [this]
+    {
+        configureTrackCreationDialog();
+        startupWorkflow.setVisible(true);
+        startupWorkflow.showTrackCreation(true);
+    };
     arrangeWindow.onAudioClipSelected = [this](ClipId) {};
     arrangeWindow.onMidiClipSelected = [this](MidiClipId clip)
     {
@@ -127,7 +132,6 @@ MainComponent::MainComponent()
     {
         importAudioFile(file);
     };
-    performanceFooter.onBounceRequested = [this] { requestProjectBounce(); };
 
     // A project starts empty; tracks are created through the explicit New Track workflow.
     markProjectSaved();
@@ -320,6 +324,11 @@ bool MainComponent::redoEdit()
     return changed;
 }
 
+void MainComponent::requestRecordToggle()
+{
+    toggleRecording();
+}
+
 void MainComponent::setInspectorPanelVisible(bool visible)
 {
     inspectorPane.setVisible(visible); controlBar.setInspectorVisible(visible); resized();
@@ -440,6 +449,7 @@ void MainComponent::toggleRecording()
         pendingRecordingDestination = {};
         controlBar.setRecordActive(false);
         controlBar.setRecordCountdown(false);
+        arrangeWindow.hideRecordingPreview();
         arrangeWindow.repaint();
         return;
     }
@@ -455,6 +465,14 @@ void MainComponent::toggleRecording()
     const auto destination = type == TrackType::audio ? createRecordingDestination() : juce::File {};
     if (type == TrackType::audio && destination == juce::File {})
         return;
+
+    if (audioEngine.isPlaying())
+    {
+        audioEngine.clearRecordingCaptureRange();
+        startRecordingNow(target, destination, trackDataModel.getPlayheadPosition());
+        return;
+    }
+
     if (type == TrackType::audio && trackDataModel.isPunchActive())
     {
         const auto punchIn = trackDataModel.getPunchInSample();
@@ -489,11 +507,17 @@ void MainComponent::startRecordingNow(int trackIndex, const juce::File& destinat
     if (trackIndex < 0 || trackIndex >= static_cast<int>(trackDataModel.getTrackCount()))
         return;
     const auto type = trackDataModel.getTrack(static_cast<size_t>(trackIndex)).type;
+    const auto recordingStartSample = timelineStartSample >= 0.0
+        ? timelineStartSample : trackDataModel.getPlayheadPosition();
     const auto result = type == TrackType::audio
-        ? audioEngine.startRecording(static_cast<size_t>(trackIndex), destination, timelineStartSample)
+        ? audioEngine.startRecording(static_cast<size_t>(trackIndex), destination, recordingStartSample)
         : audioEngine.startMidiRecording(static_cast<size_t>(trackIndex));
     if (result.wasOk())
+    {
+        audioEngine.setPlaybackState(true);
         controlBar.setRecordActive(true);
+        arrangeWindow.showRecordingPreview(trackIndex, recordingStartSample);
+    }
 }
 
 void MainComponent::timerCallback()
@@ -504,6 +528,7 @@ void MainComponent::timerCallback()
         audioEngine.stopRecording();
         recordingPunchStopSample = -1.0;
         controlBar.setRecordActive(false);
+        arrangeWindow.hideRecordingPreview();
         arrangeWindow.repaint();
         return;
     }
@@ -539,8 +564,7 @@ void MainComponent::paint(juce::Graphics& g)
 void MainComponent::resized()
 {
     auto area = getLocalBounds();
-    controlBar.setBounds(area.removeFromTop(62));
-    performanceFooter.setBounds(area.removeFromBottom(44));
+    controlBar.setBounds(area.removeFromTop(64));
 
     // Dock panes from a bounded budget so opening both lower editors never
     // collapses the arrange workspace or overlaps controls on smaller screens.
@@ -554,16 +578,21 @@ void MainComponent::resized()
     if (pianoRoll.isVisible())
         pianoRoll.setBounds(area.removeFromBottom(juce::roundToInt(250.0f * dockScale)));
 
-    const auto sideBudget = juce::jmax(0, area.getWidth() - 420);
-    const auto targetSideWidth = juce::jlimit(220, 286, juce::roundToInt(static_cast<float>(getWidth()) * 0.16f));
-    const auto requestedSideWidth = (inspectorPane.isVisible() ? targetSideWidth : 0)
-                                  + (assetBrowser.isVisible() ? targetSideWidth : 0);
+    const auto sideBudget = juce::jmax(0, area.getWidth() - 440);
+    // Keep the Inspector's channel strips at a stable working width. A wide
+    // display should reveal more arrangement space, not stretch plugin slots
+    // and mixer controls into a different visual system.
+    const auto inspectorTargetWidth = juce::jlimit(250, 310,
+                                                    juce::roundToInt(static_cast<float>(getWidth()) * 0.175f));
+    const auto browserTargetWidth = juce::jlimit(236, 266, juce::roundToInt(static_cast<float>(getWidth()) * 0.156f));
+    const auto requestedSideWidth = (inspectorPane.isVisible() ? inspectorTargetWidth : 0)
+                                  + (assetBrowser.isVisible() ? browserTargetWidth : 0);
     const auto sideScale = requestedSideWidth > 0
         ? juce::jmin(1.0f, static_cast<float>(sideBudget) / static_cast<float>(requestedSideWidth)) : 0.0f;
     if (inspectorPane.isVisible())
-        inspectorPane.setBounds(area.removeFromLeft(juce::roundToInt(static_cast<float>(targetSideWidth) * sideScale)));
+        inspectorPane.setBounds(area.removeFromLeft(juce::roundToInt(static_cast<float>(inspectorTargetWidth) * sideScale)));
     if (assetBrowser.isVisible())
-        assetBrowser.setBounds(area.removeFromRight(juce::roundToInt(static_cast<float>(targetSideWidth) * sideScale)));
+        assetBrowser.setBounds(area.removeFromRight(juce::roundToInt(static_cast<float>(browserTargetWidth) * sideScale)));
 
     arrangeWindow.setBounds(area);
     startupWorkflow.setBounds(getLocalBounds());

@@ -1,5 +1,7 @@
 #include "AutomationLane.h"
 
+#include "../AudioGainRange.h"
+
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -116,7 +118,7 @@ bool AutomationLane::isValueValid(AutomationParameter parameter, float value) no
     {
         case AutomationParameter::trackVolume: return value >= 0.0f && value <= 2.0f;
         case AutomationParameter::trackPan:    return value >= -1.0f && value <= 1.0f;
-        case AutomationParameter::sendLevel:   return value >= 0.0f && value <= 1.0f;
+        case AutomationParameter::sendLevel:   return value >= 0.0f && value <= AudioGainRange::maximumSendGain;
     }
 
     return false;

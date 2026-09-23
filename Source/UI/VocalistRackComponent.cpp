@@ -150,6 +150,7 @@ void VocalistRackComponent::showFxMenu(size_t slot)
                 options.content.setOwned(editor.release());
                 options.dialogTitle = processor->getName();
                 options.dialogBackgroundColour = juce::Colour(0xff20242a);
+                options.escapeKeyTriggersCloseButton = true;
                 options.useNativeTitleBar = true;
                 options.resizable = true;
                 options.launchAsync();

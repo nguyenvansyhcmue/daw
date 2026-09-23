@@ -56,6 +56,8 @@ public:
     void setSelectedTrack(int track) noexcept { selectedTrack = track; selectedClip = -1; repaint(); }
     void setViewStartSample(double sample) noexcept;
     void setDisplayPlayheadSample(double sample) noexcept { displayPlayheadSample = sample; repaint(); }
+    void setRecordingPreview(int trackIndex, double startSample) noexcept;
+    void followPlaybackPosition(double samplePosition);
     double getViewStartSample() const noexcept { return viewStartSample; }
     void resized() override {}
 
@@ -84,6 +86,9 @@ private:
     bool adjustingFadeIn = false;
     bool adjustingFadeOut = false;
     bool panningTimeline = false;
+    bool scrubbingPlayhead = false;
+    int recordingPreviewTrack = -1;
+    double recordingPreviewStartSample = 0.0;
     float panDragStartX = 0.0f;
     double panDragStartSample = 0.0;
 
@@ -127,10 +132,13 @@ public:
     std::function<void(int)> onTrackSelected;
     std::function<void(ClipId)> onAudioClipSelected;
     std::function<void(MidiClipId)> onMidiClipSelected;
+    std::function<void()> onPerformanceSetupRequested;
 
     // Selection ownership stays above this view; this method only synchronises
     // its two visual subviews with the resolved display index.
     void setSelectedTrack(int trackIndex) noexcept;
+    void showRecordingPreview(int trackIndex, double startSample) noexcept;
+    void hideRecordingPreview() noexcept;
 
     void paint(juce::Graphics& g) override;
     void resized() override;
@@ -165,6 +173,7 @@ private:
     juce::Slider trackHeightSlider;
     juce::Label zoomReadout;
     juce::Label trackHeightReadout;
+    juce::TextButton addPerformanceButton { "+" };
     TrackDataModel* trackModel = nullptr;
     bool isDraggingOver = false;
     int draggedTrack = 0;

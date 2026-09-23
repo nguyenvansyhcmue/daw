@@ -44,6 +44,11 @@ public:
     void drawLinearSlider(juce::Graphics&, int x, int y, int width, int height, float sliderPosition,
                           float minimumPosition, float maximumPosition, juce::Slider::SliderStyle, juce::Slider&) override;
     void drawToggleButton(juce::Graphics&, juce::ToggleButton&, bool highlighted, bool down) override;
+    void drawMenuBarBackground(juce::Graphics&, int width, int height, bool isMouseOverBar,
+                               juce::MenuBarComponent&) override;
+    void drawMenuBarItem(juce::Graphics&, int width, int height, int itemIndex,
+                         const juce::String& itemText, bool isMouseOverItem, bool isMenuOpen,
+                         bool isMouseOverBar, juce::MenuBarComponent&) override;
     juce::AlertWindow* createAlertWindow(const juce::String& title, const juce::String& message,
                                          const juce::String& button1, const juce::String& button2,
                                          const juce::String& button3, juce::MessageBoxIconType iconType,

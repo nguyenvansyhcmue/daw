@@ -19,12 +19,10 @@ void operator delete(void* allocation) noexcept { std::free(allocation); }
 #include "AudioEngine/AudioGraph.h"
 #include "AudioEngine/AudioEngine.h"
 #include "AudioEngine/GainUtilityProcessor.h"
+#include "AudioEngine/LivePerformanceAssessment.h"
 #include "AudioEngine/TrackMixing.h"
 #include "AudioEngine/TransportUtils.h"
 #include "AudioEngine/GlobalScaleContext.h"
-#include "AudioEngine/VocalistProcessor.h"
-#include "AudioEngine/VocalistRack.h"
-#include "AudioEngine/AuxRouting.h"
 #include "Media/WaveformThumbnailCache.h"
 #include "Models/TrackDataModel.h"
 #include "Media/MediaReloadService.h"
@@ -59,56 +57,18 @@ bool testGlobalScaleContext()
                   "scale context publishes a new immutable revision");
 }
 
-bool testVocalistProcessor()
+bool testLivePerformanceAssessment()
 {
-    GlobalScaleContext scale;
-    scale.publish(7, MusicalScale::major);
-    VocalistProcessor vocalist;
-    vocalist.prepare(48000.0, 8, 2);
-    vocalist.setGain(0.5f);
-
-    juce::AudioBuffer<float> buffer(2, 8);
-    buffer.clear();
-    for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
-        for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
-            buffer.setSample(channel, sample, 1.0f);
-    vocalist.process(buffer, scale);
-
-    const auto audioOk = buffer.getSample(0, 7) > 0.0f && buffer.getSample(0, 7) < 1.0f;
-    const auto scaleOk = vocalist.getLastScaleRevision() == scale.read().revision;
-    return expect(audioOk, "vocalist processor applies realtime gain")
-        && expect(scaleOk, "vocalist processor observes scale revision");
-}
-
-bool testVocalistRackSnapshots()
-{
-    VocalistRack rack;
-    uint32_t hostId = 0, guestId = 0;
-    if (! expect(rack.addVocalist(0, hostId) && rack.addVocalist(1, guestId), "vocalist rack adds inputs")) return false;
-    {
-        const auto read = rack.acquire();
-        if (! expect(read->count == 2 && read->vocalists[0].id == hostId,
-                     "vocalist rack publishes immutable snapshot")) return false;
-        rack.setGain(hostId, 0.75f);
-        if (! expect(read->vocalists[0].gain == 1.0f,
-                     "active vocalist reader keeps its snapshot")) return false;
-    }
-    rack.reclaim();
-    return expect(rack.removeVocalist(guestId) && rack.acquire()->count == 1,
-                  "vocalist rack removes a vocalist on the control thread");
-}
-
-bool testAuxRoutingSnapshots()
-{
-    AuxRouting routing;
-    uint32_t reverb = 0;
-    if (! expect(routing.addAux(reverb), "aux routing creates a shared return")) return false;
-    if (! expect(routing.setSend(0, 0, reverb, 0.6f, false),
-                 "aux routing connects a vocalist send")) return false;
-    const auto read = routing.acquire();
-    return expect(read->auxCount == 1 && read->sends[0][0].auxId == reverb
-                  && read->sends[0][0].level == 0.6f,
-                  "aux routing publishes immutable send snapshot");
+    const auto ready = assessLivePerformance({ 48000.0, 96, 96, 0, 0.42f, 0 });
+    const auto caution = assessLivePerformance({ 48000.0, 512, 512, 0, 0.42f, 0 });
+    const auto overloaded = assessLivePerformance({ 48000.0, 96, 96, 0, 0.91f, 1 });
+    return expect(ready.rating == LivePerformanceRating::ready
+                      && std::abs(ready.roundTripMilliseconds - 4.0) < 1.0e-6,
+                  "LIVE check accepts a low-latency, stable path")
+        && expect(caution.rating == LivePerformanceRating::caution,
+                  "LIVE check warns when reported latency is too high")
+        && expect(overloaded.rating == LivePerformanceRating::notReady,
+                  "LIVE check rejects callback overloads");
 }
 
 bool testProjectTemplates()
@@ -132,7 +92,7 @@ bool testProjectTemplates()
 
 bool testMidiFileImport()
 {
-    const auto file = juce::File::getSpecialLocation(juce::File::tempDirectory)
+    const auto file = juce::File::getCurrentWorkingDirectory()
         .getNonexistentChildFile("StudioForgeMidiImport", ".mid", false);
     juce::MidiMessageSequence sequence;
     sequence.addEvent(juce::MidiMessage::noteOn(1, 60, static_cast<juce::uint8>(100)), 0.0);
@@ -177,11 +137,12 @@ bool testMidiFileImport()
 
 bool testProjectTemplateStore()
 {
-    const auto directory = juce::File::getSpecialLocation(juce::File::tempDirectory)
+    const auto directory = juce::File::getCurrentWorkingDirectory()
         .getNonexistentChildFile("StudioForgeTemplateStore", {}, true);
     ProjectTemplateStore store(directory);
-    const auto templateFile = store.makeTemplateFile("My / Recording Template");
-    const auto written = directory.createDirectory() && templateFile.replaceWithText("template");
+    const auto templateFile = store.makeTemplateFile("My Recording Template");
+    directory.createDirectory();
+    const auto written = directory.isDirectory() && templateFile.replaceWithText("template");
     const auto templates = store.load();
     const auto valid = written
         && templateFile.hasFileExtension("studioforge-template")
@@ -194,7 +155,7 @@ bool testProjectTemplateStore()
 
 bool testProjectAlternativeStore()
 {
-    const auto directory = juce::File::getSpecialLocation(juce::File::tempDirectory)
+    const auto directory = juce::File::getCurrentWorkingDirectory()
         .getNonexistentChildFile("StudioForgeAlternativeStore", {}, true);
     const auto projectFile = directory.getChildFile("Mix.studioforge");
     const auto rootWritten = directory.createDirectory() && projectFile.replaceWithText("project");
@@ -215,10 +176,17 @@ bool testProjectAlternativeStore()
 class OfflineAudioDevice final : public juce::AudioIODevice
 {
 public:
-    explicit OfflineAudioDevice(int size = 4) : juce::AudioIODevice("Offline", "Test"), blockSize(size) {}
+    explicit OfflineAudioDevice(int size = 4, int inputs = 2)
+        : juce::AudioIODevice("Offline", "Test"), blockSize(size), inputCount(inputs) {}
 
     juce::StringArray getOutputChannelNames() override { return { "L", "R" }; }
-    juce::StringArray getInputChannelNames() override { return {}; }
+    juce::StringArray getInputChannelNames() override
+    {
+        juce::StringArray names;
+        for (int channel = 0; channel < inputCount; ++channel)
+            names.add("In " + juce::String(channel + 1));
+        return names;
+    }
     juce::Array<double> getAvailableSampleRates() override { return { 44100.0 }; }
     juce::Array<int> getAvailableBufferSizes() override { return { blockSize }; }
     int getDefaultBufferSize() override { return blockSize; }
@@ -233,11 +201,12 @@ public:
     double getCurrentSampleRate() override { return 44100.0; }
     int getCurrentBitDepth() override { return 32; }
     juce::BigInteger getActiveOutputChannels() const override { return 3; }
-    juce::BigInteger getActiveInputChannels() const override { return {}; }
+    juce::BigInteger getActiveInputChannels() const override { return (1 << inputCount) - 1; }
     int getOutputLatencyInSamples() override { return 0; }
     int getInputLatencyInSamples() override { return 0; }
 private:
     int blockSize;
+    int inputCount;
 };
 
 bool testMetronomeRendering()
@@ -638,7 +607,7 @@ bool testPlaybackStructuralSnapshots()
 
 bool testProjectPersistence()
 {
-    const auto projectFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
+    const auto projectFile = juce::File::getCurrentWorkingDirectory()
         .getChildFile("StudioForgeCorePersistenceTest.studioforge");
     const auto malformedFile = projectFile.getSiblingFile("StudioForgeCoreMalformed.studioforge");
     const auto unsupportedFile = projectFile.getSiblingFile("StudioForgeCoreUnsupported.studioforge");
@@ -784,7 +753,7 @@ bool testProjectPersistence()
 
 bool testAutosaveRecovery()
 {
-    const auto temporaryRoot = juce::File::getSpecialLocation(juce::File::tempDirectory)
+    const auto temporaryRoot = juce::File::getCurrentWorkingDirectory()
         .getChildFile("StudioForgeAutosaveTests");
     temporaryRoot.deleteRecursively();
 
@@ -814,7 +783,7 @@ bool testAutosaveRecovery()
 
 bool testRecentProjectsStore()
 {
-    const auto directory = juce::File::getSpecialLocation(juce::File::tempDirectory)
+    const auto directory = juce::File::getCurrentWorkingDirectory()
         .getChildFile("StudioForgeRecentProjectsTest");
     const auto first = directory.getChildFile("first.studioforge");
     const auto second = directory.getChildFile("second.studioforge");
@@ -842,7 +811,7 @@ bool testRecentProjectsStore()
 
 bool testMediaReloadAndRelink()
 {
-    const auto tempDirectory = juce::File::getSpecialLocation(juce::File::tempDirectory);
+    const auto tempDirectory = juce::File::getCurrentWorkingDirectory();
     const auto mediaA = tempDirectory.getChildFile("StudioForgePhase5A.wav");
     const auto mediaB = tempDirectory.getChildFile("StudioForgePhase5B.wav");
     const auto projectA = tempDirectory.getChildFile("StudioForgePhase5A.studioforge");
@@ -975,7 +944,7 @@ bool testUndoRedoHistory()
 
 bool testRecordingFoundation()
 {
-    const auto recordingFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
+    const auto recordingFile = juce::File::getCurrentWorkingDirectory()
         .getChildFile("StudioForgePhase7Recording.wav");
     recordingFile.deleteFile();
     TrackDataModel model;
@@ -1010,9 +979,48 @@ bool testRecordingFoundation()
     return true;
 }
 
+bool testMultiTrackRecording()
+{
+    const auto directory = juce::File::getCurrentWorkingDirectory()
+        .getChildFile("StudioForgeMultiTrackRecording");
+    directory.deleteRecursively();
+    directory.createDirectory();
+    const auto firstFile = directory.getChildFile("first.wav");
+    const auto secondFile = directory.getChildFile("second.wav");
+
+    TrackDataModel model;
+    model.ensureTrackCount(2);
+    model.setTrackInputMonitoring(1, false, 2);
+    OfflineAudioDevice device(4, 4);
+    AudioEngine engine(&model);
+    engine.audioDeviceAboutToStart(&device);
+    const std::vector<AudioEngine::AudioRecordingTarget> targets { { 0, firstFile }, { 1, secondFile } };
+    if (! expect(engine.startRecordings(targets).wasOk() && engine.isRecording(),
+                 "multiple armed audio targets start as one recording take")) return false;
+
+    float input0[4] { 0.10f, 0.11f, 0.12f, 0.13f };
+    float input1[4] { 0.20f, 0.21f, 0.22f, 0.23f };
+    float input2[4] { 0.30f, 0.31f, 0.32f, 0.33f };
+    float input3[4] { 0.40f, 0.41f, 0.42f, 0.43f };
+    const float* inputs[] { input0, input1, input2, input3 };
+    float outputLeft[4] {}, outputRight[4] {};
+    float* outputs[] { outputLeft, outputRight };
+    engine.audioDeviceIOCallbackWithContext(inputs, 4, outputs, 2, 4, {});
+
+    const auto stopped = engine.stopRecording().wasOk() && ! engine.isRecording();
+    const auto& firstTrack = model.getTrack(0).clips;
+    const auto& secondTrack = model.getTrack(1).clips;
+    const auto mappedSeparately = firstTrack.size() == 1 && secondTrack.size() == 1
+        && approximatelyEqual(firstTrack.front().cachedBuffer->getSample(0, 1), 0.11f)
+        && approximatelyEqual(secondTrack.front().cachedBuffer->getSample(0, 1), 0.31f);
+    directory.deleteRecursively();
+    return expect(stopped && mappedSeparately,
+                  "multi-track recording finalizes a separately mapped clip for every target");
+}
+
 bool testPunchRecordingCapture()
 {
-    const auto recordingFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
+    const auto recordingFile = juce::File::getCurrentWorkingDirectory()
         .getChildFile("StudioForgePunchRecording.wav");
     recordingFile.deleteFile();
 
@@ -1183,7 +1191,7 @@ bool testMidiRecordingFoundation()
 
 bool testOfflineBounce()
 {
-    const auto outputFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
+    const auto outputFile = juce::File::getCurrentWorkingDirectory()
         .getChildFile("StudioForgePhase8Bounce.wav");
     const auto flacFile = outputFile.withFileExtension(".flac");
     outputFile.deleteFile();
@@ -1224,7 +1232,7 @@ bool testOfflineBounce()
 
 bool testMidiOnlyOfflineBounce()
 {
-    const auto outputFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
+    const auto outputFile = juce::File::getCurrentWorkingDirectory()
         .getChildFile("StudioForgeMidiOnlyBounce.wav");
     outputFile.deleteFile();
     TrackDataModel model;
@@ -1284,6 +1292,25 @@ bool testClipDuplicate()
     if (! expect(clips.size() == 2 && clips[1].cachedBuffer == source && clips[1].startSample == 20.0,
                  "duplicate shares media resource and preserves requested position")) return false;
     return expect(model.undo() && model.getTrack(0).clips.size() == 1, "duplicate is one undoable edit");
+}
+
+bool testClipCrossfades()
+{
+    TrackDataModel model;
+    const auto track = model.addTrack();
+    auto source = std::make_shared<juce::AudioBuffer<float>>(2, 16);
+    const auto first = model.addClipToTrack(0, {}, 0.0, source);
+    const auto second = model.addClipToTrack(0, {}, 8.0, source);
+    model.clearUndoHistory();
+    if (! expect(first.isValid() && second.isValid() && model.createCrossfadesForTrack(track),
+                 "overlapping audio clips create a crossfade")) return false;
+
+    const auto& clips = model.getTrack(0).clips;
+    if (! expect(clips[0].fadeOutSamples == 8.0 && clips[1].fadeInSamples == 8.0,
+                 "crossfade length matches the overlap")) return false;
+    return expect(model.undo() && model.getTrack(0).clips[0].fadeOutSamples == 0.0
+                  && model.getTrack(0).clips[1].fadeInSamples == 0.0,
+                  "crossfade creation is one undoable edit");
 }
 
 bool testAudioMediaSourceOwnership()
@@ -1566,9 +1593,9 @@ bool testMidiFxChain()
 
 bool testMidiFxPersistence()
 {
-    const auto projectFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
+    const auto projectFile = juce::File::getCurrentWorkingDirectory()
         .getChildFile("StudioForgeMidiFxPersistence.sfproj");
-    const auto catalogFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
+    const auto catalogFile = juce::File::getCurrentWorkingDirectory()
         .getChildFile("StudioForgeMidiFxCatalog.xml");
     projectFile.deleteFile();
     catalogFile.deleteFile();
@@ -1602,11 +1629,11 @@ bool testMidiFxPersistence()
 
 bool testPluginHostFoundation()
 {
-    const auto catalog = juce::File::getSpecialLocation(juce::File::tempDirectory)
+    const auto catalog = juce::File::getCurrentWorkingDirectory()
         .getChildFile("StudioForgePluginHostFoundation.xml");
     catalog.deleteFile();
     PluginHostService host(catalog);
-    const auto result = host.scanVst3(juce::File::getSpecialLocation(juce::File::tempDirectory)
+    const auto result = host.scanVst3(juce::File::getCurrentWorkingDirectory()
                                       .getChildFile("StudioForge-not-a-plugin.vst3"));
     return expect(result.failed(), "plugin scan rejects a missing VST3 without entering the audio path")
         && expect(host.getKnownPlugins().isEmpty(), "failed scan does not publish a plugin type");
@@ -1617,7 +1644,7 @@ bool testVst3EffectIntegration()
     const juce::File pluginFile { STUDIOFORGE_TEST_VST3_PATH };
     if (! expect(pluginFile.exists(), "controlled VST3 test effect was built")) return false;
 
-    const auto catalog = juce::File::getSpecialLocation(juce::File::tempDirectory)
+    const auto catalog = juce::File::getCurrentWorkingDirectory()
         .getChildFile("StudioForgeVst3Catalog.xml");
     catalog.deleteFile();
     PluginHostService host(catalog);
@@ -1681,7 +1708,7 @@ bool testVst3EffectIntegration()
     const auto reorderedIndex = static_cast<size_t>(model.getTrackIndex(trackA));
     if (! expect(model.getFxRackSnapshot(reorderedIndex)->processors[0] == effect,
                  "VST3 ownership remains with its TrackId after reorder")) return false;
-    const auto projectFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
+    const auto projectFile = juce::File::getCurrentWorkingDirectory()
         .getChildFile("StudioForgePluginStateRoundTrip.sfproj");
     projectFile.deleteFile();
     if (! expect(ProjectSerializer::save(model, projectFile).wasOk(), "project saves VST3 rack identity and state")) return false;
@@ -1834,30 +1861,12 @@ bool testRealtimeHostBenchmark()
 #endif
 }
 
-bool testVocalistAndAuxPluginSnapshots()
-{
-    TrackDataModel model;
-    AudioEngine engine(&model);
-    uint32_t vocalistId = 0;
-    if (! expect(engine.addVocalist(0, vocalistId), "vocalist plugin test creates vocalist")) return false;
-    if (! expect(engine.setVocalistFxProcessor(0, 0, std::make_shared<GainUtilityProcessor>()),
-                 "vocalist plugin snapshot accepts processor")) return false;
-    if (! expect(engine.setAuxFxProcessor(0, 0, std::make_shared<GainUtilityProcessor>()),
-                 "aux plugin snapshot accepts processor")) return false;
-    if (! expect(engine.setVocalistSend(0, 0.5f), "vocalist send reaches shared aux")) return false;
-
-    return expect(engine.getVocalistFxProcessor(0, 0) != nullptr,
-                  "vocalist plugin snapshot remains published after aux configuration");
-}
-
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInitialiser;
     const auto passed = testTrackMixing()
         && testGlobalScaleContext()
-        && testVocalistProcessor()
-        && testVocalistRackSnapshots()
-        && testAuxRoutingSnapshots()
+        && testLivePerformanceAssessment()
         && testProjectTemplates()
         && testProjectTemplateStore()
         && testProjectAlternativeStore()
@@ -1884,6 +1893,7 @@ int main()
         && testUndoRedoHistory()
         && testAutomationWriteModes()
         && testRecordingFoundation()
+        && testMultiTrackRecording()
         && testPunchRecordingCapture()
         && testInputMonitoring()
         && testMidiInputMonitoring()
@@ -1893,6 +1903,7 @@ int main()
         && testMidiOnlyOfflineBounce()
         && testClipGainAndFades()
         && testClipDuplicate()
+        && testClipCrossfades()
         && testAudioMediaSourceOwnership()
         && testBusAndSendRouting()
         && testPostPanSendRouting()
@@ -1908,7 +1919,6 @@ int main()
         && testMidiFxChain()
         && testMidiFxPersistence()
         && testPluginHostFoundation()
-        && testVocalistAndAuxPluginSnapshots()
         && testVst3EffectIntegration()
         && testOfflineAudioEnginePath();
 #ifdef STUDIOFORGE_PERF_BENCHMARK

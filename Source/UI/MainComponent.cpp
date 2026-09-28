@@ -58,7 +58,14 @@ MainComponent::MainComponent()
         startupWorkflow.showTrackCreation(true);
     };
     controlBar.onRecordRequested = [this] { toggleRecording(); };
+    controlBar.onLiveModeChanged = [this](bool enabled)
+    {
+        audioEngine.setLivePerformanceEnabled(enabled);
+        if (enabled)
+            audioEngine.optimiseDeviceForLivePerformance();
+    };
     controlBar.onCountInChanged = [this](bool enabled) { countInEnabled = enabled; };
+    controlBar.onCountInBarsChanged = [this](int bars) { countInBars = juce::jlimit(1, 2, bars); };
     controlBar.onPunchChanged = [this](bool enabled)
     {
         if (! enabled)
@@ -203,7 +210,7 @@ bool MainComponent::handleGlobalKeyPress(const juce::KeyPress& key)
 
     if (key.isKeyCode(juce::KeyPress::spaceKey))
     {
-        controlBar.togglePlayback();
+        handleSpaceTransport();
         return true;
     }
     if (key.isKeyCode(juce::KeyPress::returnKey))
@@ -229,6 +236,24 @@ bool MainComponent::handleGlobalKeyPress(const juce::KeyPress& key)
     }
 
     return false;
+}
+
+void MainComponent::handleSpaceTransport()
+{
+    if (audioEngine.isPlaying())
+    {
+        controlBar.stopPlayback();
+        spaceStopPendingReturn = true;
+    }
+    else if (spaceStopPendingReturn)
+    {
+        trackDataModel.setPlayheadPosition(0.0);
+        spaceStopPendingReturn = false;
+    }
+    else
+    {
+        controlBar.togglePlayback();
+    }
 }
 
 juce::Result MainComponent::saveProject(const juce::File& file)
@@ -443,16 +468,29 @@ void MainComponent::toggleRecording()
         if (audioEngine.isMidiRecording())
             audioEngine.stopMidiRecording();
         audioEngine.clearRecordingCaptureRange();
+        audioEngine.setCountInMetronomeActive(false);
         recordingCountdownActive = false;
         recordingPunchStopSample = -1.0;
         pendingRecordingTrack = -1;
-        pendingRecordingDestination = {};
+        pendingRecordingDestination = juce::File {};
+        pendingAudioRecordingTargets.clear();
         controlBar.setRecordActive(false);
         controlBar.setRecordCountdown(false);
         arrangeWindow.hideRecordingPreview();
         arrangeWindow.repaint();
         return;
     }
+
+    std::vector<AudioEngine::AudioRecordingTarget> audioTargets;
+    for (size_t index = 0; index < trackDataModel.getTrackCount(); ++index)
+        if (const auto& track = trackDataModel.getTrack(index);
+            track.type == TrackType::audio && track.armed.load(std::memory_order_relaxed))
+        {
+            const auto destination = createRecordingDestination();
+            if (destination == juce::File {})
+                return;
+            audioTargets.push_back({ index, destination });
+        }
 
     const auto armedTrack = trackDataModel.getFirstArmedTrackIndex();
     const auto target = armedTrack >= 0 ? armedTrack : getSelectedTrackIndex();
@@ -462,6 +500,58 @@ void MainComponent::toggleRecording()
     const auto type = trackDataModel.getTrack(static_cast<size_t>(target)).type;
     if (type != TrackType::audio && type != TrackType::instrument && type != TrackType::externalMidi)
         return;
+    if (audioTargets.empty() && type == TrackType::audio)
+    {
+        const auto destination = createRecordingDestination();
+        if (destination == juce::File {})
+            return;
+        audioTargets.push_back({ static_cast<size_t>(target), destination });
+    }
+
+    if (! audioTargets.empty())
+    {
+        if (const auto validation = audioEngine.validateRecordingTargets(audioTargets); validation.failed())
+        {
+            showRecordingFailure(validation);
+            return;
+        }
+
+        if (audioEngine.isPlaying())
+        {
+            audioEngine.clearRecordingCaptureRange();
+            startAudioRecordingsNow(audioTargets, trackDataModel.getPlayheadPosition());
+            return;
+        }
+
+        if (trackDataModel.isPunchActive())
+        {
+            const auto punchIn = trackDataModel.getPunchInSample();
+            const auto punchOut = trackDataModel.getPunchOutSample();
+            audioEngine.setRecordingCaptureRange(punchIn, punchOut);
+            recordingPunchStopSample = punchOut;
+            audioEngine.setPlaybackState(true);
+            startAudioRecordingsNow(audioTargets, punchIn);
+            return;
+        }
+
+        audioEngine.clearRecordingCaptureRange();
+        if (! countInEnabled)
+        {
+            startAudioRecordingsNow(audioTargets);
+            return;
+        }
+
+        const auto samplesPerBeat = trackDataModel.getSampleRate() * 60.0 / trackDataModel.getBpm();
+        pendingRecordingStartSample = trackDataModel.getPlayheadPosition()
+            + samplesPerBeat * trackDataModel.getTimeSignatureNumerator() * countInBars;
+        pendingAudioRecordingTargets = std::move(audioTargets);
+        recordingCountdownActive = true;
+        audioEngine.setCountInMetronomeActive(true);
+        audioEngine.setPlaybackState(true);
+        controlBar.setRecordCountdown(true);
+        return;
+    }
+
     const auto destination = type == TrackType::audio ? createRecordingDestination() : juce::File {};
     if (type == TrackType::audio && destination == juce::File {})
         return;
@@ -493,10 +583,11 @@ void MainComponent::toggleRecording()
 
     const auto samplesPerBeat = trackDataModel.getSampleRate() * 60.0 / trackDataModel.getBpm();
     pendingRecordingStartSample = trackDataModel.getPlayheadPosition()
-        + samplesPerBeat * trackDataModel.getTimeSignatureNumerator();
+        + samplesPerBeat * trackDataModel.getTimeSignatureNumerator() * countInBars;
     pendingRecordingTrack = target;
     pendingRecordingDestination = destination;
     recordingCountdownActive = true;
+    audioEngine.setCountInMetronomeActive(true);
     audioEngine.setPlaybackState(true);
     controlBar.setRecordCountdown(true);
 }
@@ -518,10 +609,67 @@ void MainComponent::startRecordingNow(int trackIndex, const juce::File& destinat
         controlBar.setRecordActive(true);
         arrangeWindow.showRecordingPreview(trackIndex, recordingStartSample);
     }
+    else
+    {
+        showRecordingFailure(result);
+    }
+}
+
+void MainComponent::startAudioRecordingsNow(const std::vector<AudioEngine::AudioRecordingTarget>& targets,
+                                            double timelineStartSample)
+{
+    if (targets.empty())
+        return;
+
+    const auto recordingStartSample = timelineStartSample >= 0.0
+        ? timelineStartSample : trackDataModel.getPlayheadPosition();
+    const auto result = audioEngine.startRecordings(targets, recordingStartSample);
+    if (result.wasOk())
+    {
+        audioEngine.setPlaybackState(true);
+        controlBar.setRecordActive(true);
+        arrangeWindow.showRecordingPreview(static_cast<int>(targets.front().trackIndex), recordingStartSample);
+    }
+    else
+    {
+        showRecordingFailure(result);
+    }
+}
+
+void MainComponent::showRecordingFailure(const juce::Result& result) const
+{
+    StudioForgeDialog::showWarning("Recording unavailable",
+                                   "Cannot start recording. " + result.getErrorMessage()
+                                       + "\n\nCheck File > Audio Device Settings and each Track Input.");
 }
 
 void MainComponent::timerCallback()
 {
+    if (audioEngine.isLivePerformanceEnabled())
+    {
+        const auto key = audioEngine.getLiveKeyResult();
+        if (key.revision != 0 && key.revision != appliedLiveKeyRevision)
+        {
+            audioEngine.applyDetectedKeyToPitchCorrection();
+            appliedLiveKeyRevision = key.revision;
+        }
+    }
+    else
+    {
+        appliedLiveKeyRevision = 0;
+    }
+
+    if (recordingCountdownActive && ! audioEngine.isPlaying())
+    {
+        recordingCountdownActive = false;
+        pendingRecordingTrack = -1;
+        pendingRecordingDestination = juce::File {};
+        pendingAudioRecordingTargets.clear();
+        audioEngine.setCountInMetronomeActive(false);
+        controlBar.setRecordCountdown(false);
+        return;
+    }
+
     if (audioEngine.isRecording() && recordingPunchStopSample >= 0.0
         && trackDataModel.getPlayheadPosition() >= recordingPunchStopSample)
     {
@@ -538,11 +686,15 @@ void MainComponent::timerCallback()
 
     const auto track = pendingRecordingTrack;
     const auto destination = pendingRecordingDestination;
+    auto audioTargets = std::move(pendingAudioRecordingTargets);
     recordingCountdownActive = false;
+    audioEngine.setCountInMetronomeActive(false);
     pendingRecordingTrack = -1;
-    pendingRecordingDestination = {};
+    pendingRecordingDestination = juce::File {};
     controlBar.setRecordCountdown(false);
-    if (track >= 0)
+    if (! audioTargets.empty())
+        startAudioRecordingsNow(audioTargets);
+    else if (track >= 0)
         startRecordingNow(track, destination);
 }
 
@@ -569,12 +721,12 @@ void MainComponent::resized()
     // Dock panes from a bounded budget so opening both lower editors never
     // collapses the arrange workspace or overlaps controls on smaller screens.
     const auto dockBudget = juce::jmax(0, area.getHeight() - 220);
-    const auto requestedDockHeight = (mixerPane.isVisible() ? 210 : 0)
+    const auto requestedDockHeight = (mixerPane.isVisible() ? 270 : 0)
                                    + (pianoRoll.isVisible() ? 250 : 0);
     const auto dockScale = requestedDockHeight > 0
         ? juce::jmin(1.0f, static_cast<float>(dockBudget) / static_cast<float>(requestedDockHeight)) : 0.0f;
     if (mixerPane.isVisible())
-        mixerPane.setBounds(area.removeFromBottom(juce::roundToInt(210.0f * dockScale)));
+        mixerPane.setBounds(area.removeFromBottom(juce::roundToInt(270.0f * dockScale)));
     if (pianoRoll.isVisible())
         pianoRoll.setBounds(area.removeFromBottom(juce::roundToInt(250.0f * dockScale)));
 

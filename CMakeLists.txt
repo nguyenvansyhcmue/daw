@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(StudioForgeDAW VERSION 1.0.0 LANGUAGES CXX)
+project(StudioForgeDAW VERSION 1.0.0 LANGUAGES C CXX)
 option(STUDIOFORGE_PERF_BENCHMARK "Enable deterministic host audio benchmark" OFF)
 set(STUDIOFORGE_ASIO_SDK_DIR "" CACHE PATH "Path to a licensed Steinberg ASIO SDK root")
 
@@ -60,6 +60,7 @@ target_sources(StudioForgeDAW PRIVATE
     Source/Core/MainWindow.cpp
     Source/Core/Automation/AutomationLane.cpp
     Source/AudioEngine/AudioEngine.cpp
+    Source/AudioEngine/LiveKeyDetector.cpp
     Source/AudioEngine/AudioGraph.cpp
     Source/Models/TrackDataModel.cpp
     Source/Project/ProjectSerializer.cpp
@@ -95,7 +96,6 @@ target_sources(StudioForgeDAW PRIVATE
     Source/UI/AssetBrowserPane.cpp
     Source/UI/PerformanceRoomIconLibrary.cpp
     Source/UI/StartupWorkflowPane.cpp
-    Source/UI/VocalistRackComponent.cpp
 )
 
 target_include_directories(StudioForgeDAW PRIVATE
@@ -127,6 +127,7 @@ target_compile_definitions(StudioForgeDAW PRIVATE
     JUCE_DISPLAY_SPLASH_SCREEN=0
     JUCE_PROJUCER_INCLUDE_JUCE_HEADER=0
     JUCE_PLUGINHOST_VST3=1
+    $<$<PLATFORM_ID:Darwin>:JUCE_PLUGINHOST_AU=1>
     JUCE_ASIO=${STUDIOFORGE_ENABLE_ASIO}
 )
 
@@ -139,10 +140,9 @@ if (MSVC)
     )
 endif()
 
-if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT MSVC)
     target_compile_options(StudioForgeDAW PRIVATE
         $<$<CONFIG:Release>:-O3>
-        $<$<CONFIG:Release>:-march=native>
     )
 endif()
 
@@ -155,6 +155,14 @@ endif()
 include(CTest)
 
 if (BUILD_TESTING)
+    add_executable(StudioForgeLivePerformanceTests
+        Tests/LivePerformanceAssessmentTests.cpp
+    )
+    target_include_directories(StudioForgeLivePerformanceTests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/Source
+    )
+    add_test(NAME StudioForgeLivePerformanceTests COMMAND StudioForgeLivePerformanceTests)
+
     juce_add_plugin(StudioForgeVst3TestEffect
         COMPANY_NAME "StudioForge"
         PLUGIN_MANUFACTURER_CODE StFg
@@ -184,6 +192,7 @@ if (BUILD_TESTING)
         Tests/AutomationDomainTests.cpp
         Source/Core/Automation/AutomationLane.cpp
         Source/AudioEngine/AudioEngine.cpp
+        Source/AudioEngine/LiveKeyDetector.cpp
         Source/AudioEngine/AudioGraph.cpp
         Source/Models/TrackDataModel.cpp
         Source/Project/ProjectSerializer.cpp

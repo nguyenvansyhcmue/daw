@@ -17,6 +17,14 @@ constexpr int controlHeight = StudioForgeTheme::UIMetrics::compactControlHeight;
 constexpr int stripPadding = 4;
 constexpr float silentGainThreshold = 0.0001f;
 
+struct PluginBrowserLayout final
+{
+    static constexpr int width = 640;
+    static constexpr int height = 460;
+    static constexpr int screenX = 150;
+    static constexpr int screenY = 120;
+};
+
 void configureSectionLabel(juce::Label& label)
 {
     label.setJustificationType(juce::Justification::centredLeft);
@@ -50,6 +58,41 @@ public:
 private:
     std::shared_ptr<AudioEffectProcessor> owner;
     std::unique_ptr<juce::Component> editor;
+};
+
+// Plug-in editors need to float above the DAW, not enter JUCE's modal state.
+// The latter blocks every click in the main window and macOS signals this with
+// the system alert sound.
+class FloatingPluginEditorWindow final : public juce::DocumentWindow
+{
+public:
+    using CloseCallback = std::function<void(FloatingPluginEditorWindow*)>;
+
+    FloatingPluginEditorWindow(const juce::String& title, juce::Component* content,
+                               juce::Component* componentToCentreAround, CloseCallback closeCallbackIn)
+        : juce::DocumentWindow(title, juce::Colour(0xff25282d), juce::DocumentWindow::closeButton, true),
+          closeCallback(std::move(closeCallbackIn))
+    {
+        setUsingNativeTitleBar(true);
+        setContentOwned(content, true);
+        setResizable(true, true);
+        centreAroundComponent(componentToCentreAround, getWidth(), getHeight());
+        setVisible(true);
+        toFront(true);
+    }
+
+    void closeButtonPressed() override
+    {
+        setVisible(false);
+
+        // Defer destruction until DocumentWindow has completed its close
+        // callback. The strip owns this window, so no self-deletion occurs.
+        if (closeCallback != nullptr)
+            juce::MessageManager::callAsync([callback = closeCallback, window = this] { callback(window); });
+    }
+
+private:
+    CloseCallback closeCallback;
 };
 }
 
@@ -135,8 +178,15 @@ TrackInspectorComponent::TrackInspectorComponent(TrackDataModel& model) : trackM
         button->setTooltip(tooltip);
         addAndMakeVisible(*button);
     }
+    // Keep the compact mute control unambiguous. Its one-character label must
+    // never be replaced by a text ellipsis on macOS.
+    mute.setButtonText("M");
     recordEnable.onClick = [this] { if (selectedTrack >= 0) trackModel.setTrackArmed(static_cast<size_t>(selectedTrack), recordEnable.getToggleState()); };
-    inputMonitoring.onClick = [this] { if (selectedTrack >= 0) trackModel.setTrackInputMonitoring(static_cast<size_t>(selectedTrack), inputMonitoring.getToggleState()); };
+    inputMonitoring.onClick = [this]
+    {
+        if (selectedTrack >= 0)
+            trackModel.cycleTrackInputMonitoring(static_cast<size_t>(selectedTrack));
+    };
     mute.onClick = [this] { if (selectedTrack >= 0) trackModel.setTrackMuted(static_cast<size_t>(selectedTrack), mute.getToggleState()); };
     solo.onClick = [this] { if (selectedTrack >= 0) trackModel.setTrackSolo(static_cast<size_t>(selectedTrack), solo.getToggleState()); };
     soloSafe.onClick = [this] { if (selectedTrack >= 0) trackModel.setTrackSoloSafe(static_cast<size_t>(selectedTrack), soloSafe.getToggleState()); };
@@ -173,6 +223,10 @@ void TrackInspectorComponent::refresh()
     recordEnable.setToggleState(track.armed.load(), juce::dontSendNotification);
     inputMonitoring.setToggleState(track.inputMonitoring.load(), juce::dontSendNotification);
     inputMonitoring.setEnabled(state.supportsInputMonitoring);
+    const auto monitorTooltip = track.inputMonitoring.load() ? "Input monitoring: In. Click to turn it Off."
+        : track.autoInputMonitoring.load() ? "Input monitoring: Auto. Click to switch to In."
+        : "Input monitoring: Off. Click to switch to Auto.";
+    inputMonitoring.setTooltip(monitorTooltip);
     mute.setToggleState(track.muted.load(), juce::dontSendNotification);
     solo.setToggleState(track.solo.load(), juce::dontSendNotification);
     soloSafe.setToggleState(track.soloSafe.load(), juce::dontSendNotification);
@@ -233,7 +287,16 @@ ChannelStripComponent::ChannelStripComponent(ChannelRole role, TrackDataModel& m
         button.setTooltip("Click to add or manage an audio effect");
         button.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff303b42));
         button.setColour(juce::TextButton::textColourOffId, StudioForgeTheme::primaryText.withAlpha(0.88f));
-        button.onClick = [this, slot] { showAudioFxMenu(slot); };
+        button.onClick = [this, slot]
+        {
+            const auto rack = isSelectedTrackStrip()
+                                ? (selectedTrack >= 0 ? trackModel.getFxRackSnapshot(static_cast<size_t>(selectedTrack)) : nullptr)
+                                : audioEngine.getMasterFxRackSnapshot();
+            if (rack != nullptr && rack->processors[slot] == nullptr)
+                showPluginBrowser(slot);
+            else
+                showAudioFxMenu(slot);
+        };
         addAndMakeVisible(button);
     }
     configureSectionLabel(sceneHeading);
@@ -264,7 +327,7 @@ ChannelStripComponent::ChannelStripComponent(ChannelRole role, TrackDataModel& m
                             ? (selectedTrack >= 0 ? trackModel.getFxRackSnapshot(static_cast<size_t>(selectedTrack)) : nullptr)
                             : audioEngine.getMasterFxRackSnapshot();
         for (size_t slot = 0; rack != nullptr && slot < rack->processors.size(); ++slot)
-            if (rack->processors[slot] == nullptr) { showAudioFxMenu(slot); return; }
+            if (rack->processors[slot] == nullptr) { showPluginBrowser(slot); return; }
     };
     addAudioFx.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff283b42));
     addAndMakeVisible(addAudioFx);
@@ -657,10 +720,10 @@ void ChannelStripComponent::showAudioFxMenu(size_t slot)
     if (isSelectedTrackStrip() && selectedTrack < 0) return;
     juce::PopupMenu menu;
     menu.addItem(1, "Remove Audio FX"); menu.addItem(2, "Add Gain Utility"); menu.addItem(3, "Bypass");
-    menu.addItem(4, "Load VST3 Plug-in..."); menu.addItem(5, "Open Plug-in Editor");
+    menu.addItem(4, "Browse Audio Units & VST3..."); menu.addItem(5, "Scan VST3 Plug-in File..."); menu.addItem(6, "Open Plug-in Editor");
     const auto canAddMidiFx = isSelectedTrackStrip() && selectedTrack >= 0
         && trackModel.getTrack(static_cast<size_t>(selectedTrack)).type != TrackType::audio;
-    menu.addItem(6, "Add MIDI Transpose (+12)", canAddMidiFx);
+    menu.addItem(7, "Add MIDI Transpose (+12)", canAddMidiFx);
     menu.showMenuAsync(juce::PopupMenu::Options {}, [this, slot] (int choice)
     {
         if (choice == 1)
@@ -684,6 +747,11 @@ void ChannelStripComponent::showAudioFxMenu(size_t slot)
             }
         }
         else if (choice == 4)
+        {
+            showPluginBrowser(slot);
+            return;
+        }
+        else if (choice == 5)
         {
             pluginFileChooser = std::make_unique<juce::FileChooser>("Load VST3 plug-in", juce::File {}, "*.vst3");
             pluginFileChooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::canSelectDirectories,
@@ -711,12 +779,12 @@ void ChannelStripComponent::showAudioFxMenu(size_t slot)
                 });
             return;
         }
-        else if (choice == 5)
+        else if (choice == 6)
         {
             showPluginEditor(slot);
             return;
         }
-        else if (choice == 6 && isSelectedTrackStrip())
+        else if (choice == 7 && isSelectedTrackStrip())
         {
             audioEngine.setFxProcessor(static_cast<size_t>(selectedTrack), slot,
                                        std::make_shared<MidiTransposeProcessor>(12));
@@ -727,7 +795,16 @@ void ChannelStripComponent::showAudioFxMenu(size_t slot)
 
 void ChannelStripComponent::showPluginBrowser(size_t slot)
 {
-    auto* panel = new PluginBrowserPanel(pluginHost, [this, slot](const juce::PluginDescription& description)
+    // Selection is a view concern. Capture the destination TrackId now, so
+    // changing selection while the browser is open can never move an FX to a
+    // different channel.
+    const auto destinationIsMaster = ! isSelectedTrackStrip();
+    const auto destinationTrackId = ! destinationIsMaster && selectedTrack >= 0
+        ? trackModel.getTrackId(static_cast<size_t>(selectedTrack)) : TrackId {};
+    if (! destinationIsMaster && ! destinationTrackId.isValid())
+        return;
+
+    auto* panel = new PluginBrowserPanel(pluginHost, [this, slot, destinationIsMaster, destinationTrackId](const juce::PluginDescription& description)
     {
         juce::String error;
         auto* device = audioEngine.getAudioDeviceManager().getCurrentAudioDevice();
@@ -735,11 +812,16 @@ void ChannelStripComponent::showPluginBrowser(size_t slot)
         const auto blockSize = device != nullptr ? device->getCurrentBufferSizeSamples() : 512;
         if (auto effect = pluginHost.createEffect(description, sampleRate, blockSize, error))
         {
-            if (isSelectedTrackStrip()) audioEngine.setFxProcessor(static_cast<size_t>(selectedTrack), slot, std::move(effect));
-            else audioEngine.setMasterFxProcessor(slot, std::move(effect));
+            if (destinationIsMaster)
+                audioEngine.setMasterFxProcessor(slot, std::move(effect));
+            else if (const auto destinationIndex = trackModel.getTrackIndex(destinationTrackId); destinationIndex >= 0)
+                audioEngine.setFxProcessor(static_cast<size_t>(destinationIndex), slot, std::move(effect));
         }
         refresh();
     });
+    // A browse dialog must open at a useful working size. Without this, JUCE
+    // derives its size from the unlaid-out content and produces a tiny dialog.
+    panel->setSize(PluginBrowserLayout::width, PluginBrowserLayout::height);
 
     juce::DialogWindow::LaunchOptions options;
     options.content.setOwned(panel);
@@ -748,8 +830,14 @@ void ChannelStripComponent::showPluginBrowser(size_t slot)
     options.escapeKeyTriggersCloseButton = true;
     options.useNativeTitleBar = true;
     options.resizable = true;
-    options.componentToCentreAround = this;
-    options.launchAsync();
+    options.componentToCentreAround = nullptr;
+    if (auto* dialog = options.launchAsync(); dialog != nullptr)
+    {
+        // This is a desktop utility window: use a stable, DAW-style placement
+        // instead of JUCE's context-sensitive automatic centring.
+        dialog->setBounds(PluginBrowserLayout::screenX, PluginBrowserLayout::screenY,
+                          PluginBrowserLayout::width, PluginBrowserLayout::height);
+    }
 }
 
 void ChannelStripComponent::showPluginEditor(size_t slot)
@@ -771,15 +859,20 @@ void ChannelStripComponent::showPluginEditor(size_t slot)
     const auto editorBounds = editor->getBounds();
     auto* host = new PluginEditorHost(processor, std::move(editor));
     host->setSize(juce::jmax(320, editorBounds.getWidth()), juce::jmax(220, editorBounds.getHeight()));
-    juce::DialogWindow::LaunchOptions options;
-    options.content.setOwned(host);
-    options.dialogTitle = processor->getName();
-    options.dialogBackgroundColour = juce::Colour(0xff25282d);
-    options.escapeKeyTriggersCloseButton = true;
-    options.useNativeTitleBar = true;
-    options.resizable = true;
-    options.componentToCentreAround = this;
-    options.launchAsync();
+    const juce::Component::SafePointer<ChannelStripComponent> safeOwner(this);
+    auto closeWindow = [safeOwner](FloatingPluginEditorWindow* window)
+    {
+        if (safeOwner == nullptr)
+            return;
+
+        auto& windows = safeOwner->pluginEditorWindows;
+        windows.erase(std::remove_if(windows.begin(), windows.end(), [window](const auto& ownedWindow)
+        {
+            return ownedWindow.get() == window;
+        }), windows.end());
+    };
+    pluginEditorWindows.push_back(std::make_unique<FloatingPluginEditorWindow>(processor->getName(), host, this,
+                                                                                 std::move(closeWindow)));
 }
 
 BusId ChannelStripComponent::busForMenuItem(int itemId) const noexcept
@@ -790,8 +883,18 @@ BusId ChannelStripComponent::busForMenuItem(int itemId) const noexcept
 
 void ChannelStripComponent::timerCallback()
 {
-    if (isSelectedTrackStrip() && selectedTrack >= 0)
-        meter.updatePeak(audioEngine.getTrackPeak(static_cast<size_t>(selectedTrack)));
+    if (isSelectedTrackStrip() && selectedTrack >= 0
+        && selectedTrack < static_cast<int>(trackModel.getTrackCount()))
+    {
+        const auto& track = trackModel.getTrack(static_cast<size_t>(selectedTrack));
+        const auto useInputMeter = track.type == TrackType::audio
+            && (track.armed.load(std::memory_order_relaxed)
+                || track.inputMonitoring.load(std::memory_order_relaxed)
+                || track.autoInputMonitoring.load(std::memory_order_relaxed)
+                || audioEngine.isLivePerformanceEnabled());
+        meter.updatePeak(useInputMeter ? audioEngine.getTrackInputPeak(static_cast<size_t>(selectedTrack))
+                                       : audioEngine.getTrackPeak(static_cast<size_t>(selectedTrack)));
+    }
     else
         meter.updateStereoPeak(audioEngine.getMasterLeftPeak(), audioEngine.getMasterRightPeak());
     synchroniseControlsFromState();

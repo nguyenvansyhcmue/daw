@@ -45,6 +45,7 @@ public:
     void paint(juce::Graphics& g) override;
     void mouseDown(const juce::MouseEvent& event) override;
     void mouseDoubleClick(const juce::MouseEvent& event) override;
+    void mouseMove(const juce::MouseEvent& event) override;
     void mouseDrag(const juce::MouseEvent& event) override;
     void mouseUp(const juce::MouseEvent& event) override;
     void mouseWheelMove(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel) override;
@@ -80,6 +81,15 @@ private:
     double clipDragGrabOffsetSamples = 0.0;
     double clipDragPreviewSample = 0.0;
     int clipDragPreviewTrack = -1;
+    bool duplicateClipOnDrag = false;
+    double clipTrimOriginalStartSample = 0.0;
+    double clipTrimOriginalDurationSamples = 0.0;
+    double clipTrimPreviewStartSample = 0.0;
+    double clipTrimPreviewDurationSamples = 0.0;
+    double clipFadeOriginalInSamples = 0.0;
+    double clipFadeOriginalOutSamples = 0.0;
+    double clipFadePreviewInSamples = 0.0;
+    double clipFadePreviewOutSamples = 0.0;
     bool draggingClip = false;
     bool trimmingLeft = false;
     bool trimmingRight = false;
@@ -99,10 +109,11 @@ private:
     TrackId createTrackAfter(TrackType type, int anchorTrack);
 };
 
-class TimelineRuler final : public juce::Component
+class TimelineRuler final : public juce::Component, private juce::ChangeListener
 {
 public:
     explicit TimelineRuler(TrackDataModel* model = nullptr);
+    ~TimelineRuler() override;
     void paint(juce::Graphics& g) override;
     void mouseDown(const juce::MouseEvent& event) override;
     void mouseDrag(const juce::MouseEvent& event) override;
@@ -111,14 +122,23 @@ public:
     void setDisplayPlayheadSample(double sample) noexcept { displayPlayheadSample = sample; repaint(); }
     void setReservedTrailingWidth(int width) noexcept { reservedTrailingWidth = juce::jmax(0, width); repaint(); }
 private:
-    enum class DragMode { none, scrubPlayhead, selectCycle };
+    void changeListenerCallback(juce::ChangeBroadcaster*) override { repaint(); }
+    enum class DragMode { none, scrubPlayhead, createCycle, moveCycle, resizeCycleStart, resizeCycleEnd };
 
     double sampleAt(const juce::Point<float>& position) const noexcept;
     double snappedSampleAt(const juce::Point<float>& position) const noexcept;
+    void beginCycleEdit(double clickedSample, float pointerX);
+    void updateCycleEdit(double currentSample, float pointerX);
+    void finishCycleEdit();
+    void createDefaultCycle(double clickedSample);
 
     TrackDataModel* trackModel = nullptr;
     DragMode dragMode = DragMode::none;
     double dragAnchorSample = 0.0;
+    double originalCycleStartSample = 0.0;
+    double originalCycleEndSample = 0.0;
+    bool cycleClickPendingToggle = false;
+    float cycleMouseDownX = 0.0f;
     double viewStartSample = 0.0;
     double displayPlayheadSample = 0.0;
     int reservedTrailingWidth = 0;

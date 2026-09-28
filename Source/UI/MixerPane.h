@@ -92,6 +92,10 @@ private:
     std::array<juce::ToggleButton, TrackDataModel::maxBuses> busMuteButtons;
     std::array<std::array<FxSlotButton, TrackDataModel::maxFxSlots>, TrackDataModel::maxBuses> busFxButtons;
     std::array<juce::Label, TrackDataModel::maxBuses> busLabels;
+    std::array<juce::Rectangle<int>, TrackDataModel::maxTracks> trackStripBounds;
+    std::array<juce::Rectangle<int>, TrackDataModel::maxBuses> busStripBounds;
+    int displayedTrackCount = -1;
+    int displayedBusCount = -1;
     juce::Label titleLabel;
     juce::Label busTitleLabel;
 };

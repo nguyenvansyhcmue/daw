@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
 
 TrackDataModel::RealtimeSnapshotRead::RealtimeSnapshotRead(const TrackDataModel& owner) noexcept
@@ -638,15 +639,56 @@ void TrackDataModel::setTrackInputMonitoring(size_t index, bool enabled, int cha
 {
     if (index >= trackStates.size()) return;
     auto& track = trackStates[index];
-    const auto clampedChannel = juce::jmax(0, channel);
+    const auto clampedChannel = channel >= 0 ? juce::jmax(0, channel)
+                                             : track.inputChannel.load(std::memory_order_relaxed);
     if (track.inputMonitoring.load(std::memory_order_relaxed) == enabled
         && track.inputChannel.load(std::memory_order_relaxed) == clampedChannel)
         return;
     auto before = captureEditState();
     track.inputMonitoring.store(enabled, std::memory_order_relaxed);
+    track.autoInputMonitoring.store(false, std::memory_order_relaxed);
     track.inputChannel.store(clampedChannel, std::memory_order_relaxed);
     publishRenderStructureSnapshot();
     commitEdit(std::move(before));
+    sendChangeMessage();
+}
+
+void TrackDataModel::cycleTrackInputMonitoring(size_t index) noexcept
+{
+    if (index >= trackStates.size() || trackStates[index].type != TrackType::audio)
+        return;
+
+    const auto& track = trackStates[index];
+    const auto isAlwaysOn = track.inputMonitoring.load(std::memory_order_relaxed);
+    const auto isAuto = track.autoInputMonitoring.load(std::memory_order_relaxed);
+    const auto inputChannel = track.inputChannel.load(std::memory_order_relaxed);
+    const auto inputChannelCount = track.inputChannelCount.load(std::memory_order_relaxed);
+
+    // Off becomes Auto, Auto becomes In, and In becomes Off.
+    setTrackInputConfiguration(index, ! isAlwaysOn && ! isAuto, isAuto,
+                               inputChannel, inputChannelCount);
+}
+
+void TrackDataModel::setTrackInputConfiguration(size_t index, bool monitorWhenArmed, bool monitorAlways,
+                                                 int channel, int channelCount) noexcept
+{
+    if (index >= trackStates.size()) return;
+    auto& track = trackStates[index];
+    const auto clampedChannel = juce::jmax(0, channel);
+    const auto clampedChannelCount = juce::jlimit(1, 2, channelCount);
+    if (track.inputMonitoring.load(std::memory_order_relaxed) == monitorAlways
+        && track.autoInputMonitoring.load(std::memory_order_relaxed) == monitorWhenArmed
+        && track.inputChannel.load(std::memory_order_relaxed) == clampedChannel
+        && track.inputChannelCount.load(std::memory_order_relaxed) == clampedChannelCount)
+        return;
+    auto before = captureEditState();
+    track.inputMonitoring.store(monitorAlways, std::memory_order_relaxed);
+    track.autoInputMonitoring.store(monitorWhenArmed, std::memory_order_relaxed);
+    track.inputChannel.store(clampedChannel, std::memory_order_relaxed);
+    track.inputChannelCount.store(clampedChannelCount, std::memory_order_relaxed);
+    publishRenderStructureSnapshot();
+    commitEdit(std::move(before));
+    sendChangeMessage();
 }
 bool TrackDataModel::isTrackInputMonitoring(size_t index) const noexcept
 {
@@ -1054,6 +1096,51 @@ bool TrackDataModel::setClipFades(ClipId clipId, double fadeIn, double fadeOut)
     return false;
 }
 
+bool TrackDataModel::createCrossfadesForTrack(TrackId trackId)
+{
+    const auto trackIndex = getTrackIndex(trackId);
+    if (trackIndex < 0)
+        return false;
+
+    auto& clips = trackStates[static_cast<size_t>(trackIndex)].clips;
+    if (clips.size() < 2)
+        return false;
+
+    std::vector<size_t> orderedClipIndices(clips.size());
+    std::iota(orderedClipIndices.begin(), orderedClipIndices.end(), 0);
+    std::stable_sort(orderedClipIndices.begin(), orderedClipIndices.end(), [&clips] (size_t lhs, size_t rhs)
+    {
+        return clips[lhs].startSample < clips[rhs].startSample;
+    });
+
+    auto before = captureEditState();
+    bool changed = false;
+    for (size_t position = 1; position < orderedClipIndices.size(); ++position)
+    {
+        auto& left = clips[orderedClipIndices[position - 1]];
+        auto& right = clips[orderedClipIndices[position]];
+        const auto overlap = juce::jmin(left.startSample + left.durationSamples - right.startSample,
+                                        left.durationSamples, right.durationSamples);
+        if (overlap <= 0.0)
+            continue;
+
+        const auto fadeOut = juce::jmax(left.fadeOutSamples, overlap);
+        const auto fadeIn = juce::jmax(right.fadeInSamples, overlap);
+        changed = changed || fadeOut != left.fadeOutSamples || fadeIn != right.fadeInSamples;
+        left.fadeOutSamples = fadeOut;
+        right.fadeInSamples = fadeIn;
+    }
+
+    if (! changed)
+        return false;
+
+    publishAudioClipSnapshot();
+    publishRenderStructureSnapshot();
+    commitEdit(std::move(before));
+    sendChangeMessage();
+    return true;
+}
+
 bool TrackDataModel::setClipMediaResource(ClipId clipId, const juce::File& file,
                                           std::shared_ptr<juce::AudioBuffer<float>> decodedBuffer)
 {
@@ -1231,7 +1318,9 @@ ProjectState TrackDataModel::createProjectState() const
         savedTrack.solo = track.solo.load(std::memory_order_relaxed);
         savedTrack.soloSafe = track.soloSafe.load(std::memory_order_relaxed);
         savedTrack.inputMonitoring = track.inputMonitoring.load(std::memory_order_relaxed);
+        savedTrack.autoInputMonitoring = track.autoInputMonitoring.load(std::memory_order_relaxed);
         savedTrack.inputChannel = track.inputChannel.load(std::memory_order_relaxed);
+        savedTrack.inputChannelCount = track.inputChannelCount.load(std::memory_order_relaxed);
         savedTrack.outputBus = track.outputBus;
         savedTrack.activeSendCount = track.activeSendCount;
         for (size_t i = 0; i < maxSendsPerTrack; ++i)
@@ -1341,7 +1430,8 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
         if (! std::isfinite(track.volume) || track.volume < 0.0f || track.volume > 2.0f
             || ! std::isfinite(track.pan) || track.pan < -1.0f || track.pan > 1.0f)
             return juce::Result::fail("Project mixer values are invalid");
-        if (track.inputChannel < 0 || track.inputChannel > 255)
+        if (track.inputChannel < 0 || track.inputChannel > 255
+            || track.inputChannelCount < 1 || track.inputChannelCount > 2)
             return juce::Result::fail("Project input routing is invalid");
         if ((track.outputBus.isValid() && std::find(busIds.begin(), busIds.end(), track.outputBus) == busIds.end())
             || track.activeSendCount > maxSendsPerTrack)
@@ -1458,7 +1548,9 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
         restored.solo.store(track.solo, std::memory_order_relaxed);
         restored.soloSafe.store(track.soloSafe, std::memory_order_relaxed);
         restored.inputMonitoring.store(track.inputMonitoring, std::memory_order_relaxed);
+        restored.autoInputMonitoring.store(track.autoInputMonitoring, std::memory_order_relaxed);
         restored.inputChannel.store(track.inputChannel, std::memory_order_relaxed);
+        restored.inputChannelCount.store(track.inputChannelCount, std::memory_order_relaxed);
         restored.outputBus = track.outputBus;
         restored.activeSendCount = track.activeSendCount;
         for (size_t i = 0; i < maxSendsPerTrack; ++i)
@@ -1561,6 +1653,8 @@ void TrackDataModel::setFxProcessor(size_t trackIndex, size_t slot, std::shared_
     updated->processors[slot] = std::move(processor);
     publishFxRackSnapshot(static_cast<size_t>(rackSlot), std::move(updated));
     publishRenderStructureSnapshot();
+    markProjectModified();
+    sendChangeMessage();
 }
 
 void TrackDataModel::setFxBypassed(size_t trackIndex, size_t slot, bool bypassed) noexcept
@@ -1573,6 +1667,8 @@ void TrackDataModel::setFxBypassed(size_t trackIndex, size_t slot, bool bypassed
     updated->bypass[slot] = bypassed;
     publishFxRackSnapshot(static_cast<size_t>(rackSlot), std::move(updated));
     publishRenderStructureSnapshot();
+    markProjectModified();
+    sendChangeMessage();
 }
 
 const std::vector<TrackDataModel::FxScene>& TrackDataModel::getFxScenes(size_t trackIndex) const noexcept
@@ -1673,7 +1769,9 @@ void TrackDataModel::publishRenderStructureSnapshot()
         renderTrack.soloSafe = track.soloSafe.load(std::memory_order_relaxed);
         renderTrack.armed = track.armed.load(std::memory_order_relaxed);
         renderTrack.inputMonitoring = track.inputMonitoring.load(std::memory_order_relaxed);
+        renderTrack.autoInputMonitoring = track.autoInputMonitoring.load(std::memory_order_relaxed);
         renderTrack.inputChannel = track.inputChannel.load(std::memory_order_relaxed);
+        renderTrack.inputChannelCount = track.inputChannelCount.load(std::memory_order_relaxed);
         const auto rackSlot = getFxRackSlot(track.id);
         renderTrack.fxRack = rackSlot >= 0 ? publishedFxRacks[static_cast<size_t>(rackSlot)].load(std::memory_order_acquire) : nullptr;
         renderTrack.outputBus = track.outputBus;

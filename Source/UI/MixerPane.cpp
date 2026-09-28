@@ -10,21 +10,30 @@ const auto panelMain = juce::Colour(0xff2b2b2b);
 const auto panelDark = juce::Colour(0xff1a1a1a);
 const auto accentBlue = juce::Colour(0xff00a8ff);
 const auto accentCyan = juce::Colour(0xff00ffe0);
+const auto stripSurface = juce::Colour(0xff202428);
+const auto stripBorder = juce::Colour(0xff53616d);
+
+template <typename ComponentArray>
+void setComponentsVisible(ComponentArray& components, bool visible)
+{
+    for (auto& component : components)
+        component.setVisible(visible);
+}
 }
 
 MixerPane::MixerPane(TrackDataModel* model, AudioEngine* engine, PluginHostService* pluginHost)
     : trackModel(model), audioEngine(engine), pluginHostService(pluginHost)
 {
     startTimerHz(30);
-    titleLabel.setText("Mixer", juce::dontSendNotification);
+    titleLabel.setText("MIXER", juce::dontSendNotification);
     titleLabel.setJustificationType(juce::Justification::centredLeft);
     titleLabel.setColour(juce::Label::textColourId, juce::Colours::white);
-    titleLabel.setFont(juce::Font(16.0f, juce::Font::bold));
+    titleLabel.setFont(juce::Font(juce::FontOptions(12.0f, juce::Font::bold)));
     addAndMakeVisible(titleLabel);
     busTitleLabel.setText("AUX RETURNS", juce::dontSendNotification);
     busTitleLabel.setJustificationType(juce::Justification::centredLeft);
     busTitleLabel.setColour(juce::Label::textColourId, accentCyan.withAlpha(0.85f));
-    busTitleLabel.setFont(juce::Font(11.0f, juce::Font::bold));
+    busTitleLabel.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
     addAndMakeVisible(busTitleLabel);
 
     for (int i = 0; i < static_cast<int>(TrackDataModel::maxTracks); ++i)
@@ -32,7 +41,7 @@ MixerPane::MixerPane(TrackDataModel* model, AudioEngine* engine, PluginHostServi
         labels[i].setText("Ch " + juce::String(i + 1), juce::dontSendNotification);
         labels[i].setJustificationType(juce::Justification::centred);
         labels[i].setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.82f));
-        labels[i].setFont(juce::Font(12.0f, juce::Font::plain));
+        labels[i].setFont(juce::Font(juce::FontOptions(12.0f, juce::Font::plain)));
         addAndMakeVisible(labels[i]);
         addAndMakeVisible(meters[i]);
         muteButtons[i].setButtonText("M");
@@ -123,6 +132,7 @@ MixerPane::MixerPane(TrackDataModel* model, AudioEngine* engine, PluginHostServi
         }
 
         faders[i].setRange(0.0, 2.0, 0.01);
+        faders[i].setSliderStyle(juce::Slider::LinearVertical);
         faders[i].setValue(trackModel != nullptr
                                 ? trackModel->getTrack(static_cast<size_t>(i)).volume.load() : 1.0,
                             juce::dontSendNotification);
@@ -137,6 +147,7 @@ MixerPane::MixerPane(TrackDataModel* model, AudioEngine* engine, PluginHostServi
         addAndMakeVisible(faders[i]);
 
         panSliders[i].setRange(-1.0, 1.0, 0.01);
+        panSliders[i].setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
         panSliders[i].setValue(trackModel != nullptr
                                    ? trackModel->getTrack(static_cast<size_t>(i)).pan.load() : 0.0,
                                juce::dontSendNotification);
@@ -155,11 +166,12 @@ MixerPane::MixerPane(TrackDataModel* model, AudioEngine* engine, PluginHostServi
     {
         busLabels[i].setJustificationType(juce::Justification::centred);
         busLabels[i].setColour(juce::Label::textColourId, accentCyan.withAlpha(0.9f));
-        busLabels[i].setFont(juce::Font(11.0f, juce::Font::bold));
+        busLabels[i].setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
         addAndMakeVisible(busLabels[i]);
         addAndMakeVisible(busMeters[i]);
 
         busFaders[i].setRange(0.0, 2.0, 0.01);
+        busFaders[i].setSliderStyle(juce::Slider::LinearVertical);
         busFaders[i].setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
         busFaders[i].setColour(juce::Slider::trackColourId, accentBlue);
         busFaders[i].setColour(juce::Slider::thumbColourId, accentCyan);
@@ -251,6 +263,11 @@ void MixerPane::showPluginBrowser(int trackIndex, size_t slot)
 void MixerPane::refreshFromModel()
 {
     const auto count = trackModel != nullptr ? trackModel->getTrackCount() : 0;
+    const auto& buses = trackModel != nullptr ? trackModel->getBuses() : std::vector<TrackDataModel::BusState> {};
+    const auto layoutChanged = displayedTrackCount != static_cast<int>(count)
+        || displayedBusCount != static_cast<int>(buses.size());
+    displayedTrackCount = static_cast<int>(count);
+    displayedBusCount = static_cast<int>(buses.size());
     for (size_t index = 0; index < faders.size(); ++index)
     {
         const auto active = index < count;
@@ -270,11 +287,23 @@ void MixerPane::refreshFromModel()
         panSliders[index].setEnabled(active);
         muteButtons[index].setEnabled(active);
         soloButtons[index].setEnabled(active);
-        for (auto& button : fxButtons[index])
+        setComponentsVisible(fxButtons[index], active);
+        for (size_t slot = 0; slot < fxButtons[index].size(); ++slot)
+        {
+            auto& button = fxButtons[index][slot];
             button.setEnabled(active);
+            const auto rack = active ? trackModel->getFxRackSnapshot(index) : nullptr;
+            const auto processor = rack != nullptr ? rack->processors[slot] : nullptr;
+            button.setButtonText(processor != nullptr ? processor->getName().substring(0, 12) : "+ FX");
+        }
+        labels[index].setVisible(active);
+        meters[index].setVisible(active);
+        faders[index].setVisible(active);
+        panSliders[index].setVisible(active);
+        muteButtons[index].setVisible(active);
+        soloButtons[index].setVisible(active);
     }
 
-    const auto& buses = trackModel != nullptr ? trackModel->getBuses() : std::vector<TrackDataModel::BusState> {};
     for (size_t index = 0; index < busFaders.size(); ++index)
     {
         const auto active = index < buses.size();
@@ -284,8 +313,24 @@ void MixerPane::refreshFromModel()
         busMuteButtons[index].setToggleState(active && buses[index].muted, juce::dontSendNotification);
         busFaders[index].setEnabled(active);
         busMuteButtons[index].setEnabled(active);
-        for (auto& button : busFxButtons[index]) button.setEnabled(active);
+        setComponentsVisible(busFxButtons[index], active);
+        for (size_t slot = 0; slot < busFxButtons[index].size(); ++slot)
+        {
+            auto& button = busFxButtons[index][slot];
+            button.setEnabled(active);
+            const auto* rack = active ? trackModel->getBusFxRackSnapshot(buses[index].id) : nullptr;
+            const auto processor = rack != nullptr ? rack->processors[slot] : nullptr;
+            button.setButtonText(processor != nullptr ? processor->getName().substring(0, 12) : "+ FX");
+        }
+        busLabels[index].setVisible(active);
+        busMeters[index].setVisible(active);
+        busFaders[index].setVisible(active);
+        busMuteButtons[index].setVisible(active);
     }
+
+    busTitleLabel.setVisible(! buses.empty());
+    if (layoutChanged)
+        resized();
 }
 
 void MixerPane::timerCallback()
@@ -324,50 +369,92 @@ void MixerPane::paint(juce::Graphics& g)
     g.drawLine(rect.getX(), rect.getY(), rect.getRight(), rect.getY(), 1.0f);
     g.setColour(accentBlue.withAlpha(0.35f));
     g.drawLine(rect.getX(), rect.getY() + 1.0f, rect.getRight(), rect.getY() + 1.0f, 1.0f);
+
+    const auto drawStrip = [&g] (juce::Rectangle<int> bounds, juce::Colour accent)
+    {
+        if (bounds.isEmpty())
+            return;
+        auto card = bounds.toFloat().reduced(2.0f, 1.0f);
+        g.setColour(stripSurface);
+        g.fillRoundedRectangle(card, 5.0f);
+        g.setColour(stripBorder.withAlpha(0.42f));
+        g.drawRoundedRectangle(card, 5.0f, 1.0f);
+        g.setColour(accent.withAlpha(0.86f));
+        g.fillRoundedRectangle(card.removeFromTop(2.0f), 1.0f);
+    };
+    for (const auto& bounds : trackStripBounds)
+        drawStrip(bounds, accentBlue);
+    for (const auto& bounds : busStripBounds)
+        drawStrip(bounds, accentCyan);
 }
 
 void MixerPane::resized()
 {
     auto area = getLocalBounds();
     titleLabel.setBounds(area.removeFromTop(24).reduced(8, 0));
-    const auto busArea = area.removeFromRight(juce::jmin(360, area.getWidth() / 3));
-    busTitleLabel.setBounds(busArea.withHeight(22).reduced(8, 0));
+    trackStripBounds.fill({});
+    busStripBounds.fill({});
+    const auto trackCount = trackModel != nullptr ? static_cast<int>(trackModel->getTrackCount()) : 0;
+    const auto busCount = trackModel != nullptr ? static_cast<int>(trackModel->getBuses().size()) : 0;
+    const auto busWidth = busCount > 0 ? juce::jlimit(120, 280, area.getWidth() / 3) : 0;
+    auto busArea = busCount > 0 ? area.removeFromRight(busWidth) : juce::Rectangle<int> {};
+    busTitleLabel.setBounds(busArea.removeFromTop(22).reduced(8, 0));
+    auto trackArea = area.reduced(8, 3);
 
-    const auto stripWidth = juce::jmax(1, (area.getWidth() - 20) / static_cast<int>(TrackDataModel::maxTracks));
-    for (int i = 0; i < static_cast<int>(TrackDataModel::maxTracks); ++i)
+    // A mixer owns the whole lower dock. Split its available width across the
+    // active channels instead of leaving a dead panel after the last strip.
+    const auto stripWidth = trackCount > 0
+        ? juce::jmax(1, trackArea.getWidth() / trackCount) : trackArea.getWidth();
+    for (int i = 0; i < trackCount; ++i)
     {
-        auto strip = area.removeFromLeft(stripWidth);
-        auto content = strip.reduced(6, 4);
-        const auto nameHeight = 18;
-        const auto buttonHeight = 22;
+        auto strip = trackArea.removeFromLeft(stripWidth);
+        trackStripBounds[static_cast<size_t>(i)] = strip;
+        auto content = strip.reduced(8, 5);
+        const auto nameHeight = 20;
+        const auto buttonHeight = 21;
         labels[i].setBounds(content.removeFromBottom(nameHeight));
         auto muteSoloArea = content.removeFromBottom(buttonHeight);
         muteButtons[i].setBounds(muteSoloArea.removeFromLeft(muteSoloArea.getWidth() / 2).reduced(2, 1));
         soloButtons[i].setBounds(muteSoloArea.reduced(2, 1));
-        auto fxArea = content.removeFromTop(80).reduced(2, 2);
-        const auto fxHeight = juce::jmax(1, fxArea.getHeight() / static_cast<int>(TrackDataModel::maxFxSlots));
+        auto panArea = content.removeFromBottom(30);
+        panSliders[i].setBounds(panArea.withSizeKeepingCentre(30, 30));
+        auto fxArea = content.removeFromTop(62).reduced(1, 1);
+        const auto fxHeight = juce::jmax(1, fxArea.getHeight() / 4);
         for (size_t slot = 0; slot < TrackDataModel::maxFxSlots; ++slot)
-            fxButtons[static_cast<size_t>(i)][slot].setBounds(fxArea.removeFromTop(fxHeight).reduced(1, 1));
-        auto controlRow = content.reduced(4, 0).withHeight(70).withY(content.getCentreY() - 35);
-        meters[i].setBounds(controlRow.removeFromLeft(controlRow.getWidth() / 3).reduced(2, 0));
-        faders[i].setBounds(controlRow.reduced(4, 0));
-        panSliders[i].setBounds(content.removeFromBottom(18).reduced(4, 0));
+        {
+            const auto column = slot % 2;
+            const auto row = slot / 2;
+            fxButtons[static_cast<size_t>(i)][slot].setBounds(fxArea.getX() + column * fxArea.getWidth() / 2,
+                                                               fxArea.getY() + static_cast<int>(row) * fxHeight,
+                                                               fxArea.getWidth() / 2, fxHeight);
+        }
+        // Keep the physical fader and meter compact even when a wide display
+        // gives a channel more room; the surrounding card preserves a clear
+        // channel grouping rather than turning the fader into a giant block.
+        auto controlRow = content.reduced(5, 2);
+        controlRow = controlRow.withWidth(juce::jmin(142, controlRow.getWidth()))
+                               .withCentre(controlRow.getCentre());
+        meters[i].setBounds(controlRow.removeFromLeft(16).reduced(1, 0));
+        faders[i].setBounds(controlRow.reduced(1, 0));
     }
 
-    auto returns = busArea;
-    returns.removeFromTop(24);
-    const auto busStripWidth = juce::jmax(1, returns.getWidth() / static_cast<int>(TrackDataModel::maxBuses));
-    for (int i = 0; i < static_cast<int>(TrackDataModel::maxBuses); ++i)
+    auto returns = busArea.reduced(5, 3);
+    const auto busStripWidth = busCount > 0 ? juce::jmax(96, returns.getWidth() / busCount) : 96;
+    for (int i = 0; i < busCount; ++i)
     {
-        auto strip = returns.removeFromLeft(busStripWidth).reduced(4, 4);
+        auto strip = returns.removeFromLeft(busStripWidth);
+        busStripBounds[static_cast<size_t>(i)] = strip;
+        strip.reduce(7, 5);
         busLabels[i].setBounds(strip.removeFromBottom(18));
         busMuteButtons[i].setBounds(strip.removeFromBottom(22).reduced(3, 1));
-        auto fxArea = strip.removeFromTop(80);
-        const auto fxHeight = juce::jmax(1, fxArea.getHeight() / static_cast<int>(TrackDataModel::maxFxSlots));
+        auto fxArea = strip.removeFromTop(62);
+        const auto fxHeight = juce::jmax(1, fxArea.getHeight() / 4);
         for (size_t slot = 0; slot < TrackDataModel::maxFxSlots; ++slot)
-            busFxButtons[static_cast<size_t>(i)][slot].setBounds(fxArea.removeFromTop(fxHeight).reduced(1, 1));
-        auto faderArea = strip.reduced(4, 4);
-        busMeters[i].setBounds(faderArea.removeFromLeft(juce::jmax(10, faderArea.getWidth() / 3)));
+            busFxButtons[static_cast<size_t>(i)][slot].setBounds(fxArea.getX() + static_cast<int>(slot % 2) * fxArea.getWidth() / 2,
+                                                                  fxArea.getY() + static_cast<int>(slot / 2) * fxHeight,
+                                                                  fxArea.getWidth() / 2, fxHeight);
+        auto faderArea = strip.reduced(6, 2);
+        busMeters[i].setBounds(faderArea.removeFromLeft(14));
         busFaders[i].setBounds(faderArea);
     }
 }

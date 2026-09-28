@@ -15,6 +15,11 @@ const auto accentBlue = juce::Colour(0xff8098b5);
 const auto accentCyan = juce::Colour(0xffb7cbe0);
 constexpr double fineSnapInBeats = 1.0 / 16.0;
 constexpr double tickSnapInBeats = 1.0 / 960.0;
+constexpr float loopLocatorLaneHeight = 12.0f;
+constexpr double loopHandleWidth = 9.0;
+constexpr float loopDragThreshold = 3.0f;
+constexpr float clipTrimHandleWidth = 9.0f;
+constexpr float clipFadeHandleWidth = 12.0f;
 
 juce::String zoomReadoutText(double zoom)
 {
@@ -288,11 +293,15 @@ void TrackHeaderPanel::paint(juce::Graphics& g)
         }
         if (track.type == TrackType::audio)
         {
-            g.setColour(track.inputMonitoring.load(std::memory_order_relaxed) ? StudioForgeTheme::accentBlue : juce::Colour(0xff333333));
+            const auto isAlwaysOn = track.inputMonitoring.load(std::memory_order_relaxed);
+            const auto isAuto = track.autoInputMonitoring.load(std::memory_order_relaxed);
+            g.setColour(isAlwaysOn ? StudioForgeTheme::accentBlue
+                                   : isAuto ? StudioForgeTheme::accentCyan.withAlpha(0.62f)
+                                            : juce::Colour(0xff333333));
             g.fillRoundedRectangle(monitor, 2.0f);
-            if (track.inputMonitoring.load(std::memory_order_relaxed))
+            if (isAlwaysOn || isAuto)
             {
-                g.setColour(StudioForgeTheme::accentCyan.withAlpha(0.90f));
+                g.setColour((isAlwaysOn ? StudioForgeTheme::accentCyan : StudioForgeTheme::accentBlue).withAlpha(0.90f));
                 g.drawRoundedRectangle(monitor, 2.0f, 1.0f);
             }
         }
@@ -405,7 +414,7 @@ void TrackHeaderPanel::mouseDown(const juce::MouseEvent& event)
     if (arm.contains(event.position))
         trackModel->setTrackArmed(static_cast<size_t>(track), ! state.armed.load(std::memory_order_relaxed));
     else if (monitor.contains(event.position) && state.type == TrackType::audio)
-        trackModel->setTrackInputMonitoring(static_cast<size_t>(track), ! state.inputMonitoring.load(std::memory_order_relaxed));
+        trackModel->cycleTrackInputMonitoring(static_cast<size_t>(track));
     else if (mute.contains(event.position))
         trackModel->setTrackMuted(static_cast<size_t>(track), ! state.muted.load(std::memory_order_relaxed));
     else if (solo.contains(event.position))
@@ -526,6 +535,7 @@ void TimelineGrid::showContextMenu(const juce::MouseEvent& event, int track, Cli
         menu.addItem(4, "Delete");
         menu.addSeparator();
         menu.addItem(5, "Reset Fades");
+        menu.addItem(6, "Create Crossfades for Overlaps");
     }
     else
     {
@@ -573,6 +583,8 @@ void TimelineGrid::showContextMenu(const juce::MouseEvent& event, int track, Cli
             model.deleteAudioClip(clip);
         else if (choice == 5)
             model.setClipFades(clip, 0.0, 0.0);
+        else if (choice == 6 && track >= 0 && track < static_cast<int>(model.getTrackCount()))
+            model.createCrossfadesForTrack(model.getTrackId(static_cast<size_t>(track)));
         else if (choice >= 10 && choice <= 12)
         {
             const auto type = choice == 10 ? TrackType::audio : choice == 11 ? TrackType::instrument : TrackType::externalMidi;
@@ -597,6 +609,14 @@ void TimelineGrid::showContextMenu(const juce::MouseEvent& event, int track, Cli
 TimelineRuler::TimelineRuler(TrackDataModel* model)
     : trackModel(model)
 {
+    if (trackModel != nullptr)
+        trackModel->addChangeListener(this);
+}
+
+TimelineRuler::~TimelineRuler()
+{
+    if (trackModel != nullptr)
+        trackModel->removeChangeListener(this);
 }
 
 double TimelineRuler::sampleAt(const juce::Point<float>& position) const noexcept
@@ -620,7 +640,7 @@ void TimelineRuler::paint(juce::Graphics& g)
     if (trackModel == nullptr)
         return;
 
-    constexpr int locatorLaneHeight = 12;
+    constexpr int locatorLaneHeight = static_cast<int>(loopLocatorLaneHeight);
     const auto pixelsPerSecond = 80.0 * trackModel->getHorizontalZoom();
     const auto timelineWidth = juce::jmax(0, getWidth() - reservedTrailingWidth);
     const auto beatWidth = trackModel->sampleToXPosition(trackModel->getSampleRate() * 60.0 / trackModel->getBpm(),
@@ -686,9 +706,16 @@ void TimelineRuler::mouseDown(const juce::MouseEvent& event)
     if (trackModel == nullptr)
         return;
 
-    constexpr float locatorLaneHeight = 12.0f;
+    // Keep the locator compact; its upper band creates and edits the cycle,
+    // while the lower ruler remains available for playhead scrubbing.
     const auto clickedSample = snappedSampleAt(event.position);
-    if (event.position.y >= locatorLaneHeight)
+    if (event.mods.isRightButtonDown())
+    {
+        trackModel->clearCycle();
+        repaint();
+        return;
+    }
+    if (event.position.y >= loopLocatorLaneHeight)
     {
         dragMode = DragMode::scrubPlayhead;
         trackModel->setPlayheadPosition(clickedSample);
@@ -696,25 +723,7 @@ void TimelineRuler::mouseDown(const juce::MouseEvent& event)
         return;
     }
 
-    const auto pixelsPerSecond = 80.0 * trackModel->getHorizontalZoom();
-    const auto cycleStartX = trackModel->sampleToXPosition(trackModel->getCycleStartSample() - viewStartSample, pixelsPerSecond);
-    const auto cycleEndX = trackModel->sampleToXPosition(trackModel->getCycleEndSample() - viewStartSample, pixelsPerSecond);
-    const auto clearsExistingRange = trackModel->isCycleActive()
-        && event.position.x >= cycleStartX && event.position.x <= cycleEndX;
-    if (clearsExistingRange)
-    {
-        // A second click on the highlighted range is the deliberate, simple
-        // cancel gesture.  Dragging immediately afterwards starts a new range.
-        trackModel->clearCycle();
-    }
-
-    const auto samplesPerBar = trackModel->getSampleRate() * 60.0 / trackModel->getBpm()
-        * trackModel->getTimeSignatureNumerator();
-    dragAnchorSample = std::floor(clickedSample / samplesPerBar) * samplesPerBar;
-    dragMode = DragMode::selectCycle;
-    if (! clearsExistingRange)
-        trackModel->setCycle(dragAnchorSample, dragAnchorSample + samplesPerBar);
-    repaint();
+    beginCycleEdit(clickedSample, event.position.x);
 }
 
 void TimelineRuler::mouseDrag(const juce::MouseEvent& event)
@@ -725,14 +734,108 @@ void TimelineRuler::mouseDrag(const juce::MouseEvent& event)
     const auto current = snappedSampleAt(event.position);
     if (dragMode == DragMode::scrubPlayhead)
         trackModel->setPlayheadPosition(current);
-    else if (dragMode == DragMode::selectCycle)
-        trackModel->setCycle(dragAnchorSample, current);
+    else
+        updateCycleEdit(current, event.position.x);
     repaint();
 }
 
 void TimelineRuler::mouseUp(const juce::MouseEvent&)
 {
+    finishCycleEdit();
+}
+
+void TimelineRuler::beginCycleEdit(double clickedSample, float pointerX)
+{
+    cycleClickPendingToggle = false;
+    cycleMouseDownX = pointerX;
+
+    if (! trackModel->isCycleActive())
+    {
+        createDefaultCycle(clickedSample);
+        return;
+    }
+
+    const auto pixelsPerSecond = 80.0 * trackModel->getHorizontalZoom();
+    const auto cycleStartX = trackModel->sampleToXPosition(trackModel->getCycleStartSample() - viewStartSample, pixelsPerSecond);
+    const auto cycleEndX = trackModel->sampleToXPosition(trackModel->getCycleEndSample() - viewStartSample, pixelsPerSecond);
+    originalCycleStartSample = trackModel->getCycleStartSample();
+    originalCycleEndSample = trackModel->getCycleEndSample();
+
+    // Click-and-release turns an existing cycle off. A deliberate drag moves
+    // it or adjusts its edge, avoiding the over-sensitive locator behaviour.
+    if (std::abs(pointerX - cycleStartX) <= loopHandleWidth)
+        dragMode = DragMode::resizeCycleStart;
+    else if (std::abs(pointerX - cycleEndX) <= loopHandleWidth)
+        dragMode = DragMode::resizeCycleEnd;
+    else if (pointerX >= cycleStartX && pointerX <= cycleEndX)
+    {
+        dragAnchorSample = clickedSample;
+        dragMode = DragMode::moveCycle;
+    }
+    else
+    {
+        createDefaultCycle(clickedSample);
+        return;
+    }
+
+    cycleClickPendingToggle = true;
+}
+
+void TimelineRuler::updateCycleEdit(double currentSample, float pointerX)
+{
+    // macOS can deliver a zero-distance drag after a click. Keep the toggle
+    // pending until the gesture passes a small, intentional threshold.
+    if (cycleClickPendingToggle && std::abs(pointerX - cycleMouseDownX) < loopDragThreshold)
+        return;
+
+    cycleClickPendingToggle = false;
+    switch (dragMode)
+    {
+        case DragMode::createCycle:
+            trackModel->setCycle(dragAnchorSample, currentSample);
+            break;
+        case DragMode::resizeCycleStart:
+            trackModel->setCycle(currentSample, originalCycleEndSample);
+            break;
+        case DragMode::resizeCycleEnd:
+            trackModel->setCycle(originalCycleStartSample, currentSample);
+            break;
+        case DragMode::moveCycle:
+        {
+            const auto offset = currentSample - dragAnchorSample;
+            trackModel->setCycle(juce::jmax(0.0, originalCycleStartSample + offset),
+                                 juce::jmax(0.0, originalCycleEndSample + offset));
+            break;
+        }
+        case DragMode::none:
+        case DragMode::scrubPlayhead:
+            break;
+    }
+}
+
+void TimelineRuler::finishCycleEdit()
+{
+    const auto wasCycleClick = dragMode == DragMode::moveCycle
+        || dragMode == DragMode::resizeCycleStart
+        || dragMode == DragMode::resizeCycleEnd;
+    if (wasCycleClick && cycleClickPendingToggle && trackModel != nullptr)
+    {
+        trackModel->clearCycle();
+        repaint();
+    }
+
+    cycleClickPendingToggle = false;
     dragMode = DragMode::none;
+}
+
+void TimelineRuler::createDefaultCycle(double clickedSample)
+{
+    const auto samplesPerBar = trackModel->getSampleRate() * 60.0 / trackModel->getBpm()
+        * trackModel->getTimeSignatureNumerator();
+    dragAnchorSample = std::floor(clickedSample / samplesPerBar) * samplesPerBar;
+    dragMode = DragMode::createCycle;
+    trackModel->setCycle(dragAnchorSample, dragAnchorSample + samplesPerBar);
+    repaint();
 }
 
 void TimelineGrid::mouseDown(const juce::MouseEvent& event)
@@ -795,14 +898,23 @@ void TimelineGrid::mouseDown(const juce::MouseEvent& event)
             }
             if (onAudioClipSelected != nullptr) onAudioClipSelected(clip.id);
             const auto isHandleRow = event.position.y <= static_cast<float>(track) * trackModel->getTrackHeight() + 20.0f;
-            adjustingFadeIn = isHandleRow && event.position.x <= startX + 12.0f;
-            adjustingFadeOut = isHandleRow && event.position.x >= endX - 12.0f;
-            trimmingLeft = ! adjustingFadeIn && std::abs(event.position.x - startX) <= 5.0;
-            trimmingRight = ! adjustingFadeOut && std::abs(event.position.x - endX) <= 5.0;
+            adjustingFadeIn = isHandleRow && event.position.x <= startX + clipFadeHandleWidth;
+            adjustingFadeOut = isHandleRow && event.position.x >= endX - clipFadeHandleWidth;
+            trimmingLeft = ! adjustingFadeIn && std::abs(event.position.x - startX) <= clipTrimHandleWidth;
+            trimmingRight = ! adjustingFadeOut && std::abs(event.position.x - endX) <= clipTrimHandleWidth;
             clipDragStartSample = clip.startSample;
             clipDragGrabOffsetSamples = juce::jmax(0.0, sampleAtMouse - clip.startSample);
             clipDragPreviewSample = clip.startSample;
             clipDragPreviewTrack = track;
+            duplicateClipOnDrag = event.mods.isAltDown();
+            clipTrimOriginalStartSample = clip.startSample;
+            clipTrimOriginalDurationSamples = clip.durationSamples;
+            clipTrimPreviewStartSample = clip.startSample;
+            clipTrimPreviewDurationSamples = clip.durationSamples;
+            clipFadeOriginalInSamples = clip.fadeInSamples;
+            clipFadeOriginalOutSamples = clip.fadeOutSamples;
+            clipFadePreviewInSamples = clip.fadeInSamples;
+            clipFadePreviewOutSamples = clip.fadeOutSamples;
             setMouseCursor(trimmingLeft || trimmingRight || adjustingFadeIn || adjustingFadeOut
                                ? juce::MouseCursor::LeftRightResizeCursor
                                : juce::MouseCursor::NormalCursor);
@@ -837,6 +949,32 @@ void TimelineGrid::mouseDown(const juce::MouseEvent& event)
     trackModel->setPlayheadPosition(sampleAtMouse);
     if (onTrackSelected != nullptr) onTrackSelected(track);
     repaint();
+}
+
+void TimelineGrid::mouseMove(const juce::MouseEvent& event)
+{
+    if (trackModel == nullptr || panningTimeline || scrubbingPlayhead || draggingClip
+        || trimmingLeft || trimmingRight || adjustingFadeIn || adjustingFadeOut)
+        return;
+
+    const auto track = trackAt(event.position);
+    if (track < 0)
+        return;
+    const auto pixelsPerSecond = 80.0 * trackModel->getHorizontalZoom();
+    const auto& clips = trackModel->getTrack(static_cast<size_t>(track)).clips;
+    for (const auto& clip : clips)
+    {
+        const auto startX = trackModel->sampleToXPosition(clip.startSample - viewStartSample, pixelsPerSecond);
+        const auto endX = trackModel->sampleToXPosition(clip.startSample + clip.durationSamples - viewStartSample, pixelsPerSecond);
+        if (event.position.x >= startX - clipTrimHandleWidth && event.position.x <= endX + clipTrimHandleWidth
+            && (std::abs(event.position.x - startX) <= clipTrimHandleWidth
+                || std::abs(event.position.x - endX) <= clipTrimHandleWidth))
+        {
+            setMouseCursor(juce::MouseCursor::LeftRightResizeCursor);
+            return;
+        }
+    }
+    setMouseCursor(juce::MouseCursor::NormalCursor);
 }
 
 void TimelineGrid::mouseDoubleClick(const juce::MouseEvent& event)
@@ -895,30 +1033,34 @@ void TimelineGrid::mouseDrag(const juce::MouseEvent& event)
     }
     if (selectedTrack >= 0 && selectedClip >= 0 && (adjustingFadeIn || adjustingFadeOut))
     {
-        const auto& clip = trackModel->getTrack(static_cast<size_t>(selectedTrack)).clips[static_cast<size_t>(selectedClip)];
         const auto sample = viewStartSample
             + static_cast<double>(event.position.x) / pixelsPerSecond * trackModel->getSampleRate();
-        const auto fadeLength = adjustingFadeIn ? sample - clip.startSample
-                                                : clip.startSample + clip.durationSamples - sample;
-        trackModel->setClipFades(selectedClipId,
-                                 adjustingFadeIn ? fadeLength : clip.fadeInSamples,
-                                 adjustingFadeOut ? fadeLength : clip.fadeOutSamples);
+        const auto clipEnd = clipTrimOriginalStartSample + clipTrimOriginalDurationSamples;
+        const auto fadeLength = adjustingFadeIn ? sample - clipTrimOriginalStartSample : clipEnd - sample;
+        if (adjustingFadeIn)
+            clipFadePreviewInSamples = juce::jlimit(0.0, clipTrimOriginalDurationSamples, fadeLength);
+        else
+            clipFadePreviewOutSamples = juce::jlimit(0.0, clipTrimOriginalDurationSamples, fadeLength);
         repaint();
         return;
     }
     if (selectedTrack >= 0 && selectedClip >= 0 && (trimmingLeft || trimmingRight))
     {
-        const auto& clip = trackModel->getTrack(static_cast<size_t>(selectedTrack)).clips[static_cast<size_t>(selectedClip)];
         const auto sample = viewStartSample
             + static_cast<double>(event.position.x) / pixelsPerSecond * trackModel->getSampleRate();
         const auto snappedSample = snappedEditSample(*trackModel, sample, event.mods);
+        const auto originalEnd = clipTrimOriginalStartSample + clipTrimOriginalDurationSamples;
         if (trimmingLeft)
-            trackModel->trimAudioClip(static_cast<size_t>(selectedTrack), static_cast<size_t>(selectedClip),
-                                      snappedSample,
-                                      clip.startSample + clip.durationSamples - snappedSample);
+        {
+            clipTrimPreviewStartSample = std::clamp(snappedSample, 0.0, originalEnd - 1.0);
+            clipTrimPreviewDurationSamples = originalEnd - clipTrimPreviewStartSample;
+        }
         else
-            trackModel->trimAudioClip(static_cast<size_t>(selectedTrack), static_cast<size_t>(selectedClip),
-                                      clip.startSample, snappedSample - clip.startSample);
+        {
+            const auto previewEnd = std::clamp(snappedSample, clipTrimOriginalStartSample + 1.0, originalEnd);
+            clipTrimPreviewStartSample = clipTrimOriginalStartSample;
+            clipTrimPreviewDurationSamples = previewEnd - clipTrimOriginalStartSample;
+        }
         repaint();
         return;
     }
@@ -931,20 +1073,43 @@ void TimelineGrid::mouseDrag(const juce::MouseEvent& event)
         clipDragPreviewSample = snappedEditSample(*trackModel, sampleAtMouse - clipDragGrabOffsetSamples, event.mods);
         clipDragPreviewTrack = destinationTrack;
         draggingClip = true;
+        setMouseCursor(duplicateClipOnDrag ? juce::MouseCursor::CopyingCursor
+                                           : juce::MouseCursor::DraggingHandCursor);
         repaint();
     }
 }
 
 void TimelineGrid::mouseUp(const juce::MouseEvent&)
 {
+    if ((trimmingLeft || trimmingRight) && trackModel != nullptr && selectedClipId.isValid())
+        trackModel->trimAudioClip(selectedClipId, clipTrimPreviewStartSample, clipTrimPreviewDurationSamples);
+    if ((adjustingFadeIn || adjustingFadeOut) && trackModel != nullptr && selectedClipId.isValid()
+        && (clipFadePreviewInSamples != clipFadeOriginalInSamples
+            || clipFadePreviewOutSamples != clipFadeOriginalOutSamples))
+        trackModel->setClipFades(selectedClipId, clipFadePreviewInSamples, clipFadePreviewOutSamples);
     if (draggingClip && trackModel != nullptr && selectedClipId.isValid() && clipDragPreviewTrack >= 0)
     {
-        trackModel->moveAudioClip(selectedClipId, trackModel->getTrackId(static_cast<size_t>(clipDragPreviewTrack)), clipDragPreviewSample);
+        const auto destinationTrack = trackModel->getTrackId(static_cast<size_t>(clipDragPreviewTrack));
+        if (duplicateClipOnDrag)
+        {
+            const auto duplicate = trackModel->duplicateAudioClip(selectedClipId, destinationTrack, clipDragPreviewSample);
+            if (duplicate.isValid())
+                selectedClipId = duplicate;
+        }
+        else
+            trackModel->moveAudioClip(selectedClipId, destinationTrack, clipDragPreviewSample);
         selectedTrack = clipDragPreviewTrack;
-        selectedClip = -1;
+        const auto& destinationClips = trackModel->getTrack(static_cast<size_t>(selectedTrack)).clips;
+        const auto selected = std::find_if(destinationClips.begin(), destinationClips.end(), [this] (const AudioClipState& clip)
+        {
+            return clip.id == selectedClipId;
+        });
+        selectedClip = selected != destinationClips.end()
+            ? static_cast<int>(std::distance(destinationClips.begin(), selected)) : -1;
         if (onTrackSelected != nullptr) onTrackSelected(selectedTrack);
     }
     draggingClip = false;
+    duplicateClipOnDrag = false;
     panningTimeline = false;
     scrubbingPlayhead = false;
     trimmingLeft = false;
@@ -979,6 +1144,25 @@ void TimelineGrid::mouseWheelMove(const juce::MouseEvent& event, const juce::Mou
 
 bool TimelineGrid::keyPressed(const juce::KeyPress& key)
 {
+    const auto hasPrimaryShortcutModifier = key.getModifiers().isCommandDown() || key.getModifiers().isCtrlDown();
+    if (hasPrimaryShortcutModifier && (key.getKeyCode() == 't' || key.getKeyCode() == 'T')
+        && selectedClipId.isValid() && selectedTrack >= 0 && trackModel != nullptr)
+    {
+        const auto& clips = trackModel->getTrack(static_cast<size_t>(selectedTrack)).clips;
+        const auto found = std::find_if(clips.begin(), clips.end(), [this] (const AudioClipState& clip)
+        {
+            return clip.id == selectedClipId;
+        });
+        if (found == clips.end())
+            return false;
+
+        trackModel->splitAudioClip(static_cast<size_t>(selectedTrack),
+                                   static_cast<size_t>(std::distance(clips.begin(), found)),
+                                   trackModel->getPlayheadPosition());
+        repaint();
+        return true;
+    }
+
     if ((key.getKeyCode() == juce::KeyPress::leftKey || key.getKeyCode() == juce::KeyPress::rightKey)
         && selectedClipId.isValid() && selectedTrack >= 0 && trackModel != nullptr)
     {
@@ -995,7 +1179,7 @@ bool TimelineGrid::keyPressed(const juce::KeyPress& key)
         return true;
     }
 
-    if (key == juce::KeyPress('d', juce::ModifierKeys::commandModifier, 0)
+    if (hasPrimaryShortcutModifier && (key.getKeyCode() == 'd' || key.getKeyCode() == 'D')
         && selectedClipId.isValid() && selectedTrack >= 0 && trackModel != nullptr)
     {
         const auto& clips = trackModel->getTrack(static_cast<size_t>(selectedTrack)).clips;
@@ -1010,9 +1194,9 @@ bool TimelineGrid::keyPressed(const juce::KeyPress& key)
         return true;
     }
     if ((key == juce::KeyPress::deleteKey || key == juce::KeyPress::backspaceKey)
-        && selectedTrack >= 0 && selectedClip >= 0 && trackModel != nullptr)
+        && selectedClipId.isValid() && trackModel != nullptr)
     {
-        trackModel->deleteAudioClip(static_cast<size_t>(selectedTrack), static_cast<size_t>(selectedClip));
+        trackModel->deleteAudioClip(selectedClipId);
         selectedTrack = selectedClip = -1;
         selectedClipId = {};
         repaint();
@@ -1058,13 +1242,15 @@ void TimelineGrid::paint(juce::Graphics& g)
         const auto& state = trackModel->getTrack(static_cast<size_t>(track));
         for (const auto& clip : state.clips)
         {
-            const auto startX = trackModel->sampleToXPosition(clip.startSample - viewStartSample, pixelsPerSecond);
-            const auto endX = trackModel->sampleToXPosition(clip.startSample + clip.durationSamples - viewStartSample, pixelsPerSecond);
+            const auto previewingTrim = (trimmingLeft || trimmingRight) && clip.id == selectedClipId;
             const auto displayTrack = draggingClip && clip.id == selectedClipId ? clipDragPreviewTrack : track;
-            const auto displayStart = draggingClip && clip.id == selectedClipId ? clipDragPreviewSample : clip.startSample;
+            const auto displayStart = draggingClip && clip.id == selectedClipId ? clipDragPreviewSample
+                : previewingTrim ? clipTrimPreviewStartSample : clip.startSample;
+            const auto displayDuration = previewingTrim ? clipTrimPreviewDurationSamples : clip.durationSamples;
             const auto displayX = trackModel->sampleToXPosition(displayStart - viewStartSample, pixelsPerSecond);
             const auto displayY = static_cast<float>(displayTrack) * trackHeight;
-            const auto rect = juce::Rectangle<float>(displayX, displayY + 3.0f, endX - startX, trackHeight - 6.0f);
+            const auto rectWidth = trackModel->sampleToXPosition(displayDuration, pixelsPerSecond);
+            const auto rect = juce::Rectangle<float>(displayX, displayY + 3.0f, rectWidth, trackHeight - 6.0f);
             if (rect.getWidth() <= 0.0f)
                 continue;
 
@@ -1072,8 +1258,11 @@ void TimelineGrid::paint(juce::Graphics& g)
             drawPremiumWaveform(g, clip, thumbnail.get(), rect);
             if (track == selectedTrack && static_cast<int>(&clip - state.clips.data()) == selectedClip)
             {
-                const auto fadeInX = rect.getX() + static_cast<float>(trackModel->sampleToXPosition(clip.fadeInSamples, pixelsPerSecond));
-                const auto fadeOutX = rect.getRight() - static_cast<float>(trackModel->sampleToXPosition(clip.fadeOutSamples, pixelsPerSecond));
+                const auto previewingFade = (adjustingFadeIn || adjustingFadeOut) && clip.id == selectedClipId;
+                const auto fadeInSamples = previewingFade ? clipFadePreviewInSamples : clip.fadeInSamples;
+                const auto fadeOutSamples = previewingFade ? clipFadePreviewOutSamples : clip.fadeOutSamples;
+                const auto fadeInX = rect.getX() + static_cast<float>(trackModel->sampleToXPosition(fadeInSamples, pixelsPerSecond));
+                const auto fadeOutX = rect.getRight() - static_cast<float>(trackModel->sampleToXPosition(fadeOutSamples, pixelsPerSecond));
                 g.setColour(juce::Colours::white.withAlpha(0.62f));
                 g.drawLine(rect.getX(), rect.getBottom() - 3.0f, fadeInX, rect.getY() + 3.0f, 1.5f);
                 g.drawLine(fadeOutX, rect.getY() + 3.0f, rect.getRight(), rect.getBottom() - 3.0f, 1.5f);

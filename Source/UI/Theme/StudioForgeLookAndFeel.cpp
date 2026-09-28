@@ -106,7 +106,10 @@ void StudioForgeLookAndFeel::drawToggleButton(juce::Graphics& g, juce::ToggleBut
     g.setColour(colour); g.fillRoundedRectangle(area.reduced(1.0f), StudioForgeTheme::UIMetrics::cornerRadius);
     g.setColour(down ? juce::Colours::black.withAlpha(0.55f) : juce::Colours::white.withAlpha(highlighted ? 0.28f : 0.12f));
     g.drawRoundedRectangle(area.reduced(1.0f), StudioForgeTheme::UIMetrics::cornerRadius, 1.0f);
-    g.setColour(juce::Colours::white); g.drawText(button.getButtonText(), area.reduced(4.0f), juce::Justification::centred, true);
+    g.setColour(juce::Colours::white);
+    // Toggle labels are compact state abbreviations (R, I, M, S). Ellipsising
+    // them turns a control into an ambiguous "..." button.
+    g.drawText(button.getButtonText(), area.reduced(3.0f), juce::Justification::centred, false);
 }
 
 void StudioForgeLookAndFeel::drawMenuBarBackground(juce::Graphics&, int, int, bool,

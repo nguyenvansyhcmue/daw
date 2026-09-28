@@ -10,12 +10,9 @@
 
 #include "AudioGraph.h"
 #include "AudioEffectProcessor.h"
+#include "LiveKeyDetector.h"
 #include "TrackMixing.h"
 #include "TransportUtils.h"
-#include "GlobalScaleContext.h"
-#include "VocalistProcessor.h"
-#include "VocalistRack.h"
-#include "AuxRouting.h"
 #include "../Recording/RecordingSession.h"
 #include "../Models/TrackDataModel.h"
 
@@ -29,6 +26,8 @@ public:
         int bufferSize = 0;
         int inputLatencySamples = 0;
         int outputLatencySamples = 0;
+        int pluginLatencySamples = 0;
+        int protectedPluginCount = 0;
         float callbackLoad = 0.0f;
         uint64_t overloadCount = 0;
         uint64_t midiInputOverflowCount = 0;
@@ -52,14 +51,24 @@ public:
     bool isPlaying() const noexcept;
     void setMetronomeEnabled(bool enabled) noexcept;
     bool isMetronomeEnabled() const noexcept;
+    void setCountInMetronomeActive(bool active) noexcept;
+    void setLivePerformanceEnabled(bool enabled) noexcept;
+    bool isLivePerformanceEnabled() const noexcept;
+    bool isLiveLowLatencyProtectionEnabled() const noexcept;
+    juce::Result optimiseDeviceForLivePerformance();
 
     juce::AudioDeviceManager& getAudioDeviceManager() noexcept;
     float getTrackPeak(size_t trackIndex) const noexcept;
+    float getTrackInputPeak(size_t trackIndex) const noexcept;
     float getBusPeak(size_t busIndex) const noexcept;
     float getMasterPeak() const noexcept;
     float getMasterLeftPeak() const noexcept;
     float getMasterRightPeak() const noexcept;
     RealtimeDiagnostics getRealtimeDiagnostics() const noexcept;
+    int getEstimatedLivePluginLatencySamples() const noexcept;
+    int getLiveProtectedPluginCount() const noexcept;
+    LiveKeyDetector::Result getLiveKeyResult() const noexcept;
+    int applyDetectedKeyToPitchCorrection();
     void setFxProcessor(size_t trackIndex, size_t slot,
                         std::shared_ptr<AudioEffectProcessor> processor);
     void setFxBypassed(size_t trackIndex, size_t slot, bool bypassed) noexcept;
@@ -67,22 +76,18 @@ public:
     void setMasterFxProcessor(size_t slot, std::shared_ptr<AudioEffectProcessor> processor);
     void setMasterFxBypassed(size_t slot, bool bypassed);
     void prepareActiveEffects();
-    bool addVocalist(int inputChannel, uint32_t& createdId);
-    size_t getVocalistCount() const noexcept;
-    bool setVocalistGain(size_t index, float gain);
-    bool setVocalistMuted(size_t index, bool muted);
-    bool setVocalistInputChannel(size_t index, int channel);
-    bool getVocalistConfig(size_t index, VocalistConfig& config) const noexcept;
-    float getVocalistPeak(size_t index) const noexcept;
-    bool setVocalistSend(size_t index, float level);
-    bool setVocalistFxProcessor(size_t vocalistIndex, size_t slot,
-                                std::shared_ptr<AudioEffectProcessor> processor);
-    bool setAuxFxProcessor(size_t auxIndex, size_t slot,
-                           std::shared_ptr<AudioEffectProcessor> processor);
-    bool setVocalistFxBypassed(size_t vocalistIndex, size_t slot, bool bypassed);
-    std::shared_ptr<AudioEffectProcessor> getVocalistFxProcessor(size_t vocalistIndex, size_t slot) const;
+    struct AudioRecordingTarget
+    {
+        size_t trackIndex = 0;
+        juce::File destination;
+    };
     juce::Result startRecording(size_t trackIndex, const juce::File& destination,
                                 double timelineStartSample = -1.0);
+    juce::Result startRecordings(const std::vector<AudioRecordingTarget>& targets,
+                                 double timelineStartSample = -1.0);
+    // Runs the same device/input checks as recording without opening files or
+    // altering transport state. Use it before a count-in begins.
+    juce::Result validateRecordingTargets(const std::vector<AudioRecordingTarget>& targets) const;
     juce::Result stopRecording();
     bool isRecording() const noexcept;
     juce::Result startMidiRecording(size_t trackIndex);
@@ -99,7 +104,7 @@ public:
         int bitDepth = 24;
     };
 
-    juce::Result renderOfflineAudio(const juce::File& destination, const OfflineRenderOptions& options = {});
+    juce::Result renderOfflineAudio(const juce::File& destination, const OfflineRenderOptions& options);
     juce::Result renderOfflineWav(const juce::File& destination, double sampleRate,
                                   int blockSize = 512, bool useCycle = false);
 
@@ -133,6 +138,9 @@ private:
     void renderInstrument(const TrackDataModel::RenderStructureSnapshot& structure, int numSamples) noexcept;
     void publishMasterFxRack(std::unique_ptr<const TrackDataModel::FxRackSnapshot> snapshot);
     void prepareRack(const TrackDataModel::FxRackSnapshot* rack, double sampleRate, int blockSize);
+    int rackLatencySamples(const TrackDataModel::FxRackSnapshot* rack) const noexcept;
+    int protectedPluginCount(const TrackDataModel::FxRackSnapshot* rack) const noexcept;
+    bool shouldProcessForLive(const AudioEffectProcessor& processor) const noexcept;
     void recordCallbackTiming(int numSamples, std::chrono::steady_clock::time_point started) noexcept;
     void appendIncomingMidiEvents(const TrackDataModel::RenderStructureSnapshot& structure,
                                   double blockStartSample) noexcept;
@@ -142,6 +150,9 @@ private:
                                int numSamples) noexcept;
     bool hasMonitoredAudioTracks(const TrackDataModel::RenderStructureSnapshot* structure) const noexcept;
     void renderInputMonitoring(const float* const* inputChannelData, int numInputChannels,
+                               const TrackDataModel::RenderStructureSnapshot* structure,
+                               int numSamples) noexcept;
+    void updateTrackInputPeaks(const float* const* inputChannelData, int numInputChannels,
                                const TrackDataModel::RenderStructureSnapshot* structure,
                                int numSamples) noexcept;
     void prepareTrackMidiBuffers(const TrackDataModel::RenderStructureSnapshot* structure) noexcept;
@@ -156,15 +167,18 @@ private:
                        const juce::AudioBuffer<float>& source,
                        const TrackDataModel::RenderStructureSnapshot* structure,
                        size_t route, float level, int numSamples) noexcept;
-    void renderVocalistRack(const float* const* inputChannelData, int numInputChannels,
-                            int numSamples) noexcept;
 
     juce::AudioDeviceManager deviceManager;
     AudioGraph graph;
     std::atomic<float> masterGain { 1.0f };
     std::atomic<bool> metronomeEnabled { false };
+    std::atomic<bool> countInMetronomeActive { false };
+    std::atomic<bool> livePerformanceEnabled { false };
+    std::atomic<bool> liveLowLatencyProtectionEnabled { false };
+    LiveKeyDetector liveKeyDetector;
     juce::AudioBuffer<float> processingBuffer;
     std::array<std::atomic<float>, TrackDataModel::maxTracks> trackPeaks {};
+    std::array<std::atomic<float>, TrackDataModel::maxTracks> trackInputPeaks {};
     std::array<std::atomic<float>, TrackDataModel::maxBuses> busPeaks {};
     std::atomic<float> masterPeak { 0.0f };
     std::atomic<float> masterLeftPeak { 0.0f };
@@ -181,16 +195,6 @@ private:
     std::array<juce::AudioBuffer<float>, TrackDataModel::maxTracks> trackBuffers;
     std::array<juce::AudioBuffer<float>, TrackDataModel::maxBuses> busBuffers;
     std::array<std::array<float, TrackDataModel::maxSendsPerTrack>, TrackDataModel::maxTracks> smoothedSendGains {};
-    VocalistRack vocalistRack;
-    AuxRouting auxRouting;
-    uint32_t sharedAuxId = 0;
-    GlobalScaleContext globalScaleContext;
-    std::array<VocalistProcessor, VocalistRackSnapshot::maxVocalists> vocalistProcessors;
-    std::array<juce::AudioBuffer<float>, VocalistRackSnapshot::maxVocalists> vocalistBuffers;
-    std::array<std::atomic<float>, VocalistRackSnapshot::maxVocalists> vocalistPeaks {};
-    std::array<juce::AudioBuffer<float>, AuxRoutingSnapshot::maxAuxReturns> auxReturnBuffers;
-    std::array<std::atomic<std::shared_ptr<const TrackDataModel::FxRackSnapshot>>, VocalistRackSnapshot::maxVocalists> vocalistFxRacks;
-    std::array<std::atomic<std::shared_ptr<const TrackDataModel::FxRackSnapshot>>, AuxRoutingSnapshot::maxAuxReturns> auxFxRacks;
     std::array<juce::MidiBuffer, TrackDataModel::maxTracks> trackMidiBuffers;
     MidiEventBuffer scheduledMidiEvents;
     struct IncomingMidiEvent

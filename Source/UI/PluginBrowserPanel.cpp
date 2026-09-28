@@ -15,6 +15,16 @@ PluginBrowserPanel::PluginBrowserPanel(PluginHostService& host, SelectionCallbac
 
     scanButton.onClick = [this] { choosePluginToScan(); };
     addAndMakeVisible(scanButton);
+    if (pluginHost.supportsAudioUnits())
+    {
+        scanAudioUnitsButton.onClick = [this] { scanAudioUnits(); };
+        addAndMakeVisible(scanAudioUnitsButton);
+    }
+    else
+    {
+        scanDefaultVst3Button.onClick = [this] { scanDefaultVst3Locations(); };
+        addAndMakeVisible(scanDefaultVst3Button);
+    }
 
     insertButton.setEnabled(false);
     insertButton.onClick = [this]
@@ -37,9 +47,43 @@ void PluginBrowserPanel::resized()
     area.removeFromTop(8);
     auto buttons = area.removeFromBottom(30);
     cancelButton.setBounds(buttons.removeFromRight(86));
+    if (pluginHost.supportsAudioUnits())
+        scanAudioUnitsButton.setBounds(buttons.removeFromLeft(148));
+    else
+        scanDefaultVst3Button.setBounds(buttons.removeFromLeft(148));
     scanButton.setBounds(buttons.removeFromLeft(118).reduced(2, 0));
     insertButton.setBounds(buttons.removeFromRight(86).reduced(4, 0));
     results.setBounds(area);
+}
+
+void PluginBrowserPanel::scanAudioUnits()
+{
+    scanAudioUnitsButton.setEnabled(false);
+    const juce::Component::SafePointer<PluginBrowserPanel> safeThis(this);
+    pluginHost.scanAudioUnitsAsync([safeThis] (juce::Result result)
+    {
+        if (safeThis == nullptr)
+            return;
+        safeThis->scanAudioUnitsButton.setEnabled(true);
+        if (result.failed())
+            StudioForgeDialog::showWarning("Audio Unit scan incomplete", result.getErrorMessage());
+        safeThis->updateResults();
+    });
+}
+
+void PluginBrowserPanel::scanDefaultVst3Locations()
+{
+    scanDefaultVst3Button.setEnabled(false);
+    const juce::Component::SafePointer<PluginBrowserPanel> safeThis(this);
+    pluginHost.scanDefaultVst3LocationsAsync([safeThis] (juce::Result result)
+    {
+        if (safeThis == nullptr)
+            return;
+        safeThis->scanDefaultVst3Button.setEnabled(true);
+        if (result.failed())
+            StudioForgeDialog::showWarning("VST3 scan incomplete", result.getErrorMessage());
+        safeThis->updateResults();
+    });
 }
 
 int PluginBrowserPanel::getNumRows()
@@ -79,7 +123,7 @@ void PluginBrowserPanel::updateResults()
 
 void PluginBrowserPanel::choosePluginToScan()
 {
-    fileChooser = std::make_unique<juce::FileChooser>("Select VST3 Plug-in", juce::File {}, "*.vst3");
+    fileChooser = std::make_unique<juce::FileChooser>("Select a .vst3 plug-in bundle", juce::File {}, "*.vst3");
     fileChooser->launchAsync(juce::FileBrowserComponent::openMode
                              | juce::FileBrowserComponent::canSelectFiles
                              | juce::FileBrowserComponent::canSelectDirectories,
@@ -88,14 +132,24 @@ void PluginBrowserPanel::choosePluginToScan()
         const auto selectedFile = chooser.getResult();
         fileChooser.reset();
         if (! selectedFile.exists()) return;
-        scanButton.setEnabled(false);
-        pluginHost.scanVst3Async(selectedFile, [this] (juce::Result result)
+        if (! selectedFile.hasFileExtension(".vst3"))
         {
-            scanButton.setEnabled(true);
+            StudioForgeDialog::showWarning("VST3 file required",
+                                           "Select a plug-in bundle whose name ends in .vst3. "
+                                           "Logic Pro plug-ins are Audio Units and are already listed above.");
+            return;
+        }
+        scanButton.setEnabled(false);
+        const juce::Component::SafePointer<PluginBrowserPanel> safeThis(this);
+        pluginHost.scanVst3Async(selectedFile, [safeThis] (juce::Result result)
+        {
+            if (safeThis == nullptr)
+                return;
+            safeThis->scanButton.setEnabled(true);
             if (result.failed())
                 StudioForgeDialog::showWarning(StudioForgeDialog::fromUtf8("Qu\u00E9t plugin ch\u01B0a ho\u00E0n t\u1EA5t"),
                                                result.getErrorMessage());
-            updateResults();
+            safeThis->updateResults();
         });
     });
 }

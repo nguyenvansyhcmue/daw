@@ -11,7 +11,7 @@ class AudioEngine;
 class TransportIconButton final : public juce::Button
 {
 public:
-    enum class Icon { goToBeginning, rewind, play, stop, forward, record };
+    enum class Icon { goToBeginning, rewind, play, stop, forward, record, metronome, countIn };
 
     explicit TransportIconButton(Icon icon);
     void paintButton(juce::Graphics& graphics, bool highlighted, bool down) override;
@@ -31,7 +31,9 @@ public:
     std::function<void()> onBrowserToggle;
     std::function<void(TrackType)> onCreateTrack;
     std::function<void()> onRecordRequested;
+    std::function<void(bool)> onLiveModeChanged;
     std::function<void(bool)> onCountInChanged;
+    std::function<void(int)> onCountInBarsChanged;
     std::function<void(bool)> onPunchChanged;
 
     void setInspectorVisible(bool visible) noexcept;
@@ -66,10 +68,12 @@ private:
     TransportIconButton playButton { TransportIconButton::Icon::play };
     TransportIconButton stopButton { TransportIconButton::Icon::stop };
     TransportIconButton recordButton { TransportIconButton::Icon::record };
-    juce::ToggleButton countInButton { "COUNT" };
+    TransportIconButton countInButton { TransportIconButton::Icon::countIn };
     juce::ToggleButton punchButton { "PUNCH" };
     juce::ToggleButton cycleButton { "CYCLE" };
-    juce::ToggleButton metronomeButton { "Metronome" };
+    TransportIconButton metronomeButton { TransportIconButton::Icon::metronome };
+    juce::ToggleButton liveModeButton { "LIVE" };
+    juce::ComboBox countInBarsBox;
     juce::Slider bpmSlider;
     juce::Label bpmLabel;
     juce::Image brandLogo;

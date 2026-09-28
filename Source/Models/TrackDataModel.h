@@ -69,7 +69,9 @@ public:
         std::atomic<bool> soloSafe { false };
         std::atomic<bool> armed { false };
         std::atomic<bool> inputMonitoring { false };
+        std::atomic<bool> autoInputMonitoring { false };
         std::atomic<int> inputChannel { 0 };
+        std::atomic<int> inputChannelCount { 1 };
         juce::String name;
         std::vector<FxScene> fxScenes;
         std::vector<AudioClipState> clips;
@@ -94,7 +96,8 @@ public:
               solo(other.solo.load()),
               soloSafe(other.soloSafe.load()),
               armed(other.armed.load()), inputMonitoring(other.inputMonitoring.load()),
-              inputChannel(other.inputChannel.load()), name(other.name), fxScenes(other.fxScenes),
+              autoInputMonitoring(other.autoInputMonitoring.load()), inputChannel(other.inputChannel.load()),
+              inputChannelCount(other.inputChannelCount.load()), name(other.name), fxScenes(other.fxScenes),
               clips(other.clips), outputBus(other.outputBus), sends(other.sends), activeSendCount(other.activeSendCount),
               volumeAutomation(other.volumeAutomation), panAutomation(other.panAutomation), sendAutomation(other.sendAutomation)
         {
@@ -110,7 +113,9 @@ public:
             soloSafe.store(other.soloSafe.load());
             armed.store(other.armed.load());
             inputMonitoring.store(other.inputMonitoring.load());
+            autoInputMonitoring.store(other.autoInputMonitoring.load());
             inputChannel.store(other.inputChannel.load());
+            inputChannelCount.store(other.inputChannelCount.load());
             name = other.name;
             fxScenes = other.fxScenes;
             clips = other.clips;
@@ -141,7 +146,9 @@ public:
         bool soloSafe = false;
         bool armed = false;
         bool inputMonitoring = false;
+        bool autoInputMonitoring = false;
         int inputChannel = 0;
+        int inputChannelCount = 1;
         const FxRackSnapshot* fxRack = nullptr;
         BusId outputBus;
         std::array<SendRouteSnapshot, maxSendsPerTrack> sends {};
@@ -246,7 +253,13 @@ public:
     bool isTrackSoloSafe(size_t index) const noexcept;
     void setTrackArmed(size_t index, bool armed) noexcept;
     bool isTrackArmed(size_t index) const noexcept;
-    void setTrackInputMonitoring(size_t index, bool enabled, int inputChannel = 0) noexcept;
+    // Pass a channel only when changing routing. Toggling monitor alone must
+    // preserve the track's existing input assignment.
+    void setTrackInputMonitoring(size_t index, bool enabled, int inputChannel = -1) noexcept;
+    // Advances the standard live-monitoring states: Off -> Auto -> In -> Off.
+    void cycleTrackInputMonitoring(size_t index) noexcept;
+    void setTrackInputConfiguration(size_t index, bool monitorWhenArmed, bool monitorAlways,
+                                    int inputChannel, int inputChannelCount) noexcept;
     bool isTrackInputMonitoring(size_t index) const noexcept;
     int getFirstArmedTrackIndex() const noexcept;
     MidiClipId addMidiClip(TrackId track, double startSample);
@@ -296,6 +309,7 @@ public:
     bool deleteAudioClip(ClipId clipId);
     bool setClipGain(ClipId clipId, float gain);
     bool setClipFades(ClipId clipId, double fadeInSamples, double fadeOutSamples);
+    bool createCrossfadesForTrack(TrackId trackId);
     bool setClipMediaResource(ClipId clipId, const juce::File& sourceFile,
                               std::shared_ptr<juce::AudioBuffer<float>> decodedBuffer);
     bool setClipMediaStatus(ClipId clipId, AudioMediaStatus status);

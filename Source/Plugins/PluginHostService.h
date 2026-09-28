@@ -15,6 +15,11 @@ public:
 
     juce::Result scanVst3(const juce::File& bundleOrModule);
     void scanVst3Async(juce::File bundleOrModule, std::function<void(juce::Result)> completion);
+    juce::Result scanDefaultVst3Locations();
+    void scanDefaultVst3LocationsAsync(std::function<void(juce::Result)> completion = {});
+    juce::Result scanAudioUnits();
+    void scanAudioUnitsAsync(std::function<void(juce::Result)> completion = {});
+    bool supportsAudioUnits() const noexcept;
     juce::Array<juce::PluginDescription> getKnownPlugins() const;
     juce::Array<juce::PluginDescription> findKnownPlugins(const juce::String& query) const;
     std::shared_ptr<AudioEffectProcessor> createEffect(const juce::PluginDescription& description,
@@ -30,6 +35,7 @@ private:
     void loadCatalogFromDisk();
     void saveCatalogToDisk() const;
     juce::AudioPluginFormat* findVst3Format() const noexcept;
+    juce::AudioPluginFormat* findAudioUnitFormat() const noexcept;
     juce::Array<juce::PluginDescription> copyKnownPlugins() const;
 
     juce::AudioPluginFormatManager formatManager;

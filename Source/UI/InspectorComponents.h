@@ -2,6 +2,7 @@
 
 #include <array>
 #include <memory>
+#include <vector>
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
@@ -88,6 +89,7 @@ private:
     AudioEngine& audioEngine;
     PluginHostService& pluginHost;
     std::unique_ptr<juce::FileChooser> pluginFileChooser;
+    std::vector<std::unique_ptr<juce::DocumentWindow>> pluginEditorWindows;
     int selectedTrack = -1;
     std::array<BusId, TrackDataModel::maxBuses> routeBusIds {};
     juce::Rectangle<int> audioFxRackBounds;

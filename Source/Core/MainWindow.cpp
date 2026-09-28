@@ -109,12 +109,18 @@ MainWindow::MainWindow(const juce::String& name)
           juce::Colour(0xff1d1f21),
           juce::DocumentWindow::allButtons)
 {
+   #if JUCE_MAC
+    // Use the standard macOS title bar so the red/yellow/green controls retain
+    // their normal close, minimise, and zoom behaviour.
+    setUsingNativeTitleBar(true);
+   #else
     setUsingNativeTitleBar(false);
     setTitleBarHeight(0);
+   #endif
     setColour(juce::DocumentWindow::backgroundColourId, juce::Colour(0xff1d1f21));
     setColour(juce::DocumentWindow::textColourId, juce::Colours::white.withAlpha(0.92f));
     setResizable(true, true);
-    setResizeLimits(1200, 720, 3000, 1800);
+    setResizeLimits(960, 600, 3000, 1800);
     setContentOwned(new MainComponent(), true);
 
     mainComponent = dynamic_cast<MainComponent*>(getContentComponent());
@@ -133,8 +139,10 @@ MainWindow::MainWindow(const juce::String& name)
         autosaveService = std::make_unique<AutosaveService>(mainComponent->getTrackDataModel());
     }
     setMenuBar(this, 24);
+   #if ! JUCE_MAC
     windowControls = std::make_unique<WindowControls>(*this);
     addAndMakeVisible(windowControls.get());
+   #endif
     centreWithSize(1600, 920);
     setVisible(true);
     startTimerHz(30);
@@ -362,8 +370,8 @@ void MainWindow::menuItemSelected(int menuItemID, int)
                     if (result.failed()) safeWindow->showProjectError("New Project Failed", result);
                     else
                     {
-                        safeWindow->currentProjectFile = {};
-                        safeWindow->projectRootFile = {};
+                        safeWindow->currentProjectFile = juce::File {};
+                        safeWindow->projectRootFile = juce::File {};
                         if (safeWindow->autosaveService != nullptr)
                         {
                             safeWindow->autosaveService->markProjectSaved();
@@ -455,8 +463,8 @@ void MainWindow::createProjectFromTemplate(ProjectTemplate projectTemplate)
             return;
         }
 
-        safeWindow->currentProjectFile = {};
-        safeWindow->projectRootFile = {};
+        safeWindow->currentProjectFile = juce::File {};
+        safeWindow->projectRootFile = juce::File {};
         if (safeWindow->autosaveService != nullptr)
         {
             safeWindow->autosaveService->markProjectSaved();
@@ -482,8 +490,8 @@ void MainWindow::createProjectFromUserTemplate(const juce::File& file)
             return;
         }
 
-        safeWindow->currentProjectFile = {};
-        safeWindow->projectRootFile = {};
+        safeWindow->currentProjectFile = juce::File {};
+        safeWindow->projectRootFile = juce::File {};
         if (safeWindow->autosaveService != nullptr)
         {
             safeWindow->autosaveService->markProjectSaved();
@@ -693,8 +701,8 @@ void MainWindow::closeCurrentProject()
             return;
         }
 
-        safeWindow->currentProjectFile = {};
-        safeWindow->projectRootFile = {};
+        safeWindow->currentProjectFile = juce::File {};
+        safeWindow->projectRootFile = juce::File {};
         if (safeWindow->autosaveService != nullptr)
         {
             safeWindow->autosaveService->markProjectSaved();
@@ -747,14 +755,17 @@ void MainWindow::showDeviceSettings()
         return;
 
     juce::DialogWindow::LaunchOptions options;
-    options.content.setOwned(new DeviceSettingsPanel(mainComponent->getAudioEngine()));
+    options.content.setOwned(new DeviceSettingsPanel(mainComponent->getAudioEngine(), mainComponent->getTrackDataModel()));
     options.dialogTitle = "Audio Device Settings";
     options.dialogBackgroundColour = juce::Colour(0xff25282d);
     options.escapeKeyTriggersCloseButton = true;
     options.useNativeTitleBar = true;
     options.resizable = true;
     options.componentToCentreAround = this;
-    options.content->setSize(560, 420);
+    // The Device tab contains a compact selector form. Keep the utility
+    // window close to that content; Track Inputs scrolls independently when
+    // a session has many recorded audio channels.
+    options.content->setSize(640, 480);
     options.launchAsync();
 }
 

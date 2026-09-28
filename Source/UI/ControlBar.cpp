@@ -144,6 +144,26 @@ void TransportIconButton::paintButton(juce::Graphics& graphics, bool highlighted
         case Icon::record:
             graphics.fillEllipse(centreX - 5.0f, centreY - 5.0f, 10.0f, 10.0f);
             break;
+
+        case Icon::metronome:
+        {
+            const auto top = iconBounds.getY() + 1.0f;
+            const auto bottom = iconBounds.getBottom() - 1.0f;
+            const auto left = iconBounds.getX() + 1.5f;
+            const auto right = iconBounds.getRight() - 1.5f;
+            path.startNewSubPath(centreX, top);
+            path.lineTo(right, bottom);
+            path.lineTo(left, bottom);
+            path.closeSubPath();
+            graphics.strokePath(path, juce::PathStrokeType(1.8f));
+            graphics.drawLine(centreX - 1.2f, top + 3.0f, centreX + 1.2f, bottom - 3.0f, 1.5f);
+            break;
+        }
+
+        case Icon::countIn:
+            graphics.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 8.5f, juce::Font::bold)));
+            graphics.drawFittedText("1234", iconBounds.toNearestInt(), juce::Justification::centred, 1);
+            break;
     }
 }
 
@@ -158,6 +178,8 @@ ControlBar::ControlBar(TrackDataModel* model, AudioEngine* engine)
     addAndMakeVisible(stopButton);
     addAndMakeVisible(recordButton);
     addAndMakeVisible(countInButton);
+    addAndMakeVisible(liveModeButton);
+    addAndMakeVisible(countInBarsBox);
     addAndMakeVisible(punchButton);
     addAndMakeVisible(cycleButton);
     addAndMakeVisible(metronomeButton);
@@ -236,12 +258,28 @@ ControlBar::ControlBar(TrackDataModel* model, AudioEngine* engine)
         stopPlayback();
     };
     recordButton.onClick = [this] { toggleRecording(); };
+    liveModeButton.setClickingTogglesState(true);
+    liveModeButton.setTooltip("Live mode: all audio tracks run through their own FX and Master FX");
+    liveModeButton.onClick = [this]
+    {
+        if (onLiveModeChanged != nullptr)
+            onLiveModeChanged(liveModeButton.getToggleState());
+    };
     countInButton.setClickingTogglesState(true);
-    countInButton.setTooltip("Record after one bar of count-in");
+    countInButton.setTooltip("Count-in before recording");
     countInButton.onClick = [this]
     {
         if (onCountInChanged != nullptr)
             onCountInChanged(countInButton.getToggleState());
+    };
+    countInBarsBox.addItem("1 BAR", 1);
+    countInBarsBox.addItem("2 BARS", 2);
+    countInBarsBox.setSelectedId(1, juce::dontSendNotification);
+    countInBarsBox.setTooltip("Count-in length");
+    countInBarsBox.onChange = [this]
+    {
+        if (onCountInBarsChanged != nullptr)
+            onCountInBarsChanged(countInBarsBox.getSelectedId());
     };
     punchButton.setClickingTogglesState(true);
     punchButton.setTooltip("Enable punch recording. Uses the cycle range, or one bar at the playhead.");
@@ -261,9 +299,11 @@ ControlBar::ControlBar(TrackDataModel* model, AudioEngine* engine)
             audioEngine->setMetronomeEnabled(metronomeButton.getToggleState());
     };
 
-    for (auto* button : { &goToBeginningButton, &rewindButton, &playButton, &stopButton, &forwardButton, &recordButton })
+    for (auto* button : { &goToBeginningButton, &rewindButton, &playButton, &stopButton, &forwardButton, &recordButton,
+                          &countInButton, &metronomeButton })
         button->setColour(juce::TextButton::buttonColourId, juce::Colour(0xff243139));
     punchButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xffde9b42).withAlpha(0.18f));
+    liveModeButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff1f8f74).withAlpha(0.30f));
     inspectorButton.setColour(juce::TextButton::buttonColourId, darkPanel);
     mixerButton.setColour(juce::TextButton::buttonColourId, darkPanel);
     pianoRollButton.setColour(juce::TextButton::buttonColourId, darkPanel);
@@ -282,6 +322,7 @@ ControlBar::ControlBar(TrackDataModel* model, AudioEngine* engine)
     };
 
     metronomeButton.setToggleState(audioEngine != nullptr && audioEngine->isMetronomeEnabled(), juce::dontSendNotification);
+    liveModeButton.setToggleState(audioEngine != nullptr && audioEngine->isLivePerformanceEnabled(), juce::dontSendNotification);
     bpmLabel.setText("120 BPM", juce::dontSendNotification);
     bpmLabel.setJustificationType(juce::Justification::centredRight);
     bpmLabel.setFont(juce::Font(16.0f, juce::Font::bold));
@@ -439,6 +480,7 @@ void ControlBar::timerCallback()
     punchButton.setToggleState(trackModel->isPunchActive(), juce::dontSendNotification);
     cycleButton.setToggleState(trackModel->isCycleActive(), juce::dontSendNotification);
     metronomeButton.setToggleState(audioEngine != nullptr && audioEngine->isMetronomeEnabled(), juce::dontSendNotification);
+    liveModeButton.setToggleState(audioEngine != nullptr && audioEngine->isLivePerformanceEnabled(), juce::dontSendNotification);
 }
 
 void ControlBar::updateLogoPlaybackGlow(bool shouldGlow) noexcept
@@ -506,23 +548,29 @@ void ControlBar::resized()
     const auto rightControlsWidth = 0;
     const auto rightX = bounds.getRight() - rightControlsWidth;
     cycleButton.setVisible(false);
-    countInButton.setVisible(false);
+    countInButton.setVisible(true);
     punchButton.setVisible(false);
-    metronomeButton.setVisible(false);
+    metronomeButton.setVisible(true);
+    countInBarsBox.setVisible(true);
     bpmSlider.setVisible(false);
     bpmLabel.setVisible(false);
 
     const auto wideLayout = getWidth() >= 1450;
     const auto lcdWidth = wideLayout ? 276 : 220;
     const auto meterWidth = wideLayout ? 168 : 0;
-    const auto clusterWidth = lcdWidth + meterWidth + 6 * 30 + 30;
+    constexpr auto performanceControlsWidth = 48 + 30 + 30 + 54 + 16;
+    const auto clusterWidth = performanceControlsWidth + lcdWidth + meterWidth + 6 * 30 + 30;
     const auto clusterMinX = bounds.getX() + 402;
     const auto clusterMaxX = rightX - clusterWidth - 8;
     const auto clusterX = clusterMaxX > clusterMinX
         ? juce::jlimit(clusterMinX, clusterMaxX, bounds.getCentreX() - clusterWidth / 2)
         : clusterMaxX;
-    transportLCD.setBounds(clusterX, bounds.getY(), lcdWidth, 52);
-    const auto transportX = clusterX + lcdWidth + 18;
+    liveModeButton.setBounds(clusterX, bounds.getY() + 7, 44, 28);
+    metronomeButton.setBounds(clusterX + 48, bounds.getY() + 7, 28, 28);
+    countInButton.setBounds(clusterX + 80, bounds.getY() + 7, 28, 28);
+    countInBarsBox.setBounds(clusterX + 112, bounds.getY() + 7, 52, 28);
+    transportLCD.setBounds(clusterX + performanceControlsWidth, bounds.getY(), lcdWidth, 52);
+    const auto transportX = clusterX + performanceControlsWidth + lcdWidth + 18;
     goToBeginningButton.setBounds(transportX, bounds.getY() + 7, 28, 28);
     rewindButton.setBounds(transportX + 32, bounds.getY() + 7, 28, 28);
     playButton.setBounds(transportX + 64, bounds.getY() + 6, 30, 30);

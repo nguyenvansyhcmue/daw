@@ -233,6 +233,10 @@ juce::Result parseProject(const juce::File& file, ProjectState& state)
                 || ! readInt(*track, "inputChannel", parsedTrack.inputChannel))
                 return juce::Result::fail("Track input routing is malformed");
         }
+        if (version >= 16
+            && (! readBool(*track, "autoInputMonitoring", parsedTrack.autoInputMonitoring)
+                || ! readInt(*track, "inputChannelCount", parsedTrack.inputChannelCount)))
+            return juce::Result::fail("Track input format is malformed");
         if (version >= 7)
         {
             uint64_t outputBus = 0, sendBus = 0;
@@ -429,7 +433,9 @@ juce::Result writeProjectState(const ProjectState& state, const juce::File& file
         element->setAttribute("solo", track.solo ? 1 : 0);
         element->setAttribute("soloSafe", track.soloSafe ? 1 : 0);
         element->setAttribute("inputMonitoring", track.inputMonitoring ? 1 : 0);
+        element->setAttribute("autoInputMonitoring", track.autoInputMonitoring ? 1 : 0);
         element->setAttribute("inputChannel", track.inputChannel);
+        element->setAttribute("inputChannelCount", track.inputChannelCount);
         element->setAttribute("outputBus", juce::String(track.outputBus.value));
         element->setAttribute("sendBus", "0");
         element->setAttribute("sendAmount", 0.0);

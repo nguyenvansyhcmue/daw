@@ -58,7 +58,9 @@ struct PersistedTrackState
     bool solo = false;
     bool soloSafe = false;
     bool inputMonitoring = false;
+    bool autoInputMonitoring = false;
     int inputChannel = 0;
+    int inputChannelCount = 1;
     BusId outputBus;
     std::array<SendRoute, maxSends> sends {};
     uint8_t activeSendCount = 0;
@@ -101,7 +103,7 @@ struct PersistedMidiClipState
 
 struct ProjectState
 {
-    static constexpr int formatVersion = 15;
+    static constexpr int formatVersion = 16;
 
     double bpm = 120.0;
     int timeSignatureNumerator = 4;

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include "../Models/TrackDataModel.h"
@@ -66,9 +68,13 @@ private:
     void configureTrackCreationDialog();
     void selectAudioInputChannel(int oneBasedChannel);
     void selectAudioOutputChannel(int oneBasedChannel);
+    void handleSpaceTransport();
     void toggleRecording();
     void startRecordingNow(int trackIndex, const juce::File& destination,
                            double timelineStartSample = -1.0);
+    void startAudioRecordingsNow(const std::vector<AudioEngine::AudioRecordingTarget>& targets,
+                                 double timelineStartSample = -1.0);
+    void showRecordingFailure(const juce::Result& result) const;
     void timerCallback() override;
     juce::File createRecordingDestination() const;
 
@@ -87,10 +93,14 @@ private:
     uint64_t savedProjectRevision = 0;
     bool recoveredProjectNeedsSave = false;
     bool countInEnabled = false;
+    int countInBars = 1;
     bool recordingCountdownActive = false;
     int pendingRecordingTrack = -1;
     double pendingRecordingStartSample = 0.0;
     juce::File pendingRecordingDestination;
+    std::vector<AudioEngine::AudioRecordingTarget> pendingAudioRecordingTargets;
     double recordingPunchStopSample = -1.0;
     TrackId selectedTrackId;
+    bool spaceStopPendingReturn = false;
+    uint64_t appliedLiveKeyRevision = 0;
 };

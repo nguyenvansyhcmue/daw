@@ -25,6 +25,44 @@ private:
     std::function<void(juce::Result)> completion;
 };
 
+class AudioUnitScanJob final : public juce::ThreadPoolJob
+{
+public:
+    AudioUnitScanJob(PluginHostService& owner, std::function<void(juce::Result)> finished)
+        : juce::ThreadPoolJob("StudioForge Audio Unit scan"), host(owner), completion(std::move(finished)) {}
+
+    JobStatus runJob() override
+    {
+        const auto result = host.scanAudioUnits();
+        if (completion != nullptr)
+            juce::MessageManager::callAsync([completion = std::move(completion), result]() mutable { completion(result); });
+        return jobHasFinished;
+    }
+
+private:
+    PluginHostService& host;
+    std::function<void(juce::Result)> completion;
+};
+
+class DefaultVst3ScanJob final : public juce::ThreadPoolJob
+{
+public:
+    DefaultVst3ScanJob(PluginHostService& owner, std::function<void(juce::Result)> finished)
+        : juce::ThreadPoolJob("StudioForge default VST3 scan"), host(owner), completion(std::move(finished)) {}
+
+    JobStatus runJob() override
+    {
+        const auto result = host.scanDefaultVst3Locations();
+        if (completion != nullptr)
+            juce::MessageManager::callAsync([completion = std::move(completion), result]() mutable { completion(result); });
+        return jobHasFinished;
+    }
+
+private:
+    PluginHostService& host;
+    std::function<void(juce::Result)> completion;
+};
+
 class PluginEffectProcessor final : public AudioEffectProcessor
 {
 public:
@@ -51,6 +89,10 @@ public:
 
     void releaseResources() override { instance->releaseResources(); }
     juce::String getName() const override { return instance->getName(); }
+    int getLatencySamples() const noexcept override
+    {
+        return instance != nullptr ? juce::jmax(0, instance->getLatencySamples()) : 0;
+    }
     juce::String getPersistentIdentifier() const override
     {
         return instance != nullptr ? instance->getPluginDescription().createIdentifierString() : juce::String {};
@@ -77,6 +119,18 @@ public:
         return true;
     }
 
+    bool applyDetectedKey(int rootNote, bool minor) override
+    {
+        if (instance == nullptr || ! instance->getName().containsIgnoreCase("VibeAutotune"))
+            return false;
+
+        static constexpr std::array<const char*, 12> noteNames {
+            "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
+        };
+        return setParameterText("root", noteNames[static_cast<size_t>(juce::jlimit(0, 11, rootNote))])
+            && setParameterText("scale", minor ? "Natural Minor" : "Major");
+    }
+
     bool hasEditor() const override
     {
         return instance != nullptr && instance->hasEditor();
@@ -90,6 +144,24 @@ public:
     }
 
 private:
+    bool setParameterText(const juce::String& identifier, const juce::String& value)
+    {
+        for (auto* parameter : instance->getParameters())
+        {
+            auto matches = parameter->getName(128).equalsIgnoreCase(identifier);
+            if (const auto* withId = dynamic_cast<const juce::AudioProcessorParameterWithID*>(parameter); withId != nullptr)
+                matches = matches || withId->getParameterID().equalsIgnoreCase(identifier);
+            if (! matches) continue;
+
+            const auto normalised = juce::jlimit(0.0f, 1.0f, parameter->getValueForText(value));
+            parameter->beginChangeGesture();
+            parameter->setValueNotifyingHost(normalised);
+            parameter->endChangeGesture();
+            return true;
+        }
+        return false;
+    }
+
     std::unique_ptr<juce::AudioPluginInstance> instance;
     juce::MidiBuffer midiBuffer;
 };
@@ -98,7 +170,19 @@ private:
 PluginHostService::PluginHostService(juce::File catalogFile) : catalog(std::move(catalogFile))
 {
     formatManager.addDefaultFormats();
+    const auto hasSavedCatalog = catalog.existsAsFile();
     loadCatalogFromDisk();
+   #if JUCE_MAC
+    // Populate an empty catalog on first launch only. Re-scanning every launch
+    // is costly and can unnecessarily contend with plug-in creation.
+    if (! hasSavedCatalog)
+        scanAudioUnitsAsync();
+   #else
+    // VST3 is the common cross-platform format. JUCE resolves Windows'
+    // per-user and system Common Files VST3 locations automatically.
+    if (! hasSavedCatalog)
+        scanDefaultVst3LocationsAsync();
+   #endif
 }
 
 juce::File PluginHostService::defaultCatalogFile()
@@ -127,6 +211,57 @@ juce::Result PluginHostService::scanVst3(const juce::File& bundleOrModule)
 void PluginHostService::scanVst3Async(juce::File bundleOrModule, std::function<void(juce::Result)> completion)
 {
     scanPool.addJob(new PluginScanJob(*this, std::move(bundleOrModule), std::move(completion)), true);
+}
+
+juce::Result PluginHostService::scanDefaultVst3Locations()
+{
+    auto* vst3Format = findVst3Format();
+    if (vst3Format == nullptr)
+        return juce::Result::fail("VST3 hosting is not enabled in this build");
+
+    const auto candidates = vst3Format->searchPathsForPlugins(vst3Format->getDefaultLocationsToSearch(), true, false);
+    juce::OwnedArray<juce::PluginDescription> found;
+    const juce::ScopedLock lock(catalogLock);
+    for (const auto& candidate : candidates)
+        knownPlugins.scanAndAddFile(candidate, true, found, *vst3Format);
+
+    saveCatalogToDisk();
+    return juce::Result::ok();
+}
+
+void PluginHostService::scanDefaultVst3LocationsAsync(std::function<void(juce::Result)> completion)
+{
+    scanPool.addJob(new DefaultVst3ScanJob(*this, std::move(completion)), true);
+}
+
+juce::Result PluginHostService::scanAudioUnits()
+{
+    auto* audioUnitFormat = findAudioUnitFormat();
+    if (audioUnitFormat == nullptr)
+        return juce::Result::fail("Audio Unit hosting is not enabled in this build");
+
+    // Audio Units are registered with Core Audio rather than discovered only
+    // from .component bundles, so ask the format for every registered AU ID.
+    const auto identifiers = audioUnitFormat->searchPathsForPlugins({}, false, false);
+    juce::OwnedArray<juce::PluginDescription> found;
+    for (const auto& identifier : identifiers)
+        knownPlugins.scanAndAddFile(identifier, true, found, *audioUnitFormat);
+
+    {
+        const juce::ScopedLock lock(catalogLock);
+        saveCatalogToDisk();
+    }
+    return juce::Result::ok();
+}
+
+void PluginHostService::scanAudioUnitsAsync(std::function<void(juce::Result)> completion)
+{
+    scanPool.addJob(new AudioUnitScanJob(*this, std::move(completion)), true);
+}
+
+bool PluginHostService::supportsAudioUnits() const noexcept
+{
+    return findAudioUnitFormat() != nullptr;
 }
 
 juce::Array<juce::PluginDescription> PluginHostService::getKnownPlugins() const
@@ -171,6 +306,14 @@ juce::AudioPluginFormat* PluginHostService::findVst3Format() const noexcept
 {
     for (auto* format : formatManager.getFormats())
         if (format != nullptr && format->getName().equalsIgnoreCase("VST3"))
+            return format;
+    return nullptr;
+}
+
+juce::AudioPluginFormat* PluginHostService::findAudioUnitFormat() const noexcept
+{
+    for (auto* format : formatManager.getFormats())
+        if (format != nullptr && format->getName().equalsIgnoreCase("AudioUnit"))
             return format;
     return nullptr;
 }

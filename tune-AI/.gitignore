@@ -1,0 +1,91 @@
+# =========================================================
+# THM Vocal Panel — .gitignore
+# =========================================================
+
+# ----- Python -----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# ----- Virtual environment -----
+.venv/
+.venv-*/
+venv/
+env/
+ENV/
+
+# ----- PyInstaller -----
+build/
+dist/
+*.manifest
+
+# ----- IDE / Editor -----
+.vscode/
+.idea/
+.claude/worktrees/
+*.swp
+*.swo
+*~
+
+# ----- OS -----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =========================================================
+# SENSITIVE — KHÔNG BAO GIỜ commit các file dưới đây
+# =========================================================
+
+# Google API service account (cả plain text lẫn encrypted)
+# Khi distribute, file .enc sẽ được PyInstaller bundle vào dist/, không cần track trong git.
+service_account.json
+service_account.enc
+
+# License keys / status (có thể chứa thông tin cá nhân)
+data/license.json
+data/license_status.json
+
+# =========================================================
+# Auto-generated runtime data (lớn + thay đổi liên tục)
+# =========================================================
+
+# Tone analysis cache (auto-build khi dò bài)
+data/tone_cache.json
+
+# Correction history
+data/correction_history.json
+
+# End modulation last result
+data/end_modulation_last_result.json
+
+# Test result logs (jsonl — append-only, lớn)
+data/*.jsonl
+
+# Backup folder (tone_cache backups, app data backups)
+data/backups/
+
+# =========================================================
+# Project-specific large/temporary files
+# =========================================================
+
+# Tone data dumps ở root (test data ngày nào sinh ra ngày đó)
+THM_TONE_DATA_*.json
+
+# Screenshots
+screenshot_*.png
+
+# Backup folders (manual user backup)
+backup/
+backup_new_ui/
+
+# Log files
+*.log
+.runtime/
+
+# Local browser session data
+youtube cookies.txt

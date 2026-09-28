@@ -1,0 +1,22 @@
+{
+  "target_hwnd": 1313624,
+  "target_title": "NHAC: Ins. 2 - Auto-Key",
+  "target_class": "SteinbergWindowClass䡓",
+  "target_hint": "NHAC: Ins. 2 - Auto-Key",
+  "p1": {
+    "x": 403,
+    "y": 29
+  },
+  "p2": {
+    "x": 372,
+    "y": 194
+  },
+  "p3": {
+    "x": 390,
+    "y": 335
+  },
+  "delay_23": 8.0,
+  "auto_run_on_play": false,
+  "block_input_during_autokey": false,
+  "delay_12": 12.0
+}

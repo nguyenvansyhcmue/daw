@@ -1,0 +1,26 @@
+{
+  "cubase_project_path": "D:/MAPPING PORT GOC/PJ DA MAPPING GOC/PJ MAPPING goc.cpr",
+  "start_cubase_with_app": true,
+  "close_cubase_on_exit": true,
+  "ytdlp_cookies_file": "C:/Users/truye/Documents/toolv2/youtube cookies.txt",
+  "autokey": {
+    "target_hwnd": 1248270,
+    "target_title": "Cài đặt",
+    "target_class": "Qt6110QWindowIcon",
+    "target_hint": "Cài đặt",
+    "p1": [
+      2356,
+      79
+    ],
+    "p2": [
+      2374,
+      241
+    ],
+    "p3": [
+      2305,
+      390
+    ],
+    "delay_12": 0.0,
+    "delay_23": 3.0
+  }
+}

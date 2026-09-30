@@ -1,0 +1,23 @@
+{
+  "palette": {
+    "chassis_black": "#0B0C0D",
+    "panel_graphite": "#151719",
+    "warm_steel": "#8C765E",
+    "ivory_text": "#E8D9C2",
+    "amber_lcd": "#E49A3A",
+    "amber_low_glow": "#A65A1C",
+    "blue_remix": "#4C90C8",
+    "exit_red": "#B24A45"
+  },
+  "lighting": {
+    "global_bloom": "off_or_very_low",
+    "indicator_glow_radius_px_at_1x": 2,
+    "edge_highlight_opacity": 0.18,
+    "panel_shadow_opacity": 0.42
+  },
+  "bottom_buttons": {
+    "indicator_lamp": false,
+    "hover_brightness_delta": 0.04,
+    "pressed_translate_y_px": 2
+  }
+}

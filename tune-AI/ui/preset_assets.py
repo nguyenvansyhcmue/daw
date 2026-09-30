@@ -22,9 +22,18 @@ def _preset_assets(folder: str, stem: str) -> PresetCardAssets:
     )
 
 
+def _analog_tile(filename: str) -> PresetCardAssets:
+    tile = ASSETS_DIR / "analog" / "05_MODE_TILES" / filename
+    return PresetCardAssets(background=tile, icon=Path())
+
+
 PRESET_CARD_ASSETS = {
-    "LOFI": _preset_assets("lofi", "lofi"),
+    "LOFI": _analog_tile("TILE_LOFI.png"),
     "NHẠC TRẺ": _preset_assets("nhac_tre", "nhac_tre"),
-    "BOLERO": _preset_assets("bolero", "bolero"),
-    "REMIX": _preset_assets("remix", "remix"),
+    "BOLERO": _analog_tile("TILE_BOLERO.png"),
+    "REMIX": _analog_tile("TILE_REMIX.png"),
 }
+
+# Asset-pack tile for the Vietnamese mode label (keep the legacy fallback key
+# above for older saved layouts).
+PRESET_CARD_ASSETS["NHẠC TRẺ"] = _analog_tile("TILE_NHAC_TRE.png")

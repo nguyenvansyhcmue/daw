@@ -1,7 +1,8 @@
 """Native painted controls used by the THM Vocal Panel surface."""
 
-from PyQt6.QtCore import Qt, QPointF, QRectF, pyqtSignal
-from PyQt6.QtGui import QColor, QConicalGradient, QFont, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QRadialGradient
+from math import atan2, degrees
+from PyQt6.QtCore import Qt, QPointF, QRectF, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QConicalGradient, QFont, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QRadialGradient, QTransform
 from PyQt6.QtWidgets import QFrame, QLabel, QPushButton, QSlider, QWidget
 
 
@@ -55,8 +56,23 @@ class HardwareButton(QPushButton):
     def __init__(self, text: str, accent="#52E7FF", parent=None):
         super().__init__(text, parent)
         self._accent = QColor(accent)
+        self._asset = QPixmap()
+
+    def set_asset(self, path):
+        self._asset = QPixmap(str(path)) if path else QPixmap()
+        self.update()
 
     def paintEvent(self, event):
+        if not self._asset.isNull():
+            painter = QPainter(self)
+            target = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+            if self.isDown():
+                target.translate(0, 2)
+            image = self._asset.scaled(target.size().toSize(), Qt.AspectRatioMode.KeepAspectRatio,
+                                       Qt.TransformationMode.SmoothTransformation)
+            painter.drawPixmap(target.center() - QPointF(image.width() / 2, image.height() / 2), image)
+            painter.end()
+            return
         p = QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = QRectF(self.rect()).adjusted(2, 2, -2, -2)
         # Separate chassis, bevel and inset face make these read as physical
@@ -128,6 +144,11 @@ class VectorActionButton(QPushButton):
     def __init__(self, text: str, icon_kind: str, accent="#57B8D9", mode=False, parent=None):
         super().__init__(text, parent)
         self._kind, self._accent, self._mode = icon_kind, QColor(accent), mode
+        self._asset = QPixmap()
+
+    def set_asset(self, path):
+        self._asset = QPixmap(str(path)) if path else QPixmap()
+        self.update()
 
     def _draw_icon(self, p, center, size):
         color = QColor(self._accent).lighter(120)
@@ -165,19 +186,47 @@ class VectorActionButton(QPushButton):
     def paintEvent(self, event):
         p=QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing)
         r=QRectF(self.rect()).adjusted(1,1,-1,-1)
+        if not self._asset.isNull():
+            target = r.translated(0, 2 if self.isDown() else 0)
+            image = self._asset.scaled(
+                target.size().toSize(), Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            p.drawPixmap(target.center() - QPointF(image.width() / 2, image.height() / 2), image)
+            p.end()
+            return
         tint=QColor(self._accent); tint.setAlpha(24 if self.isChecked() else 10)
-        face=QLinearGradient(r.topLeft(),r.bottomLeft()); face.setColorAt(0,QColor('#101C26')); face.setColorAt(1,QColor('#09131B'))
-        p.setPen(QPen(QColor(self._accent.red(),self._accent.green(),self._accent.blue(),105),1)); p.setBrush(face); p.drawRoundedRect(r,9,9)
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(0, 0, 0, 125)); p.drawRoundedRect(r.translated(0, 3),9,9)
+        face=QLinearGradient(r.topLeft(),r.bottomLeft()); face.setColorAt(0,QColor('#1A2933')); face.setColorAt(.18,QColor('#0F1B24')); face.setColorAt(.55,QColor('#09141C')); face.setColorAt(1,QColor('#050B10'))
+        p.setPen(QPen(QColor(self._accent.red(),self._accent.green(),self._accent.blue(),150),1)); p.setBrush(face); p.drawRoundedRect(r,9,9)
+        inner = r.adjusted(3,3,-3,-3)
+        p.setPen(QPen(QColor(205,225,232,30),.7)); p.setBrush(Qt.BrushStyle.NoBrush); p.drawRoundedRect(inner,7,7)
+        p.setPen(QPen(QColor(0,0,0,95),1)); p.drawLine(QPointF(r.left()+10,r.bottom()-7),QPointF(r.right()-10,r.bottom()-7))
         p.setBrush(tint); p.setPen(Qt.PenStyle.NoPen); p.drawRoundedRect(r,9,9)
-        if self.isChecked(): p.setBrush(self._accent); p.drawEllipse(QRectF(r.right()-12,r.top()+7,5,5))
+        if self.isChecked():
+            p.setBrush(self._accent); p.drawEllipse(QRectF(r.right()-14,r.top()+7,6,6))
+            p.setBrush(QColor(255,255,255,135)); p.drawEllipse(QRectF(r.right()-12.5,r.top()+8.5,2,2))
         if self._mode:
             self._draw_icon(p,QPointF(r.center().x(),r.top()+r.height()*.34),32)
             lines=self.text().split("\n"); font=p.font(); font.setPointSize(10); font.setWeight(600); p.setFont(font); p.setPen(QColor('#E2EBF0'))
             p.drawText(QRectF(r.left(),r.top()+r.height()*.56,r.width(),r.height()*.34),Qt.AlignmentFlag.AlignHCenter|Qt.AlignmentFlag.AlignTop,"\n".join(lines))
         else:
-            self._draw_icon(p,QPointF(r.left()+32,r.center().y()),28)
-            font=p.font(); font.setPointSize(10); font.setWeight(550); p.setFont(font); p.setPen(QColor('#DCE7ED'))
-            p.drawText(QRectF(r.left()+60,r.top(),r.width()-68,r.height()),Qt.AlignmentFlag.AlignVCenter|Qt.AlignmentFlag.AlignLeft,self.text().replace("\n"," "))
+            # Analog rack module layout: icon sits in a recessed metal well,
+            # while the caption is engraved below it instead of being a flat
+            # icon-plus-text row.
+            icon_center = QPointF(r.center().x(), r.top() + r.height() * .40)
+            well = QRectF(icon_center.x() - 25, icon_center.y() - 25, 50, 50)
+            p.setPen(QPen(QColor(0, 0, 0, 150), 2)); p.setBrush(QColor('#050B10'))
+            p.drawEllipse(well.translated(0, 2))
+            p.setPen(QPen(QColor(self._accent.red(), self._accent.green(), self._accent.blue(), 105), 1))
+            p.setBrush(QLinearGradient(well.topLeft(), well.bottomRight()))
+            p.drawEllipse(well)
+            p.setPen(QPen(QColor(210, 232, 238, 48), .8)); p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(well.adjusted(4, 4, -4, -4))
+            self._draw_icon(p, icon_center, 25)
+            font=p.font(); font.setPointSize(9); font.setWeight(650); font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, .8); p.setFont(font); p.setPen(QColor('#DCE7ED'))
+            p.drawText(QRectF(r.left()+8,r.top()+r.height()*.68,r.width()-16,r.height()*.22),Qt.AlignmentFlag.AlignHCenter|Qt.AlignmentFlag.AlignVCenter,self.text().replace("\n"," "))
+            p.setPen(QColor(self._accent)); p.drawLine(QPointF(r.left()+18,r.bottom()-8), QPointF(r.right()-18,r.bottom()-8))
         p.end()
 
 
@@ -349,7 +398,17 @@ class PresetCardButton(QPushButton):
         icon_size = min(60, r.height() * .64)
         icon = QRectF(r.left() + 18, r.center().y() - icon_size / 2, icon_size, icon_size)
         if not self._icon.isNull():
-            p.drawPixmap(icon.toRect(), self._icon)
+            # Preserve the original icon aspect ratio; stretching into the
+            # square bounds makes the preset artwork look broken on resize.
+            icon_pixmap = self._icon.scaled(
+                icon.size().toSize(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            p.drawPixmap(
+                icon.center() - QPointF(icon_pixmap.width() / 2, icon_pixmap.height() / 2),
+                icon_pixmap,
+            )
         else:
             p.setPen(QPen(QColor(self._accent), 1)); p.setBrush(QColor(self._accent.red(), self._accent.green(), self._accent.blue(), 18)); p.drawEllipse(icon)
 
@@ -365,12 +424,39 @@ class PresetCardButton(QPushButton):
 class RotaryKnob(QSlider):
     """A QSlider with rotary studio-hardware presentation and normal slider signals."""
 
+    SENSITIVITY_BASE = 0.38
+    ACCELERATION_EXPONENT = 1.35
+    SMOOTHING_FACTOR = 0.22
+
+    valueCommitted = pyqtSignal(int)
+    dragStarted = pyqtSignal()
+    dragFinished = pyqtSignal()
+    displayValueChanged = pyqtSignal(int)
+
     def __init__(self, accent: str, default_value: int, parent=None):
         super().__init__(Qt.Orientation.Horizontal, parent)
         self._accent = QColor(accent)
         self._default_value = default_value
         self._drag_origin = None
+        self._drag_origin_x = None
+        self._drag_mouse_angle = None
+        self._last_mouse_angle = None
+        self._drag_angle_total = 0.0
         self._drag_value = default_value
+        self._pending_value = None
+        self._update_scheduled = False
+        self._rendered_asset = QPixmap()
+        self._rendered_cache = {}
+        self._rendered_face = QPixmap()
+        self._face_frame_cache = {}
+        self._face_is_sheet = False
+        self._display_value = default_value
+        self._target_value = float(default_value)
+        self._current_value = float(default_value)
+        self._last_drag_y = None
+        self._smooth_timer = QTimer(self)
+        self._smooth_timer.setInterval(8)
+        self._smooth_timer.timeout.connect(self._smooth_to_target)
         self.setFixedSize(126, 126)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setCursor(Qt.CursorShape.SizeVerCursor)
@@ -380,10 +466,36 @@ class RotaryKnob(QSlider):
         if self.width() != diameter or self.height() != diameter:
             self.setFixedSize(diameter, diameter)
 
+    def setValue(self, value):
+        super().setValue(value)
+        if self._drag_origin is None:
+            self._display_value = self.value()
+        self.update()
+
+    def set_rendered_asset(self, path):
+        self._rendered_asset = QPixmap(str(path)) if path else QPixmap()
+        self._rendered_cache.clear()
+        self.update()
+
+    def set_rendered_face_asset(self, path):
+        self._rendered_face = QPixmap(str(path)) if path else QPixmap()
+        self._face_is_sheet = (not self._rendered_face.isNull()
+                               and self._rendered_face.width() >= 8 * 100
+                               and self._rendered_face.width() == self._rendered_face.height())
+        self._face_frame_cache.clear()
+        self.update()
+
     def _angle(self, value=None):
-        value = self.value() if value is None else value
+        value = self._display_value if value is None else value
         span = max(1, self.maximum() - self.minimum())
         return 225.0 + 270.0 * (value - self.minimum()) / span
+
+    def _mouse_angle(self, position):
+        center = self.rect().center()
+        dx = position.x() - center.x()
+        dy = position.y() - center.y()
+        angle = degrees(atan2(dx, -dy))
+        return angle + 360.0 if angle < 0 else angle
 
     @staticmethod
     def _point(center, radius, angle):
@@ -466,6 +578,73 @@ class RotaryKnob(QSlider):
                          self._point(center, face.width() * .34, active))
 
     def paintEvent(self, event):
+        # In the reference chassis the production knob body/ticks are already
+        # baked into the calibrated hardware plate. Keep this widget as the
+        # live input surface only; painting it again would create a second
+        # knob on top of the reference and visibly hurt fidelity.
+        if self.property("reference_overlay"):
+            return
+        if not self._rendered_asset.isNull():
+            size = min(self.width(), self.height()) - 4
+            body = self._rendered_cache.get(size)
+            if body is None:
+                body = self._rendered_asset.scaled(
+                    size, size, Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                self._rendered_cache[size] = body
+
+            p = QPainter(self)
+            center = QPointF(self.rect().center())
+            p.drawPixmap(self.rect().center() - body.rect().center(), body)
+            if not self._rendered_face.isNull():
+                face_size = max(1, round(size * .60))
+                frames = self._face_frame_cache.get(face_size)
+                if frames is None:
+                    if self._face_is_sheet:
+                        source_size = self._rendered_face.width() // 8
+                        frames = []
+                        for index in range(64):
+                            source = self._rendered_face.copy(
+                                (index % 8) * source_size,
+                                (index // 8) * source_size,
+                                source_size,
+                                source_size,
+                            )
+                            frames.append(source.scaled(
+                                face_size, face_size,
+                                Qt.AspectRatioMode.KeepAspectRatio,
+                                Qt.TransformationMode.SmoothTransformation,
+                            ))
+                    else:
+                        face = self._rendered_face.scaled(
+                            face_size, face_size, Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
+                        frames = [
+                            face.transformed(QTransform().rotate(index * 360 / 64),
+                                             Qt.TransformationMode.SmoothTransformation)
+                            for index in range(64)
+                        ]
+                    self._face_frame_cache[face_size] = frames
+                frame_index = int(round((self._angle() % 360) / 360 * 63)) % 64
+                face_frame = frames[frame_index]
+                p.drawPixmap(self.rect().center() - face_frame.rect().center(), face_frame)
+            angle = self._angle()
+            pointer_start = self._point(center, size * .055, angle)
+            pointer_end = self._point(center, size * .34, angle)
+            # Hardware-style indicator: dark recessed channel plus a thin
+            # luminous center, so movement remains visible over the brushed
+            # metal face without looking like a flat neon line.
+            if not self._face_is_sheet:
+                p.setPen(QPen(QColor(0, 0, 0, 210), max(4.0, size * .042),
+                              Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.drawLine(pointer_start, pointer_end)
+                p.setPen(QPen(QColor("#F4F7F8"), max(1.8, size * .016),
+                              Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.drawLine(pointer_start, pointer_end)
+            p.end()
+            return
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
@@ -484,23 +663,85 @@ class RotaryKnob(QSlider):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_origin = event.position().y()
+            self._drag_origin_x = event.position().x()
             self._drag_value = self.value()
+            self._display_value = self.value()
+            self._drag_mouse_angle = self._mouse_angle(event.position())
+            self._last_mouse_angle = self._drag_mouse_angle
+            self._drag_angle_total = 0.0
+            self._target_value = float(self.value())
+            self._current_value = float(self.value())
+            self._last_drag_y = event.position().y()
+            self.dragStarted.emit()
             event.accept()
             return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         if self._drag_origin is not None:
-            factor = .25 if event.modifiers() & Qt.KeyboardModifier.ShiftModifier else 1.0
-            delta = (self._drag_origin - event.position().y()) * factor
-            self.setValue(round(self._drag_value + delta * (self.maximum() - self.minimum()) / 120))
+            current_y = event.position().y()
+            delta_y = self._last_drag_y - current_y
+            self._last_drag_y = current_y
+            if delta_y:
+                exponent = self.ACCELERATION_EXPONENT
+                if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                    exponent += 0.35
+                sign = 1.0 if delta_y > 0 else -1.0
+                delta_value = sign * (abs(delta_y) ** exponent) * self.SENSITIVITY_BASE
+                self._target_value = max(
+                    float(self.minimum()),
+                    min(float(self.maximum()), self._target_value + delta_value),
+                )
+                self._smooth_timer.start()
             event.accept()
             return
         super().mouseMoveEvent(event)
 
+    def _smooth_to_target(self):
+        error = self._target_value - self._current_value
+        self._current_value += error * self.SMOOTHING_FACTOR
+        if abs(error) < 0.01:
+            self._current_value = self._target_value
+            self._smooth_timer.stop()
+        value = int(round(self._current_value))
+        if value != self.value():
+            super().setValue(value)
+            self._display_value = value
+            self.displayValueChanged.emit(value)
+            self.update()
+
+    def _flush_pending_value(self):
+        self._update_scheduled = False
+        if self._pending_value is not None:
+            value = self._pending_value
+            self._pending_value = None
+            self._display_value = value
+            if value != self.value():
+                self.setValue(value)
+
     def mouseReleaseEvent(self, event):
         self._drag_origin = None
-        super().mouseReleaseEvent(event)
+        self._drag_origin_x = None
+        self._drag_mouse_angle = None
+        self._last_mouse_angle = None
+        self._drag_angle_total = 0.0
+        self._last_drag_y = None
+        self._target_value = max(self.minimum(), min(self.maximum(), self._target_value))
+        if abs(self._target_value - self._current_value) > 0.01:
+            self._smooth_timer.start()
+        if not self._rendered_asset.isNull():
+            self.valueChanged.emit(int(round(self._target_value)))
+        if self._pending_value is not None:
+            value = self._pending_value
+            self._pending_value = None
+            self._update_scheduled = False
+            if value != self.value():
+                self.setValue(value)
+        self.valueCommitted.emit(self.value())
+        self.dragFinished.emit()
+        # Do not let QSlider reinterpret the release position and snap the
+        # rotary control back to its original value.
+        event.accept()
 
     def mouseDoubleClickEvent(self, event):
         self.setValue(self._default_value)
@@ -508,5 +749,10 @@ class RotaryKnob(QSlider):
 
     def wheelEvent(self, event):
         steps = event.angleDelta().y() / 120
-        self.setValue(self.value() + round(steps * 2))
+        value = max(self.minimum(), min(self.maximum(), self.value() + round(steps * 2)))
+        self._target_value = float(value)
+        self._current_value = float(value)
+        self._display_value = value
+        self.setValue(value)
+        self.update()
         event.accept()

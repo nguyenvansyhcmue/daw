@@ -1,11 +1,11 @@
 {
   "nhac_tre": {
-    "reverb_short": 0,
+    "reverb_short": 82,
     "reverb_long": 0,
-    "echo": 100,
-    "mic_vol": 81,
-    "music_vol": 79,
-    "tune": 61
+    "echo": 0,
+    "mic_vol": 0,
+    "music_vol": 63,
+    "tune": 41
   },
   "bolero": {
     "reverb_short": 37,

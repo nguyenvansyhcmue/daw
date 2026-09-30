@@ -1,8 +1,8 @@
 {
   "nhac_tre": {
-    "reverb_short": 27,
-    "reverb_long": 23,
-    "echo": 14,
+    "reverb_short": 0,
+    "reverb_long": 0,
+    "echo": 100,
     "mic_vol": 81,
     "music_vol": 79,
     "tune": 61

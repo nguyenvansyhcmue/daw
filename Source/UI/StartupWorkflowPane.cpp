@@ -23,6 +23,35 @@ juce::String roleName(PerformanceRole role)
     return names[static_cast<size_t>(role)];
 }
 
+juce::String sourceName(PerformanceInputSource source)
+{
+    switch (source)
+    {
+        case PerformanceInputSource::audioInterface: return "Audio interface";
+        case PerformanceInputSource::softwareInstrument: return "MIDI Plugin";
+        case PerformanceInputSource::externalMidiHardware: return "MIDI Hardware";
+    }
+    return {};
+}
+
+bool sourceIsSelectable(PerformanceRole role) noexcept
+{
+    return role == PerformanceRole::guitar || role == PerformanceRole::bass
+        || role == PerformanceRole::keyboard || role == PerformanceRole::drums;
+}
+
+void addSupportedSources(juce::ComboBox& selector, PerformanceRole role)
+{
+    selector.clear(juce::dontSendNotification);
+    if (role != PerformanceRole::keyboard)
+        selector.addItem(sourceName(PerformanceInputSource::audioInterface), 1);
+    if (sourceIsSelectable(role))
+    {
+        selector.addItem(sourceName(PerformanceInputSource::softwareInstrument), 2);
+        selector.addItem(sourceName(PerformanceInputSource::externalMidiHardware), 3);
+    }
+}
+
 void drawChevron(juce::Graphics& g, float x, float y)
 {
     g.drawLine(x, y, x + 5.0f, y + 5.0f, 1.2f);
@@ -101,6 +130,20 @@ StartupWorkflowPane::StartupWorkflowPane()
             member.quantity = juce::jmin(8, member.quantity + 1);
             synchronisePerformanceControls();
         };
+        auto& source = setupSources[i];
+        addSupportedSources(source, performanceRoom.getMembers()[i].role);
+        source.setTextWhenNothingSelected("Select source");
+        source.onChange = [this, i]
+        {
+            if (const auto selected = setupSources[i].getSelectedId(); selected > 0)
+                performanceRoom.getMembers()[i].source = static_cast<PerformanceInputSource>(selected - 1);
+        };
+        addAndMakeVisible(source);
+        auto& hint = setupSourceHints[i];
+        hint.setJustificationType(juce::Justification::centredLeft);
+        hint.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::plain)));
+        hint.setColour(juce::Label::textColourId, muted);
+        addAndMakeVisible(hint);
         addAndMakeVisible(label);
         addAndMakeVisible(quantity);
     }
@@ -252,6 +295,9 @@ void StartupWorkflowPane::synchronisePerformanceControls()
         setupLabels[i].setText(members[i].displayName, juce::dontSendNotification);
         setupLabels[i].setColour(juce::Label::textColourId, text);
         setupQuantities[i].setText(juce::String(members[i].quantity), juce::dontSendNotification);
+        setupSources[i].setSelectedId(static_cast<int>(members[i].source) + 1, juce::dontSendNotification);
+        setupSourceHints[i].setText(members[i].role == PerformanceRole::beat ? "Audio backing track"
+                                     : "Audio input", juce::dontSendNotification);
     }
     repaint();
 }
@@ -325,8 +371,8 @@ void StartupWorkflowPane::paint(juce::Graphics& g)
         return;
     }
 
-    const auto setup = juce::Rectangle<float>(bounds.getX() + 22.0f, bounds.getY() + 110.0f, bounds.getWidth() * 0.57f, 150.0f);
-    const auto stage = juce::Rectangle<float>(setup.getRight() + 16.0f, setup.getY(), bounds.getRight() - setup.getRight() - 38.0f, 150.0f);
+    const auto setup = juce::Rectangle<float>(bounds.getX() + 22.0f, bounds.getY() + 110.0f, bounds.getWidth() * 0.57f, 210.0f);
+    const auto stage = juce::Rectangle<float>(setup.getRight() + 16.0f, setup.getY(), bounds.getRight() - setup.getRight() - 38.0f, 210.0f);
     const auto details = juce::Rectangle<float>(bounds.getX() + 22.0f, setup.getBottom() + 16.0f, bounds.getWidth() - 44.0f, 96.0f);
     g.setColour(juce::Colour(0xff46606b)); g.fillRect(bounds.getCentreX() - 45.0f, bounds.getY() + 43.0f, 90.0f, 2.0f);
     g.setColour(panel); g.fillRoundedRectangle(setup, 7.0f); g.fillRoundedRectangle(details, 7.0f);
@@ -339,7 +385,7 @@ void StartupWorkflowPane::paint(juce::Graphics& g)
     for (size_t index = 0; index < performanceRoom.getMembers().size(); ++index)
     {
         const auto x = setup.getX() + 12.0f + static_cast<float>(index / 3) * setupColumnWidth;
-        const auto y = setup.getY() + 38.0f + static_cast<float>(index % 3) * 34.0f;
+        const auto y = setup.getY() + 33.0f + static_cast<float>(index % 3) * 56.0f;
         PerformanceRoomIconLibrary::draw(g, { x, y + 3.0f, 16.0f, 16.0f }, performanceRoom.getMembers()[index].role);
     }
     auto y = stage.getY() + 30.0f;
@@ -370,7 +416,12 @@ void StartupWorkflowPane::resized()
     for (size_t i = 0; i < recentProjectButtons.size(); ++i) recentProjectButtons[i].setVisible(chooser && projectPage == ProjectPage::history && i < static_cast<size_t>(recentProjects.size()));
     for (auto& button : performancePresets) button.setVisible(room);
     for (size_t i = 0; i < PerformanceRoomModel::memberCount; ++i)
+    {
+        const auto selectable = sourceIsSelectable(performanceRoom.getMembers()[i].role);
         for (juce::Component* component : { static_cast<juce::Component*>(&setupLabels[i]), static_cast<juce::Component*>(&setupQuantities[i]), static_cast<juce::Component*>(&setupMinus[i]), static_cast<juce::Component*>(&setupPlus[i]) }) component->setVisible(room);
+        setupSources[i].setVisible(room && selectable);
+        setupSourceHints[i].setVisible(room && ! selectable);
+    }
     if (chooser)
     {
         const auto sidebarRight = bounds.getX() + 168;
@@ -391,14 +442,16 @@ void StartupWorkflowPane::resized()
     auto presets = juce::Rectangle<int>(bounds.getX() + 22, bounds.getY() + 58, bounds.getWidth() - 44, 34);
     const auto presetWidth = presets.getWidth() / static_cast<int>(performancePresets.size());
     for (auto& button : performancePresets) button.setBounds(presets.removeFromLeft(presetWidth).reduced(3, 0));
-    const auto setup = juce::Rectangle<int>(bounds.getX() + 22, bounds.getY() + 110, juce::roundToInt(bounds.getWidth() * 0.57f), 150);
+    const auto setup = juce::Rectangle<int>(bounds.getX() + 22, bounds.getY() + 110, juce::roundToInt(bounds.getWidth() * 0.57f), 210);
     const auto columnWidth = setup.getWidth() / 2;
     for (size_t i = 0; i < PerformanceRoomModel::memberCount; ++i)
     {
         const auto x = setup.getX() + static_cast<int>(i / 3) * columnWidth + 12;
-        const auto y = setup.getY() + 34 + static_cast<int>(i % 3) * 34;
+        const auto y = setup.getY() + 28 + static_cast<int>(i % 3) * 56;
         setupLabels[i].setBounds(x + 22, y, 104, 24); setupQuantities[i].setBounds(x + 128, y + 1, 24, 22);
         setupMinus[i].setBounds(x + 155, y + 1, 21, 22); setupPlus[i].setBounds(x + 179, y + 1, 21, 22);
+        setupSources[i].setBounds(x + 22, y + 27, 178, 22);
+        setupSourceHints[i].setBounds(x + 22, y + 27, 178, 22);
     }
     const auto details = juce::Rectangle<int>(bounds.getX() + 22, setup.getBottom() + 16, bounds.getWidth() - 44, 96);
     audioInputSelector.setBounds(details.getX() + 12, details.getY() + 42, juce::roundToInt(details.getWidth() * 0.46f), 26);

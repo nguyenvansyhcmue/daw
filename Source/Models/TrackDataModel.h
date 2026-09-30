@@ -72,6 +72,8 @@ public:
         std::atomic<bool> autoInputMonitoring { false };
         std::atomic<int> inputChannel { 0 };
         std::atomic<int> inputChannelCount { 1 };
+        // Zero accepts all MIDI channels; 1-16 selects one channel.
+        std::atomic<int> midiInputChannel { 0 };
         juce::String name;
         std::vector<FxScene> fxScenes;
         std::vector<AudioClipState> clips;
@@ -97,7 +99,8 @@ public:
               soloSafe(other.soloSafe.load()),
               armed(other.armed.load()), inputMonitoring(other.inputMonitoring.load()),
               autoInputMonitoring(other.autoInputMonitoring.load()), inputChannel(other.inputChannel.load()),
-              inputChannelCount(other.inputChannelCount.load()), name(other.name), fxScenes(other.fxScenes),
+              inputChannelCount(other.inputChannelCount.load()), midiInputChannel(other.midiInputChannel.load()),
+              name(other.name), fxScenes(other.fxScenes),
               clips(other.clips), outputBus(other.outputBus), sends(other.sends), activeSendCount(other.activeSendCount),
               volumeAutomation(other.volumeAutomation), panAutomation(other.panAutomation), sendAutomation(other.sendAutomation)
         {
@@ -116,6 +119,7 @@ public:
             autoInputMonitoring.store(other.autoInputMonitoring.load());
             inputChannel.store(other.inputChannel.load());
             inputChannelCount.store(other.inputChannelCount.load());
+            midiInputChannel.store(other.midiInputChannel.load());
             name = other.name;
             fxScenes = other.fxScenes;
             clips = other.clips;
@@ -149,6 +153,7 @@ public:
         bool autoInputMonitoring = false;
         int inputChannel = 0;
         int inputChannelCount = 1;
+        int midiInputChannel = 0;
         const FxRackSnapshot* fxRack = nullptr;
         BusId outputBus;
         std::array<SendRouteSnapshot, maxSendsPerTrack> sends {};
@@ -260,6 +265,8 @@ public:
     void cycleTrackInputMonitoring(size_t index) noexcept;
     void setTrackInputConfiguration(size_t index, bool monitorWhenArmed, bool monitorAlways,
                                     int inputChannel, int inputChannelCount) noexcept;
+    void setTrackMidiInputChannel(size_t index, int midiChannel) noexcept;
+    int getTrackMidiInputChannel(size_t index) const noexcept;
     bool isTrackInputMonitoring(size_t index) const noexcept;
     int getFirstArmedTrackIndex() const noexcept;
     MidiClipId addMidiClip(TrackId track, double startSample);

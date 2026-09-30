@@ -90,6 +90,51 @@ bool testProjectTemplates()
                   "template project state is accepted by the model");
 }
 
+bool testPerformanceSetupRouting()
+{
+    LiveSetupConfig setup;
+    setup.sessionMode = LiveSessionMode::audioAndMidi;
+    setup.vocalCount = 1;
+    setup.guitarCount = 1;
+    setup.bassCount = 1;
+    setup.keyboardCount = 1;
+    setup.drumCount = 1;
+    const auto project = ProjectTemplates::createLiveSetup(setup);
+    if (! expect(project.tracks.size() == 5, "performance setup creates every selected band role")) return false;
+
+    const auto hasRole = [&project] (const juce::String& name, TrackType type, int channel)
+    {
+        return std::any_of(project.tracks.begin(), project.tracks.end(), [&] (const PersistedTrackState& track)
+        {
+            return track.name.startsWith(name) && track.type == type && track.midiInputChannel == channel;
+        });
+    };
+    return expect(hasRole("Guitar", TrackType::audio, 0) && hasRole("Bass", TrackType::audio, 0)
+                      && hasRole("Keys", TrackType::instrument, 1) && hasRole("Drums", TrackType::instrument, 10),
+                  "performance setup assigns audio and MIDI capabilities by band role");
+}
+
+bool testPerformanceSourceChoices()
+{
+    LiveSetupConfig setup;
+    setup.sessionMode = LiveSessionMode::audioAndMidi;
+    setup.guitarCount = 1;
+    setup.bassCount = 1;
+    setup.guitarSource = PerformanceInputSource::softwareInstrument;
+    setup.bassSource = PerformanceInputSource::externalMidiHardware;
+    const auto project = ProjectTemplates::createLiveSetup(setup);
+    const auto hasTrack = [&project] (const juce::String& name, TrackType type, int midiChannel)
+    {
+        return std::any_of(project.tracks.begin(), project.tracks.end(), [&] (const PersistedTrackState& track)
+        {
+            return track.name.startsWith(name) && track.type == type && track.midiInputChannel == midiChannel;
+        });
+    };
+    return expect(hasTrack("Guitar", TrackType::instrument, 1)
+                      && hasTrack("Bass", TrackType::externalMidi, 2),
+                  "performance source choices produce their requested audio engine track types");
+}
+
 bool testMidiFileImport()
 {
     const auto file = juce::File::getCurrentWorkingDirectory()
@@ -1490,6 +1535,33 @@ bool testMidiCoreScheduling()
                   "MIDI scheduler emits note-off and quantizes samples");
 }
 
+bool testRealtimeMidiEvents()
+{
+    const std::array<juce::MidiMessage, 5> messages {
+        juce::MidiMessage::noteOn(2, 64, 0.5f),
+        juce::MidiMessage::controllerEvent(3, 74, 99),
+        juce::MidiMessage::pitchWheel(4, 9000),
+        juce::MidiMessage::channelPressureChange(5, 72),
+        juce::MidiMessage::programChange(6, 12)
+    };
+    for (const auto& message : messages)
+    {
+        MidiRealtimeEvent event;
+        if (! MidiRealtimeEvent::fromMessage(message, event))
+            return expect(false, "realtime MIDI event accepts supported channel messages");
+        const auto restored = event.toMessage();
+        if (restored.getChannel() != message.getChannel())
+            return expect(false, "realtime MIDI event preserves MIDI channel");
+    }
+
+    TrackDataModel model;
+    model.addTrack(TrackType::instrument);
+    model.setTrackMidiInputChannel(0, 7);
+    return expect(model.getTrackMidiInputChannel(0) == 7
+                      && model.acquireRealtimeSnapshot().getRenderStructure()->tracks[0].midiInputChannel == 7,
+                  "track MIDI input channel publishes into the realtime snapshot");
+}
+
 bool testMidiModelToEngineScheduling()
 {
     TrackDataModel model;
@@ -1868,6 +1940,8 @@ int main()
         && testGlobalScaleContext()
         && testLivePerformanceAssessment()
         && testProjectTemplates()
+        && testPerformanceSetupRouting()
+        && testPerformanceSourceChoices()
         && testProjectTemplateStore()
         && testProjectAlternativeStore()
         && testMetronomeRendering()
@@ -1911,6 +1985,7 @@ int main()
         && testWaveformThumbnailCache()
         && testMasterFxRouting()
         && testMidiCoreScheduling()
+        && testRealtimeMidiEvents()
         && testMidiModelToEngineScheduling()
         && testMidiClipEditing()
         && testMidiInstrumentPath()

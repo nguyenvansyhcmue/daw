@@ -47,6 +47,7 @@ private:
         saveProjectCopy,
         importAudio,
         importMidi,
+        analyzeYoutubeKaraoke,
         bounceProject,
         deviceSettings,
         projectSettings,

@@ -2,7 +2,7 @@
 
 #include "../Models/ProjectIdentifiers.h"
 
-#include <juce_core/juce_core.h>
+#include <juce_audio_basics/juce_audio_basics.h>
 
 #include <array>
 #include <cstddef>
@@ -40,6 +40,21 @@ struct ScheduledMidiEvent
     float velocity = 0.0f;
     int channel = 1;
     bool noteOn = true;
+};
+
+// Fixed-size event for lock-free callback queues. SysEx is deliberately not
+// accepted here because variable-size messages are not realtime safe.
+enum class MidiMessageType : uint8_t { noteOn, noteOff, controller, pitchBend, channelPressure, programChange };
+
+struct MidiRealtimeEvent
+{
+    MidiMessageType type = MidiMessageType::noteOff;
+    int channel = 1;
+    int data1 = 0;
+    int data2 = 0;
+
+    static bool fromMessage(const juce::MidiMessage&, MidiRealtimeEvent&) noexcept;
+    juce::MidiMessage toMessage() const noexcept;
 };
 
 class MidiEventBuffer final

@@ -17,6 +17,7 @@
 #include "Theme/StudioForgeLookAndFeel.h"
 #include "../Plugins/PluginHostService.h"
 #include "../Project/ProjectTemplates.h"
+#include "../Services/TuneAiAnalysisService.h"
 
 class MainComponent final : public juce::Component, private juce::Timer
 {
@@ -48,6 +49,7 @@ public:
     void importAudioFile(const juce::File& file);
     juce::Result importMidiFile(const juce::File& file);
     void requestProjectBounce();
+    void requestTuneAiUrlAnalysis();
     void setWorkspaceTrackHeight(int height);
     bool isInspectorPanelVisible() const noexcept { return inspectorPane.isVisible(); }
     bool isBrowserPanelVisible() const noexcept { return assetBrowser.isVisible(); }
@@ -66,6 +68,7 @@ private:
     void selectTrack(int trackIndex);
     int getSelectedTrackIndex() const noexcept;
     void configureTrackCreationDialog();
+    void enableAvailablePerformanceInputs();
     void selectAudioInputChannel(int oneBasedChannel);
     void selectAudioOutputChannel(int oneBasedChannel);
     void handleSpaceTransport();
@@ -75,6 +78,7 @@ private:
     void startAudioRecordingsNow(const std::vector<AudioEngine::AudioRecordingTarget>& targets,
                                  double timelineStartSample = -1.0);
     void showRecordingFailure(const juce::Result& result) const;
+    void startTuneAiUrlAnalysis(const juce::String& url);
     void timerCallback() override;
     juce::File createRecordingDestination() const;
 
@@ -82,6 +86,7 @@ private:
     TrackDataModel trackDataModel;
     AudioEngine audioEngine { &trackDataModel };
     PluginHostService pluginHost;
+    TuneAiAnalysisService tuneAiAnalysis;
     ControlBar controlBar { &trackDataModel, &audioEngine };
     ArrangeWindow arrangeWindow { &trackDataModel, &audioEngine };
     InspectorPane inspectorPane { trackDataModel, audioEngine, pluginHost };

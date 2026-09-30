@@ -2,13 +2,15 @@
 
 namespace
 {
-PersistedTrackState makeTrack(uint64_t identifier, TrackType type, juce::String name, int inputChannel = 0)
+PersistedTrackState makeTrack(uint64_t identifier, TrackType type, juce::String name, int inputChannel = 0,
+                              int midiInputChannel = 0)
 {
     PersistedTrackState track;
     track.id = { identifier };
     track.type = type;
     track.name = std::move(name);
     track.inputChannel = inputChannel;
+    track.midiInputChannel = midiInputChannel;
     return track;
 }
 
@@ -21,14 +23,26 @@ ProjectState makeBaseProject()
 
 void addNumberedTracks(ProjectState& state, TrackType type, const juce::String& name,
                        const juce::StringArray& customNames, int count,
-                       uint64_t& nextId, int& nextInput)
+                       uint64_t& nextId, int& nextInput, int midiInputChannel = 0)
 {
     for (int index = 1; index <= juce::jmax(0, count); ++index)
     {
         const auto customName = index <= customNames.size() ? customNames[index - 1].trim() : juce::String {};
         const auto trackName = customName.isNotEmpty() ? customName : name + " " + juce::String(index);
-        state.tracks.push_back(makeTrack(nextId++, type, trackName, nextInput++));
+        state.tracks.push_back(makeTrack(nextId++, type, trackName, nextInput, midiInputChannel));
+        if (type == TrackType::audio)
+            ++nextInput;
     }
+}
+
+void addPerformanceRoleTracks(ProjectState& state, const juce::String& name,
+                              const juce::StringArray& names, int count, PerformanceInputSource source,
+                              int midiChannel, uint64_t& nextId, int& nextInput)
+{
+    const auto type = source == PerformanceInputSource::audioInterface ? TrackType::audio
+        : source == PerformanceInputSource::softwareInstrument ? TrackType::instrument : TrackType::externalMidi;
+    addNumberedTracks(state, type, name, names, count, nextId, nextInput,
+                      type == TrackType::audio ? 0 : midiChannel);
 }
 }
 
@@ -68,22 +82,25 @@ ProjectState ProjectTemplates::createLiveSetup(const LiveSetupConfig& setup)
     const auto includesMidi = setup.sessionMode == LiveSessionMode::midi
                            || setup.sessionMode == LiveSessionMode::audioAndMidi;
 
-    if (includesAudio)
-        addNumberedTracks(state, TrackType::audio, "Vocal", setup.vocalNames, setup.vocalCount, nextId, nextInput);
-
-    if (includesMidi)
+    const auto canUseSource = [includesAudio, includesMidi] (PerformanceInputSource source)
     {
-        addNumberedTracks(state, TrackType::instrument, "Guitar", setup.guitarNames, setup.guitarCount, nextId, nextInput);
-        addNumberedTracks(state, TrackType::instrument, "Bass", setup.bassNames, setup.bassCount, nextId, nextInput);
-        addNumberedTracks(state, TrackType::instrument, "Keys", setup.keyboardNames, setup.keyboardCount, nextId, nextInput);
-        addNumberedTracks(state, TrackType::instrument, "Drums", setup.drumNames, setup.drumCount, nextId, nextInput);
-    }
+        return source == PerformanceInputSource::audioInterface ? includesAudio : includesMidi;
+    };
+    if (canUseSource(setup.vocalSource))
+        addPerformanceRoleTracks(state, "Vocal", setup.vocalNames, setup.vocalCount, setup.vocalSource, 1, nextId, nextInput);
+    if (canUseSource(setup.guitarSource))
+        addPerformanceRoleTracks(state, "Guitar", setup.guitarNames, setup.guitarCount, setup.guitarSource, 1, nextId, nextInput);
+    if (canUseSource(setup.bassSource))
+        addPerformanceRoleTracks(state, "Bass", setup.bassNames, setup.bassCount, setup.bassSource, 2, nextId, nextInput);
+    if (canUseSource(setup.keyboardSource))
+        addPerformanceRoleTracks(state, "Keys", setup.keyboardNames, setup.keyboardCount, setup.keyboardSource, 1, nextId, nextInput);
+    if (canUseSource(setup.drumSource))
+        addPerformanceRoleTracks(state, "Drums", setup.drumNames, setup.drumCount, setup.drumSource, 10, nextId, nextInput);
 
-    if (setup.backingTrackCount > 0
-        && (setup.midiMode == MidiSessionMode::backingTrack
-            || setup.midiMode == MidiSessionMode::instrumentsAndBackingTrack))
-        addNumberedTracks(state, TrackType::audio, "Backing Track", setup.backingTrackNames,
-                          setup.backingTrackCount, nextId, nextInput);
+    if (setup.backingTrackCount > 0 && canUseSource(setup.backingTrackSource)
+        && (setup.midiMode == MidiSessionMode::backingTrack || setup.midiMode == MidiSessionMode::instrumentsAndBackingTrack))
+        addPerformanceRoleTracks(state, "Backing Track", setup.backingTrackNames, setup.backingTrackCount,
+                                 setup.backingTrackSource, 1, nextId, nextInput);
 
     return state;
 }

@@ -23,10 +23,9 @@ def _friendly_win_error(e: Exception) -> RuntimeError:
         return RuntimeError(
             "Windows đang chặn Auto-Key điều khiển chuột.\n\n"
             "Cách xử lý:\n"
-            "1. Tắt THM Vocal Panel và Cubase.\n"
-            "2. Mở Cubase bằng Run as administrator.\n"
-            "3. Mở THM Vocal Panel bằng Run as administrator.\n"
-            "4. Đảm bảo cửa sổ Auto-Key/Cubase không bị minimize hoặc bị popup che."
+            "1. Tắt THM Vocal Panel và cửa sổ Auto-Key.\n"
+            "2. Mở THM Vocal Panel bằng Run as administrator.\n"
+            "3. Đảm bảo cửa sổ Auto-Key không bị minimize hoặc bị popup che."
         )
     return RuntimeError(msg)
 

@@ -8,7 +8,6 @@ DATA_DIR.mkdir(exist_ok=True)
 ASSETS_DIR.mkdir(exist_ok=True)
 
 APP_TITLE = "THM Vocal Panel"
-MIDI_PORT_HINT = "PythonToCubase"
 
 # =========================================================
 # CC MAP - MIC 1

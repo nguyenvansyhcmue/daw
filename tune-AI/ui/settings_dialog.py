@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sys
 
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import (
@@ -150,41 +149,6 @@ class SettingsDialog(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(10)
-
-        # =========================
-        # DAW
-        # =========================
-        gb_cubase = QGroupBox("Logic Pro" if sys.platform == "darwin" else "Cubase")
-        form_cubase = QFormLayout(gb_cubase)
-        form_cubase.setSpacing(10)
-        form_cubase.setContentsMargins(10, 14, 10, 10)
-
-        self.edt_project_path = QLineEdit()
-        self.edt_project_path.setObjectName("SettingsLineEdit")
-
-        self.btn_browse_project = QPushButton("...")
-        self.btn_browse_project.setObjectName("SettingsButton")
-        self.btn_browse_project.clicked.connect(self.on_browse_project)
-
-        row_project = QHBoxLayout()
-        row_project.setContentsMargins(0, 0, 0, 0)
-        row_project.setSpacing(6)
-        row_project.addWidget(self.edt_project_path, 1)
-        row_project.addWidget(self.btn_browse_project)
-
-        wrap_project = QWidget()
-        wrap_project.setObjectName("SettingsWrap")
-        wrap_project.setLayout(row_project)
-
-        self.chk_start_with_app = QCheckBox("Mở cùng app")
-        self.chk_start_with_app.setObjectName("SettingsCheckBox")
-
-        self.chk_close_on_exit = QCheckBox("Thoát thì hỏi lưu")
-        self.chk_close_on_exit.setObjectName("SettingsCheckBox")
-
-        form_cubase.addRow("Project:", wrap_project)
-        form_cubase.addRow("", self.chk_start_with_app)
-        form_cubase.addRow("", self.chk_close_on_exit)
 
         # =========================
         # Auto Key
@@ -363,7 +327,6 @@ class SettingsDialog(QDialog):
         row_btn.addWidget(self.btn_save)
         row_btn.addWidget(self.btn_cancel)
 
-        root.addWidget(gb_cubase)
         root.addWidget(gb_autokey)
         root.addWidget(gb_maintenance)
         root.addWidget(gb_data)
@@ -539,9 +502,6 @@ class SettingsDialog(QDialog):
     # =========================================================
 
     def _load_data(self):
-        self.edt_project_path.setText(str(self.settings.get("cubase_project_path", "")))
-        self.chk_start_with_app.setChecked(bool(self.settings.get("start_cubase_with_app", False)))
-        self.chk_close_on_exit.setChecked(bool(self.settings.get("close_cubase_on_exit", False)))
         self.edt_cookies_path.setText(str(self.settings.get("ytdlp_cookies_file", "")))
 
         title = str(self.autokey_cfg.get("target_title", "") or "")
@@ -569,27 +529,6 @@ class SettingsDialog(QDialog):
     # =========================================================
     # EVENTS
     # =========================================================
-
-    def on_browse_project(self):
-        if sys.platform == "darwin":
-            path = QFileDialog.getExistingDirectory(
-                self,
-                "Chọn Logic Pro project (.logicx)",
-                "",
-                QFileDialog.Option.ShowDirsOnly,
-            )
-            if path:
-                self.edt_project_path.setText(path)
-            return
-
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Chọn file project Cubase",
-            "",
-            "Cubase Project (*.cpr);;All Files (*)"
-        )
-        if path:
-            self.edt_project_path.setText(path)
 
     def on_capture_target_window(self):
         self._show_info(
@@ -777,9 +716,6 @@ class SettingsDialog(QDialog):
 
     def on_save(self):
         payload = {
-            "cubase_project_path": self.edt_project_path.text().strip(),
-            "start_cubase_with_app": self.chk_start_with_app.isChecked(),
-            "close_cubase_on_exit": self.chk_close_on_exit.isChecked(),
             "ytdlp_cookies_file": self.edt_cookies_path.text().strip(),
             "autokey": {
                 "delay_23": float(self.spin_delay_p23.value()),

@@ -11,9 +11,6 @@ class SettingsService:
             self.path = Path(path)
 
         self.settings = {
-            "cubase_project_path": "",
-            "start_cubase_with_app": False,
-            "close_cubase_on_exit": False,
             "ytdlp_cookies_file": "",
         }
 
@@ -24,6 +21,10 @@ class SettingsService:
                     data = json.load(f)
                 if isinstance(data, dict):
                     self.settings.update(data)
+                    # Remove obsolete Cubase launch/close settings on first
+                    # save so an old installation cannot retain that intent.
+                    for key in ("cubase_project_path", "start_cubase_with_app", "close_cubase_on_exit"):
+                        self.settings.pop(key, None)
             except Exception:
                 pass
         return self.settings

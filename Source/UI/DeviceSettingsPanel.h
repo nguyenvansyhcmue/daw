@@ -23,6 +23,7 @@ private:
     void applyLiveOptimizedBuffer();
     void startLiveCheck();
     void updateLiveCheck();
+    void refreshMidiOutputDevices();
     juce::String makeInputRoutingKey() const;
 
     AudioEngine& audioEngine;
@@ -37,6 +38,8 @@ private:
     juce::Component devicePage;
     juce::Component routingPage;
     juce::AudioDeviceSelectorComponent selector;
+    juce::Label midiOutputLabel { {}, "MIDI OUTPUT" };
+    juce::ComboBox midiOutputSelector;
     juce::Label routingHeading { {}, "TRACK INPUT ROUTING" };
     juce::Label routingHint;
     juce::Viewport routingViewport;
@@ -47,6 +50,7 @@ private:
     std::array<juce::ComboBox, TrackDataModel::maxTracks> trackMonitorModes;
     juce::String lastSummary;
     juce::String inputRoutingKey;
+    juce::String midiOutputDevicesKey;
     struct LiveCheckRun
     {
         bool active = false;

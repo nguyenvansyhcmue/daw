@@ -690,6 +690,30 @@ void TrackDataModel::setTrackInputConfiguration(size_t index, bool monitorWhenAr
     commitEdit(std::move(before));
     sendChangeMessage();
 }
+
+void TrackDataModel::setTrackMidiInputChannel(size_t index, int midiChannel) noexcept
+{
+    if (index >= trackStates.size())
+        return;
+
+    const auto channel = juce::jlimit(0, 16, midiChannel);
+    auto& track = trackStates[index];
+    if (track.midiInputChannel.load(std::memory_order_relaxed) == channel)
+        return;
+
+    auto before = captureEditState();
+    track.midiInputChannel.store(channel, std::memory_order_relaxed);
+    publishRenderStructureSnapshot();
+    commitEdit(std::move(before));
+    sendChangeMessage();
+}
+
+int TrackDataModel::getTrackMidiInputChannel(size_t index) const noexcept
+{
+    return index < trackStates.size()
+        ? trackStates[index].midiInputChannel.load(std::memory_order_relaxed) : 0;
+}
+
 bool TrackDataModel::isTrackInputMonitoring(size_t index) const noexcept
 {
     return index < trackStates.size() && trackStates[index].inputMonitoring.load(std::memory_order_relaxed);
@@ -1321,6 +1345,7 @@ ProjectState TrackDataModel::createProjectState() const
         savedTrack.autoInputMonitoring = track.autoInputMonitoring.load(std::memory_order_relaxed);
         savedTrack.inputChannel = track.inputChannel.load(std::memory_order_relaxed);
         savedTrack.inputChannelCount = track.inputChannelCount.load(std::memory_order_relaxed);
+        savedTrack.midiInputChannel = track.midiInputChannel.load(std::memory_order_relaxed);
         savedTrack.outputBus = track.outputBus;
         savedTrack.activeSendCount = track.activeSendCount;
         for (size_t i = 0; i < maxSendsPerTrack; ++i)
@@ -1433,6 +1458,8 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
         if (track.inputChannel < 0 || track.inputChannel > 255
             || track.inputChannelCount < 1 || track.inputChannelCount > 2)
             return juce::Result::fail("Project input routing is invalid");
+        if (track.midiInputChannel < 0 || track.midiInputChannel > 16)
+            return juce::Result::fail("Project MIDI input channel is invalid");
         if ((track.outputBus.isValid() && std::find(busIds.begin(), busIds.end(), track.outputBus) == busIds.end())
             || track.activeSendCount > maxSendsPerTrack)
             return juce::Result::fail("Project track bus routing is invalid");
@@ -1551,6 +1578,7 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
         restored.autoInputMonitoring.store(track.autoInputMonitoring, std::memory_order_relaxed);
         restored.inputChannel.store(track.inputChannel, std::memory_order_relaxed);
         restored.inputChannelCount.store(track.inputChannelCount, std::memory_order_relaxed);
+        restored.midiInputChannel.store(track.midiInputChannel, std::memory_order_relaxed);
         restored.outputBus = track.outputBus;
         restored.activeSendCount = track.activeSendCount;
         for (size_t i = 0; i < maxSendsPerTrack; ++i)
@@ -1772,6 +1800,7 @@ void TrackDataModel::publishRenderStructureSnapshot()
         renderTrack.autoInputMonitoring = track.autoInputMonitoring.load(std::memory_order_relaxed);
         renderTrack.inputChannel = track.inputChannel.load(std::memory_order_relaxed);
         renderTrack.inputChannelCount = track.inputChannelCount.load(std::memory_order_relaxed);
+        renderTrack.midiInputChannel = track.midiInputChannel.load(std::memory_order_relaxed);
         const auto rackSlot = getFxRackSlot(track.id);
         renderTrack.fxRack = rackSlot >= 0 ? publishedFxRacks[static_cast<size_t>(rackSlot)].load(std::memory_order_acquire) : nullptr;
         renderTrack.outputBus = track.outputBus;

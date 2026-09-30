@@ -31,7 +31,7 @@
 
 Ứng dụng phân tích âm nhạc cho karaoke phòng thu chuyên nghiệp:
 - Nhận URL YouTube → tải audio → phân tích **âm chủ (key) và thang âm (scale)** chính xác
-- Gửi **CC (Control Change)** sang phần mềm autotune (Cubase + AutoTune EFX) qua MIDI
+- Giữ key/scale đã dò trong trạng thái điều khiển nội bộ StudioForge, không kết nối DAW ngoài
 - Người hát không bị méo giọng nhờ autotune set đúng key
 - Phát hiện **đoạn lên tone cuối bài** (modulation +1/+2/+3 semitone, đặc biệt phổ biến ở Vpop)
 - Tự đổi key/scale khi YouTube chạm mốc thời gian lên tone
@@ -52,7 +52,7 @@
 | **Tín hiệu DSP** | `scipy.signal` | medfilt, find_peaks |
 | **Machine learning** | `sklearn` | (Legacy V1 detect tone gốc) |
 | **Tải audio** | `yt-dlp 2026.3.x` | Download YouTube với multi-client bypass bot detection |
-| **MIDI** | `mido` + `python-rtmidi` | Gửi CC sang Cubase/AutoTune |
+| **Điều khiển DAW** | StudioForge internal state | Không dùng cổng MIDI hay DAW ngoài |
 | **Thu âm live** | `sounddevice` | Realtime input mic |
 | **Cloud** | `gspread` + `oauth2client` | Lưu/đọc Google Sheets |
 | **Kết nối Brave** | `requests` + `websocket-client 1.9+` | Chrome DevTools Protocol để đọc currentTime |
@@ -88,8 +88,7 @@ THM_Vocal_Panel/  (root: C:\Users\truye\Documents\toolv2\)
 │       ├── realtime_tone_service.py    # Mic input realtime
 │       ├── browser_launcher_service.py # ⭐ Launch Brave với CDP flags
 │       ├── browser_monitor_service.py  # ⭐ Đọc tabs Brave qua CDP HTTP API
-│       ├── midi_service.py             # mido + rtmidi wrapper
-│       ├── cubase_service.py           # Đóng Cubase khi exit
+│       ├── midi_service.py             # trạng thái điều khiển nội bộ StudioForge
 │       ├── data_transfer_service.py
 │       ├── license_service.py          # Activation key + service_account.enc
 │       ├── settings_service.py

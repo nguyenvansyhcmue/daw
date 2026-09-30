@@ -16,5 +16,4 @@ class AppState:
     last_pred_mode_str: Optional[str] = None
     last_pred_genre: Optional[str] = None
     ml_ready: bool = False
-    cubase_project_path: str = ""
     license_days_left: int = 0

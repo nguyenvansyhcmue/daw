@@ -73,6 +73,7 @@ target_sources(StudioForgeDAW PRIVATE
     Source/Media/AudioMediaPool.cpp
     Source/Media/WaveformThumbnailCache.cpp
     Source/Recording/RecordingSession.cpp
+    Source/Services/TuneAiAnalysisService.cpp
     Source/Midi/MidiCore.cpp
     Source/Midi/MidiFileImporter.cpp
     Source/Midi/MidiTransposeProcessor.cpp
@@ -122,6 +123,7 @@ target_link_libraries(StudioForgeDAW PRIVATE
 )
 
 target_compile_definitions(StudioForgeDAW PRIVATE
+    STUDIOFORGE_TUNE_AI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tune-AI"
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_DISPLAY_SPLASH_SCREEN=0

@@ -1,36 +1,29 @@
-import mido
-from core.constants import MIDI_PORT_HINT
-
-
 class MidiService:
-    def __init__(self, port_hint: str = MIDI_PORT_HINT):
-        self.port_hint = port_hint
-        self.port = None
+    """In-process control state for StudioForge/Tune-AI.
+
+    Tune-AI used to send CC messages through an external virtual MIDI port.
+    StudioForge is now the DAW, so the panel must never discover,
+    open, or send to an external MIDI port.  We retain the small service API so
+    existing UI controls continue to work while the future native DAW bridge
+    can consume ``last_values`` directly.
+    """
+
+    def __init__(self):
+        self.last_values: dict[tuple[int, int], int] = {}
+        self.is_open = False
 
     def open(self):
-        names = mido.get_output_names()
-        for name in names:
-            if self.port_hint.lower() in name.lower():
-                self.port = mido.open_output(name)
-                return name
-        raise RuntimeError(f"Không tìm thấy cổng MIDI chứa: {self.port_hint}")
+        self.is_open = True
+        return "StudioForge internal controls"
 
     def ensure_open(self):
-        if self.port is None:
+        if not self.is_open:
             self.open()
 
     def send_cc(self, cc: int, value: int, channel: int = 0):
         self.ensure_open()
         value = max(0, min(127, int(value)))
-        msg = mido.Message(
-            "control_change",
-            channel=channel,
-            control=cc,
-            value=value
-        )
-        self.port.send(msg)
+        self.last_values[(int(channel), int(cc))] = value
 
     def close(self):
-        if self.port is not None:
-            self.port.close()
-            self.port = None
+        self.is_open = False

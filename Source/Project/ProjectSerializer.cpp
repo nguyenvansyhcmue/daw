@@ -237,6 +237,8 @@ juce::Result parseProject(const juce::File& file, ProjectState& state)
             && (! readBool(*track, "autoInputMonitoring", parsedTrack.autoInputMonitoring)
                 || ! readInt(*track, "inputChannelCount", parsedTrack.inputChannelCount)))
             return juce::Result::fail("Track input format is malformed");
+        if (version >= 17 && ! readInt(*track, "midiInputChannel", parsedTrack.midiInputChannel))
+            return juce::Result::fail("Track MIDI input channel is malformed");
         if (version >= 7)
         {
             uint64_t outputBus = 0, sendBus = 0;
@@ -436,6 +438,7 @@ juce::Result writeProjectState(const ProjectState& state, const juce::File& file
         element->setAttribute("autoInputMonitoring", track.autoInputMonitoring ? 1 : 0);
         element->setAttribute("inputChannel", track.inputChannel);
         element->setAttribute("inputChannelCount", track.inputChannelCount);
+        element->setAttribute("midiInputChannel", track.midiInputChannel);
         element->setAttribute("outputBus", juce::String(track.outputBus.value));
         element->setAttribute("sendBus", "0");
         element->setAttribute("sendAmount", 0.0);

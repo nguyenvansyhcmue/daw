@@ -73,6 +73,8 @@ void AudioEngine::initialise()
     deviceManager.initialise(2, 2, savedState.get(), true);
     deviceManager.addAudioCallback(this);
     deviceManager.addMidiInputDeviceCallback({}, this);
+    if (savedState != nullptr)
+        setMidiOutputDevice(savedState->getStringAttribute("midiOutputDeviceIdentifier"));
     setMasterGain(1.0f);
 }
 
@@ -82,6 +84,7 @@ void AudioEngine::shutdown()
     deviceManager.removeMidiInputDeviceCallback({}, this);
     deviceManager.removeAudioCallback(this);
     deviceManager.closeAudioDevice();
+    setMidiOutputDevice({});
     processingBuffer.clear();
 }
 
@@ -106,7 +109,35 @@ void AudioEngine::saveAudioDeviceState() const
 {
     const auto state = deviceManager.createStateXml();
     if (state != nullptr)
+    {
+        state->setAttribute("midiOutputDeviceIdentifier", midiOutputDeviceIdentifier);
         state->writeTo(getAudioDeviceStateFile());
+    }
+}
+
+juce::Array<juce::MidiDeviceInfo> AudioEngine::getAvailableMidiOutputDevices() const
+{
+    return juce::MidiOutput::getAvailableDevices();
+}
+
+juce::String AudioEngine::getMidiOutputDeviceIdentifier() const
+{
+    return midiOutputDeviceIdentifier;
+}
+
+juce::Result AudioEngine::setMidiOutputDevice(const juce::String& identifier)
+{
+    auto replacement = identifier.isEmpty() ? std::unique_ptr<juce::MidiOutput>() : juce::MidiOutput::openDevice(identifier);
+    if (! identifier.isEmpty() && replacement == nullptr)
+        return juce::Result::fail("Cannot open the selected MIDI output device");
+
+    auto previous = std::move(midiOutput);
+    midiOutput = std::move(replacement);
+    midiOutputDeviceIdentifier = identifier;
+    publishedMidiOutput.store(midiOutput.get(), std::memory_order_release);
+    while (midiOutputCallbackUsers.load(std::memory_order_acquire) != 0)
+        juce::Thread::sleep(1);
+    return juce::Result::ok();
 }
 
 void AudioEngine::setMetronomeEnabled(bool enabled) noexcept
@@ -521,12 +552,17 @@ int AudioEngine::applyDetectedKeyToPitchCorrection()
     if (key.revision == 0 || key.confidence < 0.45f)
         return 0;
 
+    return applyKeyToPitchCorrection(key.root, key.minor);
+}
+
+int AudioEngine::applyKeyToPitchCorrection(int rootNote, bool minor)
+{
     auto applied = 0;
     const auto applyToRack = [&] (const TrackDataModel::FxRackSnapshot* rack)
     {
         if (rack == nullptr) return;
         for (const auto& processor : rack->processors)
-            if (processor != nullptr && processor->applyDetectedKey(key.root, key.minor))
+            if (processor != nullptr && processor->applyDetectedKey(rootNote, minor))
                 ++applied;
     };
     if (dataModel != nullptr)
@@ -688,7 +724,8 @@ void AudioEngine::audioDeviceStopped()
 
 void AudioEngine::handleIncomingMidiMessage(juce::MidiInput*, const juce::MidiMessage& message)
 {
-    if (! message.isNoteOnOrOff())
+    MidiRealtimeEvent event;
+    if (! MidiRealtimeEvent::fromMessage(message, event))
         return;
 
     int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
@@ -699,8 +736,7 @@ void AudioEngine::handleIncomingMidiMessage(juce::MidiInput*, const juce::MidiMe
         return;
     }
 
-    incomingMidiEvents[static_cast<size_t>(start1)] = { message.getNoteNumber(), static_cast<float>(message.getVelocity()) / 127.0f,
-                                                         message.getChannel(), message.isNoteOn() };
+    incomingMidiEvents[static_cast<size_t>(start1)] = { event };
     incomingMidiFifo.finishedWrite(1);
 }
 
@@ -797,16 +833,16 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
         dataModel->setPlayheadPosition(playhead);
     }
 
-    if (structure != nullptr)
-        appendIncomingMidiEvents(*structure, blockStartSample);
-
     bool anyTrackSoloed = false;
     const auto automationSample = dataModel->getPlayheadPosition();
     for (size_t trackIndex = 0; structure != nullptr && trackIndex < structure->trackCount; ++trackIndex)
         anyTrackSoloed = anyTrackSoloed || structure->tracks[trackIndex].solo;
 
     prepareTrackMidiBuffers(structure);
+    if (structure != nullptr)
+        appendIncomingMidiEvents(*structure, blockStartSample);
     processTrackMidiEffects(structure);
+    sendExternalMidi(structure);
 
     if (structure != nullptr)
         renderInstrument(*structure, numSamples);
@@ -944,6 +980,21 @@ void AudioEngine::processTrackMidiEffects(const TrackDataModel::RenderStructureS
                 if (const auto& processor = rack->processors[slot]; processor != nullptr && ! rack->bypass[slot]
                     && processor->isMidiEffect())
                     processor->processBlock(trackBuffers[trackIndex], trackMidiBuffers[trackIndex]);
+}
+
+void AudioEngine::sendExternalMidi(const TrackDataModel::RenderStructureSnapshot* structure) noexcept
+{
+    if (structure == nullptr)
+        return;
+
+    midiOutputCallbackUsers.fetch_add(1, std::memory_order_acq_rel);
+    auto* output = publishedMidiOutput.load(std::memory_order_acquire);
+    if (output != nullptr)
+        for (size_t trackIndex = 0; trackIndex < structure->trackCount; ++trackIndex)
+            if (structure->tracks[trackIndex].type == TrackType::externalMidi)
+                for (const auto metadata : trackMidiBuffers[trackIndex])
+                    output->sendMessageNow(metadata.getMessage());
+    midiOutputCallbackUsers.fetch_sub(1, std::memory_order_acq_rel);
 }
 
 void AudioEngine::captureRecordingInput(const float* const* inputChannelData,
@@ -1088,34 +1139,40 @@ void AudioEngine::renderMetronome(double blockStartSample, int numSamples) noexc
 void AudioEngine::appendIncomingMidiEvents(const TrackDataModel::RenderStructureSnapshot& structure,
                                            double blockStartSample) noexcept
 {
-    int targetTrack = -1;
-    for (size_t index = 0; index < structure.trackCount; ++index)
-        if (structure.tracks[index].type == TrackType::instrument && structure.tracks[index].armed)
-        {
-            targetTrack = static_cast<int>(index);
-            break;
-        }
-    if (targetTrack < 0)
-        for (size_t index = 0; index < structure.trackCount; ++index)
-            if (structure.tracks[index].type == TrackType::instrument)
-            {
-                targetTrack = static_cast<int>(index);
-                break;
-            }
-
     int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
     incomingMidiFifo.prepareToRead(incomingMidiCapacity, start1, size1, start2, size2);
-    const auto appendRange = [this, &structure, targetTrack, blockStartSample] (int start, int count) noexcept
+    const auto appendRange = [this, &structure, blockStartSample] (int start, int count) noexcept
     {
-        if (targetTrack < 0)
-            return;
         for (int offset = 0; offset < count; ++offset)
         {
             const auto& event = incomingMidiEvents[static_cast<size_t>(start + offset)];
-            if (! scheduledMidiEvents.add({ structure.tracks[static_cast<size_t>(targetTrack)].id, 0,
-                                            event.pitch, event.velocity, event.channel, event.noteOn }))
-                break;
-            if (midiRecordingActive.load(std::memory_order_acquire))
+            const auto channelMatches = [&event] (const TrackDataModel::RenderTrack& track) noexcept
+            {
+                return track.midiInputChannel == 0 || track.midiInputChannel == event.message.channel;
+            };
+            const auto acceptsMidi = [&channelMatches] (const TrackDataModel::RenderTrack& track) noexcept
+            {
+                return (track.type == TrackType::instrument || track.type == TrackType::externalMidi)
+                    && channelMatches(track);
+            };
+
+            bool hasArmedMidiTrack = false;
+            for (size_t trackIndex = 0; trackIndex < structure.trackCount; ++trackIndex)
+                hasArmedMidiTrack = hasArmedMidiTrack || (structure.tracks[trackIndex].armed && acceptsMidi(structure.tracks[trackIndex]));
+
+            bool deliveredToRecordingTrack = false;
+            for (size_t trackIndex = 0; trackIndex < structure.trackCount; ++trackIndex)
+            {
+                const auto& track = structure.tracks[trackIndex];
+                if (! acceptsMidi(track) || (hasArmedMidiTrack && ! track.armed))
+                    continue;
+
+                trackMidiBuffers[trackIndex].addEvent(event.message.toMessage(), 0);
+                deliveredToRecordingTrack = deliveredToRecordingTrack || track.id == midiRecordingTrack;
+            }
+
+            const auto isNote = event.message.type == MidiMessageType::noteOn || event.message.type == MidiMessageType::noteOff;
+            if (isNote && deliveredToRecordingTrack && midiRecordingActive.load(std::memory_order_acquire))
             {
                 midiRecordingCallbackUsers.fetch_add(1, std::memory_order_acq_rel);
                 if (midiRecordingActive.load(std::memory_order_acquire))
@@ -1124,8 +1181,10 @@ void AudioEngine::appendIncomingMidiEvents(const TrackDataModel::RenderStructure
                     recordedMidiFifo.prepareToWrite(1, writeStart1, writeSize1, writeStart2, writeSize2);
                     if (writeSize1 > 0)
                     {
-                        recordedMidiEvents[static_cast<size_t>(writeStart1)] = { blockStartSample, event.pitch,
-                                                                                  event.velocity, event.channel, event.noteOn };
+                        recordedMidiEvents[static_cast<size_t>(writeStart1)] = {
+                            blockStartSample, event.message.data1, event.message.data2 / 127.0f,
+                            event.message.channel, event.message.type == MidiMessageType::noteOn
+                        };
                         recordedMidiFifo.finishedWrite(1);
                     }
                     else

@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import time
+import webbrowser
 from pathlib import Path
 
 
@@ -16,8 +17,14 @@ class BrowserLauncherService:
     def __init__(self):
         self.debug_port = 9222
         self.profile_dir = Path.home() / "Documents" / "THM_Brave_Profile"
+        self.download_url = "https://brave.com/download/"
 
     def _possible_brave_paths(self):
+        if sys.platform == "darwin":
+            return [
+                "/Applications/Brave Browser.app",
+                str(Path.home() / "Applications" / "Brave Browser.app"),
+            ]
         return [
             r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
             r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
@@ -42,15 +49,19 @@ class BrowserLauncherService:
                 return path
 
         raise FileNotFoundError(
-            "Không tìm thấy brave.exe. Anh kiểm tra lại Brave đã cài chưa."
+            "Không tìm thấy Brave Browser."
         )
+
+    def open_brave_download_page(self) -> str:
+        """Open Brave's official, OS-aware download page in the default browser."""
+        webbrowser.open(self.download_url, new=2)
+        return self.download_url
 
     def open_brave_for_auto_detect(self, start_url: str = "https://www.youtube.com"):
         brave_exe = self.find_brave_exe()
         self.profile_dir.mkdir(parents=True, exist_ok=True)
 
-        args = [
-            brave_exe,
+        chromium_args = [
             f"--remote-debugging-port={self.debug_port}",
             # CRITICAL: Brave/Chromium v107+ chặn WebSocket CDP nếu thiếu flag
             # này (handshake 403 Forbidden). Cần allow origin cho websocket-client
@@ -58,8 +69,11 @@ class BrowserLauncherService:
             "--remote-allow-origins=*",
             f"--user-data-dir={str(self.profile_dir)}",
             "--new-window",
-            start_url,
         ]
+        if sys.platform == "darwin":
+            args = ["open", "-na", brave_exe, "--args", *chromium_args, start_url]
+        else:
+            args = [brave_exe, *chromium_args, start_url]
 
         subprocess.Popen(
             args,

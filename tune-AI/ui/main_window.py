@@ -2,7 +2,7 @@ import threading
 import time
 
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QEvent, QSize
-from PyQt6.QtGui import QIcon, QPixmap, QPainter
+from PyQt6.QtGui import QGuiApplication, QIcon, QPixmap, QPainter
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -25,11 +25,15 @@ from core.constants import APP_TITLE, ASSETS_DIR, BASE_DIR
 from ui.song_manager_dialog import SongEditDialog, SongManagerDialog
 from ui.youtube_panel import YouTubeBrowserDialog
 from ui.settings_dialog import SettingsDialog
+from ui.preset_assets import PRESET_CARD_ASSETS
+from ui.premium_widgets import HardwareButton, MicrophoneVisual, PresetCardButton, RotaryKnob, ToneShiftChassis, ToneShiftDisplay, VectorActionButton, WaveformDecoration
 
 
 class MainWindow(QMainWindow):
-    MODE_BTN_W = 84
-    MODE_BTN_H = 42
+    MODE_BTN_W = 142
+    MODE_BTN_H = 84
+    DEFAULT_WINDOW_SIZE = QSize(1440, 810)
+    MINIMUM_WINDOW_SIZE = QSize(1060, 620)
 
     realtime_status_signal = pyqtSignal(str)
     realtime_tone_signal = pyqtSignal(object)
@@ -98,10 +102,10 @@ class MainWindow(QMainWindow):
         self.controller = controller
 
         self.setWindowTitle(APP_TITLE)
-        self.resize(720, 430)
-        self.setFixedSize(720, 430)
-
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self.resize(self.DEFAULT_WINDOW_SIZE)
+        self.setMinimumSize(self.MINIMUM_WINDOW_SIZE)
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+        self._window_drag_offset = None
 
         self.vang_on = True
         self.mic_on = True
@@ -119,6 +123,8 @@ class MainWindow(QMainWindow):
             "key": "F",
             "scale": "Minor",
         }
+        # F Minor is a safe DSP bootstrap only, never presented as a detected result.
+        self.tone_is_resolved = False
 
         self.current_song_playing = None
         self.current_song_id = None
@@ -209,10 +215,45 @@ class MainWindow(QMainWindow):
         self.setStatusBar(None)
 
         self.show()
+        QTimer.singleShot(0, self._fit_and_center_window)
 
     # =========================================================
     # HELPERS
     # =========================================================
+
+    def _fit_and_center_window(self):
+        """Use a consistent 16:9 default while staying inside the active screen."""
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        width = min(self.DEFAULT_WINDOW_SIZE.width(), max(self.MINIMUM_WINDOW_SIZE.width(), available.width() - 32))
+        height = min(self.DEFAULT_WINDOW_SIZE.height(), max(self.MINIMUM_WINDOW_SIZE.height(), available.height() - 32))
+        # Preserve the intended 16:9 shape whenever the display has room.
+        if width / max(1, height) > 16 / 9:
+            width = min(width, round(height * 16 / 9))
+        else:
+            height = min(height, round(width * 9 / 16))
+        self.resize(width, height)
+        self.move(
+            available.x() + (available.width() - width) // 2,
+            available.y() + (available.height() - height) // 2,
+        )
+
+    def eventFilter(self, watched, event):
+        """Let the frameless header behave like a native title bar."""
+        if watched is getattr(self, "_header_card", None):
+            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                self._window_drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                return True
+            if event.type() == QEvent.Type.MouseMove and self._window_drag_offset is not None:
+                if event.buttons() & Qt.MouseButton.LeftButton:
+                    self.move(event.globalPosition().toPoint() - self._window_drag_offset)
+                    return True
+            if event.type() == QEvent.Type.MouseButtonRelease:
+                self._window_drag_offset = None
+                return True
+        return super().eventFilter(watched, event)
 
     def _seconds_to_mmss(self, total_seconds: int) -> str:
         total_seconds = max(0, int(total_seconds))
@@ -287,11 +328,17 @@ class MainWindow(QMainWindow):
         self.current_detected_tone["scale"] = base_scale
         self.current_detected_tone["label"] = f"{transposed_key} {base_scale}"
 
-        self.lbl_tone.setText(f"TONE: {transposed_key} {base_scale}")
+        self.lbl_tone.setText(self._tone_display_text(f"{transposed_key} {base_scale}"))
         self._sync_compact_controls()
 
+    def _tone_display_text(self, label: str | None = None) -> str:
+        """Return one end-user-safe representation for every tone surface."""
+        if not getattr(self, "tone_is_resolved", False):
+            return "Đang dò tone"
+        return str(label or self.current_detected_tone.get("label", "") or "Đang dò tone")
+
     def _set_pitch_step_value(self, semitone: int, send_midi: bool = True):
-        """Đổi mức tăng/giảm tone nhạc và luôn đồng bộ CC 36 với Cubase."""
+        """Đổi mức tăng/giảm tone nhạc trong trạng thái điều khiển nội bộ."""
         try:
             semitone = max(-12, min(12, int(semitone)))
         except Exception:
@@ -416,54 +463,9 @@ class MainWindow(QMainWindow):
         self._update_end_modulation_status_line()
 
     def _refresh_mode_button_colors(self):
-        lofi_off_style = """
-            QPushButton {
-                background-color: #22c55e;
-                color: white;
-                font-weight: 800;
-                border-radius: 10px;
-                border: 3px solid #6ee7b7;
-            }
-        """
-
-        lofi_on_style = """
-            QPushButton {
-                background-color: #ef4444;
-                color: white;
-                font-weight: 800;
-                border-radius: 10px;
-                border: 3px solid #fca5a5;
-            }
-        """
-
-        mode_off_style = """
-            QPushButton {
-                color: white;
-                font-weight: 800;
-                border-radius: 10px;
-                border: 3px solid #7dd3fc;
-                background: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #67e8f9,
-                    stop:1 #a855f7
-                );
-            }
-        """
-
-        mode_on_style = """
-            QPushButton {
-                background-color: #22c55e;
-                color: white;
-                font-weight: 800;
-                border-radius: 10px;
-                border: 3px solid #86efac;
-            }
-        """
-
-        self.btn_mode_lofi.setStyleSheet(lofi_on_style if self.lofi_on else lofi_off_style)
-
-        for btn in [self.btn_mode_tre, self.btn_mode_bolero, self.btn_mode_remix]:
-            btn.setStyleSheet(mode_on_style if btn.isChecked() else mode_off_style)
+        """Repaint cards after a state change without replacing their artwork."""
+        for btn in self.mode_buttons:
+            btn.update()
 
     def _update_song_status_line(self):
         if not self.current_song_playing:
@@ -495,35 +497,32 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
 
         main = QVBoxLayout(root)
-        main.setContentsMargins(6, 6, 6, 6)
-        main.setSpacing(6)
+        main.setContentsMargins(12, 12, 12, 12)
+        main.setSpacing(8)
 
         main.addWidget(self._build_top_header())
 
-        content = QHBoxLayout()
-        content.setSpacing(6)
-        main.addLayout(content)
+        tone_row = QHBoxLayout()
+        tone_row.setContentsMargins(0, 0, 0, 0)
+        tone_row.setSpacing(12)
+        tone_row.addWidget(self._build_tone_card(), 3)
+        tone_row.addWidget(self._tone_shift_card, 1)
+        main.addLayout(tone_row, 205)
+        main.addWidget(self._build_mode_card(), 169)
 
-        left_col = QVBoxLayout()
-        mid_col = QVBoxLayout()
-        right_col = QVBoxLayout()
+        controls = QHBoxLayout()
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setSpacing(12)
+        controls.addWidget(self._build_effect_card(), 1)
+        controls.addWidget(self._build_volume_card(), 1)
+        main.addLayout(controls, 250)
 
-        for col in (left_col, mid_col, right_col):
-            col.setSpacing(6)
-            col.setContentsMargins(0, 0, 0, 0)
-
-        content.addLayout(left_col, 1)
-        content.addLayout(mid_col, 1)
-        content.addLayout(right_col, 1)
-
-        left_col.addWidget(self._build_tone_card(), 1)
-        left_col.addWidget(self._build_mode_card(), 1)
-
-        mid_col.addWidget(self._build_effect_card(), 1)
-        mid_col.addWidget(self._build_monitor_card(), 1)
-
-        right_col.addWidget(self._build_volume_card(), 1)
-        right_col.addWidget(self._build_system_card(), 1)
+        bottom = QHBoxLayout()
+        bottom.setContentsMargins(0, 0, 0, 0)
+        bottom.setSpacing(12)
+        bottom.addWidget(self._build_monitor_card(), 1)
+        bottom.addWidget(self._build_system_card(), 1)
+        main.addLayout(bottom, 151)
 
         self.setStatusBar(QStatusBar())
 
@@ -545,13 +544,42 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Keep controls balanced between the compact default and the minimum size.
+        # physical control at smaller safe window sizes to prevent overlap.
+        if not hasattr(self, "slider_reverb_short"):
+            return
+        ratio = max(0.0, min(1.0, (self.height() - 620) / 190))
+        # At the hard 1060×620 floor, reserve a real gap for the external
+        # numeric readout rather than letting the miniature knob overlap it.
+        diameter = 56 if self.height() <= 650 else round(68 + 48 * ratio)
+        for knob in (
+            self.slider_reverb_short, self.slider_reverb_long, self.slider_echo,
+            self.slider_mic_vol, self.slider_music_vol, self.slider_tune,
+        ):
+            knob.set_diameter(diameter)
+        # The reference surface uses generous performance tiles at its 1600px
+        # default, but their footprint must contract before the 1200px floor.
+        if hasattr(self, "_performance_action_buttons"):
+            wide = self.width() >= 1320
+            action_size = QSize(132, 92) if wide else QSize(98, 72)
+            for button in self._performance_action_buttons:
+                if button.size() != action_size:
+                    button.setFixedSize(action_size)
+            if hasattr(self, "_mic_block"):
+                self._mic_block.setMinimumWidth(136 if wide else 104)
+        if hasattr(self, "_footer_action_buttons"):
+            footer_width = 132 if self.width() >= 1320 else 92
+            for button in self._footer_action_buttons:
+                button.setMinimumWidth(footer_width)
+
     def _ensure_compact_window(self):
         if self.compact_window is not None:
             return self.compact_window
 
         win = QWidget()
         win.setWindowTitle("THM Vocal Mini Bar")
-        win.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         win.setWindowFlag(Qt.WindowType.Tool, True)
         win.setFixedSize(760, 68)
 
@@ -570,7 +598,7 @@ class MainWindow(QMainWindow):
         tone_box_layout.setContentsMargins(4, 2, 4, 2)
         tone_box_layout.setSpacing(1)
 
-        self.compact_lbl_tone = QLabel("TONE: F Minor")
+        self.compact_lbl_tone = QLabel("TONE: Đang dò tone")
         self.compact_lbl_tone.setObjectName("CompactToneLabel")
         self.compact_lbl_tone.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.compact_lbl_tone.setFixedHeight(27)
@@ -748,13 +776,29 @@ class MainWindow(QMainWindow):
         self.activateWindow()
         self._sync_compact_controls()
 
+    def _adjust_tone_step_from_display(self, delta: int):
+        """Shared LCD interaction path; mirrors the existing +/- button behavior."""
+        self._set_pitch_step_value(self.tone_step_value + int(delta), send_midi=True)
+        self._update_transposed_tone_label()
+        try:
+            self.controller.apply_manual_tone(
+                self.current_detected_tone.get("key", "C"),
+                self.current_detected_tone.get("scale", "Major"),
+            )
+        except Exception:
+            pass
+        self._schedule_pitch_transpose_refresh()
+
+    def _reset_tone_step_from_display(self):
+        self._adjust_tone_step_from_display(-self.tone_step_value)
+
     def _sync_compact_controls(self):
         """Đồng bộ dữ liệu từ giao diện full sang Mini Bar."""
         try:
             if not hasattr(self, "compact_lbl_tone"):
                 return
 
-            label = self.current_detected_tone.get("label", "F Minor")
+            label = self._tone_display_text()
             self.compact_lbl_tone.setText(f"TONE: {label}")
             self.compact_lbl_step.setText(f"{self.tone_step_value:+d}")
 
@@ -815,25 +859,38 @@ class MainWindow(QMainWindow):
 
     def _build_top_header(self):
         card, layout = self._card()
-        layout.setContentsMargins(8, 4, 8, 4)
+        self._header_card = card
+        self._header_card.installEventFilter(self)
+        card.setObjectName("HeaderCard")
+        card.setFixedHeight(46)
+        layout.setContentsMargins(12, 4, 8, 4)
 
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(4)
 
-        title_text = "Bản Pro V3"
-        try:
-            license_text = self.controller.get_license_display_text()
-            if license_text:
-                title_text = f"Bản Pro V3 | HSD: {license_text}"
-        except Exception:
-            pass
-
-        lbl = QLabel(title_text)
+        mark = QLabel("◈")
+        mark.setObjectName("AppMark")
+        row.addWidget(mark)
+        lbl = QLabel("T H M   V O C A L   P A N E L")
         lbl.setObjectName("Title")
         row.addWidget(lbl)
+        waveform = WaveformDecoration(height=24)
+        waveform.setFixedWidth(230)
+        row.addWidget(waveform)
         row.addStretch()
-
+        self.btn_window_minimize = QPushButton("−")
+        self.btn_window_minimize.setObjectName("WindowControl")
+        self.btn_window_minimize.setToolTip("Thu nhỏ")
+        self.btn_window_minimize.setFixedSize(28, 28)
+        self.btn_window_minimize.clicked.connect(self.showMinimized)
+        row.addWidget(self.btn_window_minimize)
+        self.btn_window_close = QPushButton("×")
+        self.btn_window_close.setObjectName("WindowCloseControl")
+        self.btn_window_close.setToolTip("Đóng")
+        self.btn_window_close.setFixedSize(28, 28)
+        self.btn_window_close.clicked.connect(self.close)
+        row.addWidget(self.btn_window_close)
         layout.addLayout(row)
         return card
 
@@ -893,54 +950,90 @@ class MainWindow(QMainWindow):
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         return lbl
 
-    def _slider(self, callback, minimum=0, maximum=100, value=50):
-        slider = QSlider(Qt.Orientation.Horizontal)
+    def _slider(self, callback, accent, minimum=0, maximum=100, value=50):
+        slider = RotaryKnob(accent, value)
         slider.setRange(minimum, maximum)
         slider.setValue(value)
         slider.valueChanged.connect(callback)
-        slider.setFixedHeight(14)
         return slider
+
+    def _rotary_cell(self, title, label, slider, accent):
+        cell = QFrame()
+        cell.setObjectName("RotaryCell")
+        layout = QVBoxLayout(cell)
+        layout.setContentsMargins(6, 2, 6, 2)
+        layout.setSpacing(0)
+        caption = QLabel(title)
+        caption.setObjectName("KnobCaption")
+        caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(caption)
+        layout.addWidget(slider, 0, Qt.AlignmentFlag.AlignCenter)
+        label.setObjectName("KnobValue")
+        label.setProperty("accent", accent)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(label)
+        layout.addStretch(1)
+        return cell
 
     def _build_tone_card(self):
         card, layout = self._card()
+        card.setObjectName("ToneMasterCard")
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(4)
+        strip = QHBoxLayout()
+        strip.setContentsMargins(0, 0, 0, 0)
+        strip.setSpacing(14)
+        mic_column = QVBoxLayout()
+        mic_block = QWidget()
+        self._mic_block = mic_block
+        mic_block.setMaximumWidth(190)
+        mic_block.setMinimumWidth(148)
+        mic_block.setLayout(mic_column)
+        tone_column = QVBoxLayout()
+        mode_column = QVBoxLayout()
+        shift_panel = ToneShiftChassis()
+        shift_panel.setObjectName("ToneShiftPanel")
+        shift_panel.setMinimumWidth(380)
+        shift_column = QVBoxLayout(shift_panel)
+        shift_column.setContentsMargins(10, 8, 10, 8)
+        shift_column.setSpacing(6)
+        layout.addLayout(strip, 1)
 
         self.mic_selector = QComboBox()
         self.mic_selector.setObjectName("SectionCombo")
         self.mic_selector.addItems(["MIC 1", "MIC 2"])
         self.mic_selector.currentTextChanged.connect(self.on_mic_selector_changed)
-        layout.addWidget(self.mic_selector)
+        mic_column.addWidget(self.mic_selector)
+        mic_visual = MicrophoneVisual()
+        mic_visual.setMinimumHeight(106)
+        mic_column.addWidget(mic_visual, 1)
 
-        self.lbl_tone = QLabel("TONE: F Minor")
+        tone_heading = QLabel("T O N E")
+        tone_heading.setObjectName("ToneHeading")
+        tone_heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tone_column.addWidget(tone_heading)
+        self.lbl_tone = QLabel("Đang dò tone")
         self.lbl_tone.setObjectName("ToneLabel")
         self.lbl_tone.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_tone.setFixedHeight(34)
-        self.lbl_tone.setStyleSheet("""
-            QLabel#ToneLabel {
-                background-color: #0f1f3d;
-                color: #67f8ff;
-                font-size: 16px;
-                font-weight: 900;
-                border: 2px solid #4deeff;
-                border-radius: 12px;
-                padding: 2px 8px;
-            }
-        """)
-        layout.addWidget(self.lbl_tone)
+        self.lbl_tone.setFixedHeight(48)
+        self.lbl_tone.setStyleSheet("")
+        tone_column.addWidget(self.lbl_tone, 1, Qt.AlignmentFlag.AlignLeft)
+        tone_wave = WaveformDecoration(height=34)
+        tone_column.addWidget(tone_wave)
 
         self.tone_progress = QProgressBar()
         self.tone_progress.setRange(0, 100)
         self.tone_progress.setValue(0)
         self.tone_progress.setFormat("%p%")
-        self.tone_progress.setFixedHeight(14)
+        self.tone_progress.setFixedHeight(10)
         self.tone_progress.setTextVisible(True)
-        layout.addWidget(self.tone_progress)
 
         self.lbl_tone_status = QLabel("")
         self.lbl_tone_status.setObjectName("SubTitle")
         self.lbl_tone_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_tone_status.setFixedHeight(18)
+        self.lbl_tone_status.setFixedHeight(14)
         self.lbl_tone_status.setVisible(True)
-        layout.addWidget(self.lbl_tone_status)
+        tone_column.addWidget(self.lbl_tone_status)
 
         detect_row = QHBoxLayout()
         detect_row.setContentsMargins(0, 0, 0, 0)
@@ -969,7 +1062,7 @@ class MainWindow(QMainWindow):
         """)
         self.btn_detect_tone.clicked.connect(self.on_detect_tone_clicked)
 
-        self.btn_auto_detect = QPushButton("TỰ ĐỘNG\nON")
+        self.btn_auto_detect = VectorActionButton("TỰ ĐỘNG\nON", "auto", "#44C99A", mode=True)
         self.btn_auto_detect.setObjectName("ToneControlButtonSmall")
         self.btn_auto_detect.setCheckable(True)
         self.btn_auto_detect.setChecked(True)
@@ -993,7 +1086,7 @@ class MainWindow(QMainWindow):
             }
         """)
 
-        self.btn_verify_tone = QPushButton("SỬA\nTONE")
+        self.btn_verify_tone = VectorActionButton("SỬA\nTONE", "sliders", "#9875C9", mode=True)
         self.btn_verify_tone.setObjectName("ToneControlButtonSmall")
         self.btn_verify_tone.setFixedSize(78, 36)
         self.btn_verify_tone.setIcon(self._load_icon_white("HIỆU ỨNG"))
@@ -1018,7 +1111,7 @@ class MainWindow(QMainWindow):
         """)
         self.btn_verify_tone.clicked.connect(self.on_confirm_tone_clicked)
 
-        self.btn_fix_tone = QPushButton("FIX\nTONE")
+        self.btn_fix_tone = VectorActionButton("FIX\nTONE", "fix", "#D7A35C", mode=True)
         self.btn_fix_tone.setObjectName("ToneControlButtonSmall")
         self.btn_fix_tone.setFixedSize(78, 36)
         self.btn_fix_tone.setIcon(self._load_icon_white("FIX TONE"))
@@ -1047,50 +1140,68 @@ class MainWindow(QMainWindow):
         # Giữ code nút DÒ AUTOKEY trong file nhưng không đưa lên giao diện để sau này cần có thể bật lại.
         self.btn_detect_tone.setVisible(False)
 
+        # The shared theme supplies the layered dark material; legacy inline
+        # styles here would otherwise turn these into solid neon blocks.
+        self.btn_auto_detect.setObjectName("ToneAutoButton")
+        self.btn_fix_tone.setObjectName("ToneFixButton")
+        self.btn_verify_tone.setObjectName("ToneEditButton")
+        for button in (self.btn_auto_detect, self.btn_fix_tone, self.btn_verify_tone):
+            button.setStyleSheet("")
+
         detect_row_main = QHBoxLayout()
         detect_row_main.setContentsMargins(0, 0, 0, 0)
-        detect_row_main.setSpacing(6)
+        detect_row_main.setSpacing(10)
         detect_row_main.addStretch()
         for btn in (self.btn_auto_detect, self.btn_fix_tone, self.btn_verify_tone):
-            btn.setFixedSize(86, 38)
+            btn.setFixedSize(132, 92)
             detect_row_main.addWidget(btn)
         detect_row_main.addStretch()
+        self._performance_action_buttons = (
+            self.btn_auto_detect, self.btn_fix_tone, self.btn_verify_tone,
+        )
 
-        layout.addLayout(detect_row_main)
+        mode_column.addLayout(detect_row_main, 1)
+        mode_progress = QHBoxLayout()
+        mode_progress.setSpacing(8)
+        mode_progress.addStretch()
+        self.tone_progress.setMaximumWidth(392)
+        mode_progress.addWidget(self.tone_progress, 1)
+        mode_progress.addStretch()
+        mode_column.addLayout(mode_progress)
 
         # Lưu reference tone_title để có thể ẩn/hiện khi end_mod active
         # (compact mode: ẩn title để tiết kiệm 18px chiều cao)
-        self.tone_title_label = QLabel("Tăng/Giảm Tone")
-        self.tone_title_label.setObjectName("SectionTitle")
+        self.tone_title_label = QLabel("T O N E   S H I F T")
+        self.tone_title_label.setObjectName("SectionPill")
         self.tone_title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.tone_title_label)
+        shift_column.addWidget(self.tone_title_label)
 
         tone_row = QHBoxLayout()
         tone_row.setContentsMargins(0, 0, 0, 0)
         tone_row.setSpacing(8)
 
-        self.btn_tone_minus = QPushButton("-")
-        self.btn_tone_minus.setObjectName("ToneControlButton")
-        self.btn_tone_minus.setFixedSize(56, 34)
+        self.btn_tone_minus = HardwareButton("-", "#52E7FF")
+        self.btn_tone_minus.setFixedSize(60, 74)
         self.btn_tone_minus.clicked.connect(self.on_tone_minus_clicked)
 
-        self.lbl_tone_step_value = QLabel("+0")
-        self.lbl_tone_step_value.setObjectName("ToneStepValue")
+        self.lbl_tone_step_value = ToneShiftDisplay("+0")
         self.lbl_tone_step_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_tone_step_value.setFixedWidth(36)
+        self.lbl_tone_step_value.setFixedSize(145, 88)
+        self.lbl_tone_step_value.step_requested.connect(self._adjust_tone_step_from_display)
+        self.lbl_tone_step_value.reset_requested.connect(self._reset_tone_step_from_display)
 
-        self.btn_tone_plus = QPushButton("+")
-        self.btn_tone_plus.setObjectName("ToneControlButton")
-        self.btn_tone_plus.setFixedSize(56, 34)
+        self.btn_tone_plus = HardwareButton("+", "#52E7FF")
+        self.btn_tone_plus.setFixedSize(60, 74)
         self.btn_tone_plus.clicked.connect(self.on_tone_plus_clicked)
 
-        tone_row.addStretch()
         tone_row.addWidget(self.btn_tone_minus)
-        tone_row.addWidget(self.lbl_tone_step_value)
+        tone_row.addWidget(self.lbl_tone_step_value, 1)
         tone_row.addWidget(self.btn_tone_plus)
-        tone_row.addStretch()
-
-        layout.addLayout(tone_row)
+        shift_column.addLayout(tone_row, 1)
+        strip.addWidget(mic_block)
+        strip.addLayout(tone_column, 1)
+        strip.addLayout(mode_column)
+        self._tone_shift_card = shift_panel
         return card
 
     def _build_mode_card(self):
@@ -1098,24 +1209,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._section_label("CHẾ ĐỘ HÁT"))
 
         row1 = QHBoxLayout()
-        row2 = QHBoxLayout()
         row1.setContentsMargins(0, 0, 0, 0)
-        row2.setContentsMargins(0, 0, 0, 0)
         row1.setSpacing(6)
-        row2.setSpacing(6)
 
-        self.btn_mode_lofi = QPushButton("LOFI")
-        self.btn_mode_tre = QPushButton("NHẠC TRẺ")
-        self.btn_mode_bolero = QPushButton("BOLERO")
-        self.btn_mode_remix = QPushButton("REMIX")
-
-        # Map ten icon (file PNG) cho tung mode button.
-        mode_icon_map = [
-            (self.btn_mode_lofi, "LOFI"),
-            (self.btn_mode_tre, "NHẠC TRẺ"),
-            (self.btn_mode_bolero, "BOLERO"),
-            (self.btn_mode_remix, "REMIX"),
-        ]
+        self.btn_mode_lofi = PresetCardButton("LOFI", "#24E794", PRESET_CARD_ASSETS["LOFI"])
+        self.btn_mode_tre = PresetCardButton("NHẠC TRẺ", "#2BD9FA", PRESET_CARD_ASSETS["NHẠC TRẺ"])
+        self.btn_mode_bolero = PresetCardButton("BOLERO", "#C57BFF", PRESET_CARD_ASSETS["BOLERO"])
+        self.btn_mode_remix = PresetCardButton("REMIX", "#2584FF", PRESET_CARD_ASSETS["REMIX"])
 
         self.mode_buttons = [
             self.btn_mode_lofi,
@@ -1125,32 +1225,20 @@ class MainWindow(QMainWindow):
         ]
 
         for btn in self.mode_buttons:
-            btn.setObjectName("ModeButton")
             btn.setCheckable(True)
-            btn.setFixedSize(self.MODE_BTN_W, self.MODE_BTN_H)
-
-        # Gan icon trang (auto invert) cho tung nut.
-        for btn, icon_name in mode_icon_map:
-            btn.setIcon(self._load_icon_white(icon_name))
-            btn.setIconSize(QSize(16, 16))
+            btn.setMinimumSize(self.MODE_BTN_W, 94)
 
         self.btn_mode_lofi.clicked.connect(self.on_lofi_clicked)
         self.btn_mode_tre.clicked.connect(lambda: self.on_mode_clicked("nhac_tre", self.btn_mode_tre))
         self.btn_mode_bolero.clicked.connect(lambda: self.on_mode_clicked("bolero", self.btn_mode_bolero))
         self.btn_mode_remix.clicked.connect(lambda: self.on_mode_clicked("remix", self.btn_mode_remix))
 
-        row1.addStretch()
         row1.addWidget(self.btn_mode_lofi)
         row1.addWidget(self.btn_mode_tre)
-        row1.addStretch()
-
-        row2.addStretch()
-        row2.addWidget(self.btn_mode_bolero)
-        row2.addWidget(self.btn_mode_remix)
-        row2.addStretch()
+        row1.addWidget(self.btn_mode_bolero)
+        row1.addWidget(self.btn_mode_remix)
 
         layout.addLayout(row1)
-        layout.addLayout(row2)
 
         # ====================================================================
         # P0 — END MODULATION ACTION SECTION
@@ -1183,7 +1271,7 @@ class MainWindow(QMainWindow):
         end_mod_row.setContentsMargins(0, 0, 0, 0)
         end_mod_row.setSpacing(8)
 
-        self.btn_edit_end_mod = QPushButton("✏️ SỬA\nMOD CUỐI")
+        self.btn_edit_end_mod = QPushButton("SỬA\nMOD CUỐI")
         self.btn_edit_end_mod.setFixedSize(90, 28)
         self.btn_edit_end_mod.setStyleSheet("""
             QPushButton {
@@ -1205,7 +1293,7 @@ class MainWindow(QMainWindow):
         )
         self.btn_edit_end_mod.clicked.connect(self.on_edit_end_mod_clicked)
 
-        self.btn_skip_end_mod = QPushButton("🚫 HỦY\nLẦN NÀY")
+        self.btn_skip_end_mod = QPushButton("HỦY\nLẦN NÀY")
         self.btn_skip_end_mod.setFixedSize(90, 28)
         self.btn_skip_end_mod.setStyleSheet("""
             QPushButton {
@@ -1240,23 +1328,22 @@ class MainWindow(QMainWindow):
 
     def _build_effect_card(self):
         card, layout = self._card()
-        layout.addWidget(self._section_label("HIỆU ỨNG"))
+        title = self._section_label("HIỆU ỨNG")
+        title.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(title)
 
-        self.lbl_reverb_short = QLabel("Vang Ngắn: 50")
-        self.slider_reverb_short = self._slider(self.on_reverb_short_changed, 0, 100, 50)
-
-        self.lbl_reverb_long = QLabel("Dài: 50")
-        self.slider_reverb_long = self._slider(self.on_reverb_long_changed, 0, 100, 50)
-
-        self.lbl_echo = QLabel("Echo: 50")
-        self.slider_echo = self._slider(self.on_echo_changed, 0, 100, 50)
-
-        layout.addWidget(self.lbl_reverb_short)
-        layout.addWidget(self.slider_reverb_short)
-        layout.addWidget(self.lbl_reverb_long)
-        layout.addWidget(self.slider_reverb_long)
-        layout.addWidget(self.lbl_echo)
-        layout.addWidget(self.slider_echo)
+        self.lbl_reverb_short = QLabel("50")
+        self.slider_reverb_short = self._slider(self.on_reverb_short_changed, "#AF56FF", 0, 100, 50)
+        self.lbl_reverb_long = QLabel("50")
+        self.slider_reverb_long = self._slider(self.on_reverb_long_changed, "#3186FF", 0, 100, 50)
+        self.lbl_echo = QLabel("50")
+        self.slider_echo = self._slider(self.on_echo_changed, "#536EFF", 0, 100, 50)
+        knobs = QHBoxLayout()
+        knobs.setSpacing(0)
+        knobs.addWidget(self._rotary_cell("Vang Ngắn", self.lbl_reverb_short, self.slider_reverb_short, "violet"), 1)
+        knobs.addWidget(self._rotary_cell("Dài", self.lbl_reverb_long, self.slider_reverb_long, "blue"), 1)
+        knobs.addWidget(self._rotary_cell("Echo", self.lbl_echo, self.slider_echo, "indigo"), 1)
+        layout.addLayout(knobs, 1)
         return card
 
     def _build_monitor_card(self):
@@ -1264,76 +1351,69 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._section_label("MONITOR"))
 
         row1 = QHBoxLayout()
-        row2 = QHBoxLayout()
         row1.setContentsMargins(0, 0, 0, 0)
-        row2.setContentsMargins(0, 0, 0, 0)
         row1.setSpacing(6)
-        row2.setSpacing(6)
 
-        self.btn_vang = QPushButton("VANG\nON")
+        self.btn_vang = VectorActionButton("VANG ON", "headphones", "#44C99A")
         self.btn_vang.setObjectName("MonitorPrimaryButton")
-        self.btn_vang.setFixedSize(self.MODE_BTN_W, self.MODE_BTN_H)
+        self.btn_vang.setMinimumSize(self.MODE_BTN_W, self.MODE_BTN_H)
         self.btn_vang.setIcon(self._load_icon_white("VANG ON"))
         self.btn_vang.setIconSize(QSize(14, 14))
         self.btn_vang.clicked.connect(self.on_toggle_vang)
 
-        self.btn_mic = QPushButton("MIC\nON")
+        self.btn_mic = VectorActionButton("MIC ON", "mic", "#44C99A")
         self.btn_mic.setObjectName("MonitorPrimaryButton")
-        self.btn_mic.setFixedSize(self.MODE_BTN_W, self.MODE_BTN_H)
+        self.btn_mic.setMinimumSize(self.MODE_BTN_W, self.MODE_BTN_H)
         self.btn_mic.setIcon(self._load_icon_white("MIC ON"))
         self.btn_mic.setIconSize(QSize(14, 14))
         self.btn_mic.clicked.connect(self.on_toggle_mic)
 
-        self.btn_save_song = QPushButton("LƯU BÀI HÁT")
+        self.btn_save_song = VectorActionButton("LƯU BÀI HÁT", "save", "#57B8D9")
         self.btn_save_song.setObjectName("MonitorSecondaryButton")
-        self.btn_save_song.setFixedSize(self.MODE_BTN_W, self.MODE_BTN_H)
+        self.btn_save_song.setMinimumSize(self.MODE_BTN_W, self.MODE_BTN_H)
         self.btn_save_song.setIcon(self._load_icon_white("LƯU BÀI HÁT"))
         self.btn_save_song.setIconSize(QSize(14, 14))
         self.btn_save_song.clicked.connect(self.on_save_song_clicked)
 
-        self.btn_song_list = QPushButton("D.S BÀI HÁT")
+        self.btn_song_list = VectorActionButton("D.S BÀI HÁT", "list", "#57B8D9")
         self.btn_song_list.setObjectName("MonitorSecondaryButton")
-        self.btn_song_list.setFixedSize(self.MODE_BTN_W, self.MODE_BTN_H)
+        self.btn_song_list.setMinimumSize(self.MODE_BTN_W, self.MODE_BTN_H)
         self.btn_song_list.setIcon(self._load_icon_white("D.S BÀI HÁT"))
         self.btn_song_list.setIconSize(QSize(14, 14))
         self.btn_song_list.clicked.connect(self.on_song_list_clicked)
 
 
-        row1.addStretch()
         row1.addWidget(self.btn_vang)
         row1.addWidget(self.btn_mic)
-        row1.addStretch()
-
-        row2.addStretch()
-        row2.addWidget(self.btn_save_song)
-        row2.addWidget(self.btn_song_list)
-        row2.addStretch()
-
-
+        row1.addWidget(self.btn_save_song)
+        row1.addWidget(self.btn_song_list)
+        self._monitor_action_buttons = (
+            self.btn_vang, self.btn_mic, self.btn_save_song, self.btn_song_list,
+        )
         layout.addLayout(row1)
-        layout.addLayout(row2)
         return card
 
     def _build_volume_card(self):
         card, layout = self._card()
-        layout.addWidget(self._section_label("VOLUME"))
+        title = self._section_label("ÂM LƯỢNG")
+        title.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(title)
 
-        self.lbl_mic_vol = QLabel("Mic Vol: 50")
-        self.slider_mic_vol = self._slider(self.on_mic_vol_changed, 0, 100, 50)
+        self.lbl_mic_vol = QLabel("50")
+        self.slider_mic_vol = self._slider(self.on_mic_vol_changed, "#27E2F3", 0, 100, 50)
 
-        self.lbl_music_vol = QLabel("Music Vol: 50")
-        self.slider_music_vol = self._slider(self.on_music_vol_changed, 0, 100, 50)
+        self.lbl_music_vol = QLabel("50")
+        self.slider_music_vol = self._slider(self.on_music_vol_changed, "#FFAC46", 0, 100, 50)
 
         default_tune_value = 50
-        self.lbl_tune = QLabel(f"Tune: {default_tune_value}")
-        self.slider_tune = self._slider(self.on_tune_changed, 0, 100, default_tune_value)
-
-        layout.addWidget(self.lbl_mic_vol)
-        layout.addWidget(self.slider_mic_vol)
-        layout.addWidget(self.lbl_music_vol)
-        layout.addWidget(self.slider_music_vol)
-        layout.addWidget(self.lbl_tune)
-        layout.addWidget(self.slider_tune)
+        self.lbl_tune = QLabel(f"{default_tune_value}")
+        self.slider_tune = self._slider(self.on_tune_changed, "#EF4AC4", 0, 100, default_tune_value)
+        knobs = QHBoxLayout()
+        knobs.setSpacing(0)
+        knobs.addWidget(self._rotary_cell("Mic Vol", self.lbl_mic_vol, self.slider_mic_vol, "cyan"), 1)
+        knobs.addWidget(self._rotary_cell("Music Vol", self.lbl_music_vol, self.slider_music_vol, "amber"), 1)
+        knobs.addWidget(self._rotary_cell("Tune", self.lbl_tune, self.slider_tune, "magenta"), 1)
+        layout.addLayout(knobs, 1)
         return card
 
     def _build_system_card(self):
@@ -1341,52 +1421,46 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._section_label("HỆ THỐNG"))
 
         row1 = QHBoxLayout()
-        row2 = QHBoxLayout()
         row1.setContentsMargins(0, 0, 0, 0)
-        row2.setContentsMargins(0, 0, 0, 0)
         row1.setSpacing(6)
-        row2.setSpacing(6)
 
-        self.btn_karaoke = QPushButton("KARAOKE")
+        self.btn_karaoke = VectorActionButton("KARAOKE", "play", "#9875C9")
         self.btn_karaoke.setObjectName("SystemPrimaryButton")
-        self.btn_karaoke.setFixedSize(self.MODE_BTN_W, self.MODE_BTN_H)
+        self.btn_karaoke.setMinimumSize(self.MODE_BTN_W, self.MODE_BTN_H)
         self.btn_karaoke.setIcon(self._load_icon_white("KARAOKE"))
         self.btn_karaoke.setIconSize(QSize(16, 16))
         self.btn_karaoke.clicked.connect(self.on_open_karaoke_clicked)
 
-        self.btn_contact = QPushButton("LIÊN HỆ")
+        self.btn_contact = VectorActionButton("LIÊN HỆ", "phone", "#57B8D9")
         self.btn_contact.setObjectName("SystemSecondaryButton")
-        self.btn_contact.setFixedSize(self.MODE_BTN_W, self.MODE_BTN_H)
+        self.btn_contact.setMinimumSize(self.MODE_BTN_W, self.MODE_BTN_H)
         self.btn_contact.setIcon(self._load_icon_white("LIÊN HỆ"))
         self.btn_contact.setIconSize(QSize(16, 16))
         self.btn_contact.clicked.connect(self.on_contact_clicked)
 
-        self.btn_settings = QPushButton("CÀI ĐẶT")
+        self.btn_settings = VectorActionButton("CÀI ĐẶT", "settings", "#57B8D9")
         self.btn_settings.setObjectName("SystemSecondaryButton")
-        self.btn_settings.setFixedSize(self.MODE_BTN_W, self.MODE_BTN_H)
+        self.btn_settings.setMinimumSize(self.MODE_BTN_W, self.MODE_BTN_H)
         self.btn_settings.setIcon(self._load_icon_white("CÀI ĐẶT"))
         self.btn_settings.setIconSize(QSize(16, 16))
         self.btn_settings.clicked.connect(self.on_settings_clicked)
 
-        self.btn_exit = QPushButton("THOÁT")
+        self.btn_exit = VectorActionButton("THOÁT", "power", "#D95E6B")
         self.btn_exit.setObjectName("SystemDangerButton")
-        self.btn_exit.setFixedSize(self.MODE_BTN_W, self.MODE_BTN_H)
+        self.btn_exit.setMinimumSize(self.MODE_BTN_W, self.MODE_BTN_H)
         self.btn_exit.setIcon(self._load_icon_white("THOÁT"))
         self.btn_exit.setIconSize(QSize(16, 16))
         self.btn_exit.clicked.connect(self.close)
 
-        row1.addStretch()
         row1.addWidget(self.btn_karaoke)
         row1.addWidget(self.btn_contact)
-        row1.addStretch()
-
-        row2.addStretch()
-        row2.addWidget(self.btn_settings)
-        row2.addWidget(self.btn_exit)
-        row2.addStretch()
-
+        row1.addWidget(self.btn_settings)
+        row1.addWidget(self.btn_exit)
+        self._system_action_buttons = (
+            self.btn_karaoke, self.btn_contact, self.btn_settings, self.btn_exit,
+        )
+        self._footer_action_buttons = self._monitor_action_buttons + self._system_action_buttons
         layout.addLayout(row1)
-        layout.addLayout(row2)
         return card
 
 
@@ -1488,7 +1562,8 @@ class MainWindow(QMainWindow):
 
         self.end_modulation_applied_stage = str(stage or "base")
         self.current_detected_tone = dict(tone_result)
-        self.lbl_tone.setText(f"TONE: {tone_result.get('label', '')}")
+        self.tone_is_resolved = True
+        self.lbl_tone.setText(self._tone_display_text(tone_result.get("label", "")))
         try:
             self._sync_compact_controls()
         except Exception:
@@ -1971,6 +2046,13 @@ class MainWindow(QMainWindow):
             if not hasattr(self, "btn_auto_detect"):
                 return
 
+            # The responsive strip owns its own geometry now.  The former
+            # compact-mode branch forced fixed sizes and broke alignment after
+            # an end-modulation result appeared.
+            if hasattr(self, "tone_title_label"):
+                self.tone_title_label.setVisible(True)
+            return
+
             if has_active:
                 # Compact mode
                 for btn in (self.btn_auto_detect, self.btn_fix_tone, self.btn_verify_tone):
@@ -2046,7 +2128,7 @@ class MainWindow(QMainWindow):
                 else:
                     runtime_label = f"{end_key} {end_scale}".strip() or "--"
 
-                self.lbl_end_mod_info.setText(f"🎵 +{semi} → {runtime_label} @ {raise_text}")
+                self.lbl_end_mod_info.setText(f"+{semi} → {runtime_label} @ {raise_text}")
         except Exception as e:
             print("Không cập nhật được end_mod_action_section:", e)
 
@@ -2583,7 +2665,7 @@ class MainWindow(QMainWindow):
     def _load_default_singing_mode_on_startup(self):
         """
         Khi mở app luôn nạp chế độ NHẠC TRẺ thay vì để tất cả slider ở 50%.
-        Hàm này chạy sau _startup(), nên MIDI đã được mở trước khi gửi CC.
+        Hàm này chạy sau _startup(), nên trạng thái điều khiển đã sẵn sàng.
         """
         try:
             self.current_mode_button = self.btn_mode_tre
@@ -2615,7 +2697,6 @@ class MainWindow(QMainWindow):
     def _ensure_youtube_browser(self):
         if self.youtube_browser is None:
             self.youtube_browser = YouTubeBrowserDialog(self.controller, self)
-            self.youtube_browser.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
             self.youtube_browser.song_matched.connect(self.on_karaoke_song_matched)
             self.youtube_browser.video_changed.connect(self.on_karaoke_video_changed)
             self.youtube_browser.playback_state_changed.connect(self.on_karaoke_playback_state_changed)
@@ -2681,6 +2762,7 @@ class MainWindow(QMainWindow):
             "scale": scale,
             "label": f"{key} {scale}",
         }
+        self.tone_is_resolved = True
 
         self._update_transposed_tone_label()
         self.controller.apply_manual_tone(key, scale)
@@ -2694,7 +2776,7 @@ class MainWindow(QMainWindow):
         """
         Khi bấm HÁT trong danh sách bài hát:
         - Không mở YouTubeBrowserDialog trong app nữa.
-        - Áp key/scale đã lưu vào Cubase/AutoTune.
+        - Áp key/scale đã lưu vào trạng thái điều khiển StudioForge.
         - Mở video bằng Brave bên ngoài đúng chế độ auto detect.
         """
 
@@ -2741,6 +2823,9 @@ class MainWindow(QMainWindow):
             )
             self._set_progress_success("Đã mở bằng Brave")
             self._update_end_modulation_status_line()
+        except FileNotFoundError:
+            self.controller.browser_launcher_service.open_brave_download_page()
+            self._set_progress_success("Chưa cài Brave — đã mở trang tải chính thức")
         except Exception as e:
             self._reset_progress_idle()
             QMessageBox.critical(
@@ -2775,6 +2860,9 @@ class MainWindow(QMainWindow):
             )
             self._set_progress_success("Đã mở Karaoke bằng Brave")
             self._update_end_modulation_status_line()
+        except FileNotFoundError:
+            self.controller.browser_launcher_service.open_brave_download_page()
+            self._set_progress_success("Chưa cài Brave — đã mở trang tải chính thức")
         except Exception as e:
             self._reset_progress_idle()
             QMessageBox.critical(
@@ -2907,6 +2995,7 @@ class MainWindow(QMainWindow):
                 "scale": tone_result.scale,
                 "label": f"{display_key} {tone_result.scale}",
             }
+            self.tone_is_resolved = True
 
             self._update_transposed_tone_label()
         except Exception:
@@ -2970,10 +3059,9 @@ class MainWindow(QMainWindow):
             msg = (
                 "Windows đang chặn Auto-Key điều khiển chuột.\n\n"
                 "Cách xử lý:\n"
-                "1. Tắt THM Vocal Panel và Cubase.\n"
-                "2. Mở Cubase bằng Run as administrator.\n"
-                "3. Mở THM Vocal Panel bằng Run as administrator.\n"
-                "4. Đảm bảo cửa sổ Auto-Key/Cubase không bị minimize hoặc bị popup che."
+            "1. Tắt THM Vocal Panel và cửa sổ Auto-Key.\n"
+            "2. Mở THM Vocal Panel bằng Run as administrator.\n"
+            "3. Đảm bảo cửa sổ Auto-Key không bị minimize hoặc bị popup che."
             )
 
         QMessageBox.critical(self, "Lỗi Auto-Key", msg)
@@ -3345,38 +3433,9 @@ class MainWindow(QMainWindow):
 
         if self.external_auto_enabled:
             self.btn_auto_detect.setText("TỰ ĐỘNG\nON")
-            self.btn_auto_detect.setStyleSheet("""
-                QPushButton {
-                    background-color: #22c55e;
-                    color: white;
-                    font-size: 9px;
-                    font-weight: 900;
-                    border-radius: 13px;
-                    border: 2px solid #86efac;
-                    padding: 0px;
-                    text-align: center;
-                }
-                QPushButton:hover {
-                    background-color: #16a34a;
-                }
-            """)
         else:
             self.btn_auto_detect.setText("TỰ ĐỘNG\nOFF")
-            self.btn_auto_detect.setStyleSheet("""
-                QPushButton {
-                    background-color: #ef4444;
-                    color: white;
-                    font-size: 9px;
-                    font-weight: 900;
-                    border-radius: 13px;
-                    border: 2px solid #fca5a5;
-                    padding: 0px;
-                    text-align: center;
-                }
-                QPushButton:hover {
-                    background-color: #dc2626;
-                }
-            """)
+        self.btn_auto_detect.setStyleSheet("")
 
         self._update_end_modulation_status_line()
 
@@ -3474,7 +3533,7 @@ class MainWindow(QMainWindow):
                 "scale": fixed_scale,
             }
 
-            # Khi người dùng xác nhận tone gốc, đưa pitch nhạc về 0 và gửi CC 36 để Cubase đồng bộ.
+            # Khi người dùng xác nhận tone gốc, đưa pitch nhạc nội bộ về 0.
             self._set_pitch_step_value(0, send_midi=True)
 
             self._sync_end_modulation_base_key(fixed_key, fixed_scale)
@@ -3622,34 +3681,34 @@ class MainWindow(QMainWindow):
         self._schedule_pitch_transpose_refresh()
 
     def on_reverb_short_changed(self, value: int):
-        self.lbl_reverb_short.setText(f"Vang Ngắn: {value}")
+        self.lbl_reverb_short.setText(str(value))
         self.controller.set_reverb_short(value)
         self.controller.remember_mode_slider_value("reverb_short", value)
 
     def on_reverb_long_changed(self, value: int):
-        self.lbl_reverb_long.setText(f"Dài: {value}")
+        self.lbl_reverb_long.setText(str(value))
         self.controller.set_reverb_long(value)
         self.controller.remember_mode_slider_value("reverb_long", value)
 
     def on_echo_changed(self, value: int):
-        self.lbl_echo.setText(f"Echo: {value}")
+        self.lbl_echo.setText(str(value))
         self.controller.set_echo(value)
         self.controller.remember_mode_slider_value("echo", value)
 
     def on_mic_vol_changed(self, value: int):
-        self.lbl_mic_vol.setText(f"Mic Vol: {value}")
+        self.lbl_mic_vol.setText(str(value))
         self.controller.set_mic_volume(value)
         self.controller.remember_mode_slider_value("mic_vol", value)
 
     def on_music_vol_changed(self, value: int):
-        self.lbl_music_vol.setText(f"Music Vol: {value}")
+        self.lbl_music_vol.setText(str(value))
         self.controller.set_music_volume(value)
         self.controller.remember_mode_slider_value("music_vol", value)
         self._sync_compact_controls()
 
     def on_tune_changed(self, raw_slider_value: int):
         value = max(0, min(100, int(raw_slider_value)))
-        self.lbl_tune.setText(f"Tune: {value}")
+        self.lbl_tune.setText(str(value))
         self.controller.set_tune_from_slider_position(value)
         self.controller.remember_mode_slider_value("tune", value)
 

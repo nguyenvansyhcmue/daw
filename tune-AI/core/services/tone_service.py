@@ -3,6 +3,8 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
+import shutil
+import os
 from urllib.parse import parse_qs, urlparse
 
 import librosa
@@ -51,6 +53,25 @@ def _windows_no_console_kwargs() -> dict:
         "startupinfo": startupinfo,
         "creationflags": subprocess.CREATE_NO_WINDOW,
     }
+
+
+def _ffmpeg_executable() -> str:
+    """Resolve ffmpeg when the DAW was launched by macOS, not a shell.
+
+    GUI apps commonly receive a minimal PATH that omits Homebrew's arm64
+    location. Check it explicitly, while retaining the normal PATH and Windows
+    behaviour used by the standalone Tune-AI app.
+    """
+    candidates = [
+        shutil.which("ffmpeg"),
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        shutil.which("ffmpeg.exe"),
+    ]
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    raise RuntimeError("FFmpeg was not found. Install ffmpeg, then restart the DAW.")
 
 
 def clean_youtube_url(url: str) -> str:
@@ -163,7 +184,7 @@ def get_stream_url(youtube_url: str):
 
 def stream_to_numpy(stream_url: str, seconds: int, start_at: int):
     cmd = [
-        "ffmpeg",
+        _ffmpeg_executable(),
         "-hide_banner",
         "-loglevel", "error",
         "-ss", str(start_at),

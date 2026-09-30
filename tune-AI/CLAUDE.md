@@ -12,7 +12,7 @@
 - **Phân tích âm thanh**: `librosa` (pitch detection, chromagram, key estimation)
 - **Machine learning**: `sklearn` (ensemble, preprocessing, neighbors) — model phân loại key/scale
 - **Tải audio**: `yt_dlp` — tải từ YouTube về local
-- **MIDI/Autotune**: `mido` + `rtmidi` — gửi CC signal đến thiết bị autotune
+- **Điều khiển DAW**: trạng thái nội bộ StudioForge — không dùng MIDI port hay DAW ngoài
 - **Thu âm live**: `sounddevice` — input microphone real-time
 - **Cloud data**: `gspread` + `oauth2client` — lưu/đọc dữ liệu từ Google Sheets
 - **Đóng gói**: PyInstaller với file config `THM_Vocal_Panel.spec`
@@ -36,7 +36,7 @@ Khi thêm tính năng mới, hãy **đọc tất cả các module liên quan tr�
 Module liên quan đến pipeline chính:
 1. **Tải audio** — dùng `yt_dlp`, xử lý URL YouTube, convert sang định dạng phù hợp cho librosa
 2. **Phân tích pitch/key** — dùng `librosa` chromagram + `sklearn` model
-3. **Gửi MIDI/CC** — dùng `mido`/`rtmidi` gửi tín hiệu đến autotune hardware
+3. **Cập nhật trạng thái điều khiển** — giữ key/scale và hiệu ứng trong StudioForge
 4. **Ghi log/dữ liệu** — dùng `gspread` lưu kết quả lên Google Sheets
 5. **UI Panel** — PyQt widgets, kết nối signal/slot với các module trên
 
@@ -66,8 +66,8 @@ Audio file (local, tạm thời)
 Chromagram / pitch data
     ↓ sklearn model
 Key + Scale (vd: "C Major", "A Minor")
-    ↓ mido/rtmidi
-CC signal → Autotune hardware
+    ↓ điều khiển nội bộ StudioForge
+Key/scale/effect state
     ↓ gspread (log kết quả)
 Google Sheets
 ```
@@ -88,5 +88,5 @@ python main.py
 pyinstaller THM_Vocal_Panel.spec
 
 # Kiểm tra thư viện đã cài
-pip list | grep -E "librosa|sklearn|sounddevice|yt-dlp|gspread|mido"
+pip list | grep -E "librosa|sklearn|sounddevice|yt-dlp|gspread"
 ```

@@ -9,12 +9,10 @@ from core.services.song_service import SongService
 from core.services.mode_settings_service import ModeSettingsService
 from core.services.realtime_tone_service import RealtimeToneService
 from core.services.settings_service import SettingsService
-from core.services.cubase_service import CubaseService
 from core.services.autokey_service import AutoKeyService
 from core.services.tone_cache_service import ToneCacheService
 from core.services.browser_monitor_service import BrowserMonitorService
 from core.services.browser_launcher_service import BrowserLauncherService
-from core.services.license_service import LicenseService
 from core.services.data_transfer_service import DataTransferService
 from core.services.end_modulation_service import EndModulationService
 from core.constants import MIC1_CC, MIC2_CC, MODE_PRESETS, DEFAULT_UI_VALUES
@@ -31,12 +29,10 @@ class AppController:
         self.settings_service = SettingsService()
         self.settings = self.settings_service.load()
 
-        self.cubase_service = CubaseService()
         self.autokey_service = AutoKeyService()
         self.tone_cache_service = ToneCacheService()
         self.browser_launcher_service = BrowserLauncherService()
         self.browser_monitor_service = BrowserMonitorService()
-        self.license_service = LicenseService()
         self.data_transfer_service = DataTransferService()
         self.end_modulation_service = EndModulationService()
 
@@ -105,23 +101,6 @@ class AppController:
         }
 
     # =========================================================
-    # LICENSE DISPLAY
-    # =========================================================
-
-    def get_license_display_text(self) -> str:
-        """Trả về trạng thái hạn dùng để hiển thị trên header app."""
-        try:
-            return self.license_service.get_license_display_text()
-        except Exception:
-            return "Chưa kích hoạt"
-
-    def get_license_status(self) -> dict:
-        try:
-            return self.license_service.get_license_status()
-        except Exception:
-            return {"activated": False, "display": "Chưa kích hoạt"}
-
-    # =========================================================
     # APP LIFECYCLE
     # =========================================================
 
@@ -131,18 +110,10 @@ class AppController:
         # Không tự mở Brave khi khởi động app nữa.
         # Brave sẽ được mở chủ động bằng nút KARAOKE để ổn định hơn trên máy khách.
 
-        if self.settings.get("start_cubase_with_app", False):
-            path = self.settings.get("cubase_project_path", "")
-            if path:
-                try:
-                    self.cubase_service.open_project(path)
-                except Exception:
-                    pass
-
         from core.services import tone_service as _tone_module
         _tone_module.set_ytdlp_cookies_file(self.settings.get("ytdlp_cookies_file", ""))
 
-        return f"MIDI: {opened_name}"
+        return f"Control: {opened_name}"
 
     def shutdown(self):
         self.stop_realtime()
@@ -159,12 +130,6 @@ class AppController:
         except Exception as e:
             print(f"[Shutdown] Lỗi đóng Brave: {e}")
 
-        if self.settings.get("close_cubase_on_exit", False):
-            try:
-                self.cubase_service.close_cubase_gracefully()
-            except Exception:
-                pass
-
     # =========================================================
     # SETTINGS / AUTO KEY
     # =========================================================
@@ -176,7 +141,7 @@ class AppController:
         if not isinstance(payload, dict):
             return
 
-        for key in ["cubase_project_path", "start_cubase_with_app", "close_cubase_on_exit", "ytdlp_cookies_file"]:
+        for key in ["ytdlp_cookies_file"]:
             if key in payload:
                 self.settings[key] = payload[key]
 
@@ -307,12 +272,7 @@ class AppController:
 
     def set_global_pitch(self, semitone: int):
         """
-        Tăng / giảm tone nhạc bằng SoundShifter.
-
-        Track NHẠC chỉ có 1, nên pitch nhạc chỉ cần 1 CC cố định.
-        Không gửi CC 101 nữa để tránh Cubase/MIDI Remote nhận trùng hoặc mapping nhầm.
-        Chuẩn mapping:
-            SoundShifter Semitones -> CC 36
+        Tăng / giảm tone nhạc trong trạng thái điều khiển nội bộ.
         """
 
         semitone = max(-12, min(12, int(semitone)))
@@ -326,7 +286,7 @@ class AppController:
         return {
             "semitone": semitone,
             "cc_value": cc_value,
-            "sent_cc": [36],
+            "control": "internal_pitch",
         }
 
     # =========================================================
@@ -380,12 +340,8 @@ class AppController:
 
     def apply_detected_tone(self, tone_result: dict) -> dict:
         """
-        Áp key/scale sang Auto-Tune cho CẢ MIC 1 và MIC 2.
-
-        Lý do:
-        - Tone bài hát là thông tin chung, không phụ thuộc đang chọn MIC 1 hay MIC 2.
-        - Khi app tự dò xong, phải gửi key/scale đồng thời vào cả 2 bộ mapping.
-        - Các slider/effect khác vẫn đi theo mic đang chọn như cũ.
+        Lưu key/scale đã dò vào trạng thái điều khiển nội bộ cho cả hai mic.
+        Không gửi MIDI hay thao tác một DAW bên ngoài.
         """
 
         key_index = int(tone_result["key_index"])
@@ -584,7 +540,7 @@ class AppController:
         3. Tìm trong tone_cache.json.
         4. Nếu chưa có thì tự detect bằng ToneService V4 Safe.
         5. Lưu cache.
-        6. Apply key/scale sang Cubase/AutoTune.
+        6. Lưu key/scale vào trạng thái điều khiển nội bộ.
         """
 
         video_id = self.extract_video_id(youtube_url)

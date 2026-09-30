@@ -20,6 +20,7 @@ struct PerformanceMember
     PerformanceRole role = PerformanceRole::vocal;
     juce::String displayName;
     int quantity = 0;
+    PerformanceInputSource source = PerformanceInputSource::audioInterface;
 };
 
 enum class PerformancePreset : unsigned char
@@ -81,6 +82,12 @@ public:
         appendNames(setup.keyboardNames, PerformanceRole::keyboard);
         appendNames(setup.drumNames, PerformanceRole::drums);
         appendNames(setup.backingTrackNames, PerformanceRole::beat);
+        setup.vocalSource = sourceFor(PerformanceRole::vocal);
+        setup.guitarSource = sourceFor(PerformanceRole::guitar);
+        setup.bassSource = sourceFor(PerformanceRole::bass);
+        setup.keyboardSource = sourceFor(PerformanceRole::keyboard);
+        setup.drumSource = sourceFor(PerformanceRole::drums);
+        setup.backingTrackSource = sourceFor(PerformanceRole::beat);
         return setup;
     }
 
@@ -88,12 +95,12 @@ private:
     static std::array<PerformanceMember, memberCount> defaultMembers()
     {
         return {{
-            { PerformanceRole::vocal, "Vocal", 1 },
-            { PerformanceRole::guitar, "Guitar", 0 },
-            { PerformanceRole::bass, "Bass", 0 },
-            { PerformanceRole::keyboard, "Keyboard", 0 },
-            { PerformanceRole::drums, "Drums", 0 },
-            { PerformanceRole::beat, "Beat", 0 }
+            { PerformanceRole::vocal, "Vocal", 1, PerformanceInputSource::audioInterface },
+            { PerformanceRole::guitar, "Guitar", 0, PerformanceInputSource::audioInterface },
+            { PerformanceRole::bass, "Bass", 0, PerformanceInputSource::audioInterface },
+            { PerformanceRole::keyboard, "Keyboard", 0, PerformanceInputSource::softwareInstrument },
+            { PerformanceRole::drums, "Drums", 0, PerformanceInputSource::softwareInstrument },
+            { PerformanceRole::beat, "Beat", 0, PerformanceInputSource::audioInterface }
         }};
     }
 
@@ -128,6 +135,14 @@ private:
             if (member.role == role)
                 return member.quantity;
         return 0;
+    }
+
+    PerformanceInputSource sourceFor(PerformanceRole role) const
+    {
+        for (const auto& member : members)
+            if (member.role == role)
+                return member.source;
+        return PerformanceInputSource::audioInterface;
     }
 
     void appendNames(juce::StringArray& destination, PerformanceRole role) const

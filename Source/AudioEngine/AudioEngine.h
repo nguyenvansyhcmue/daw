@@ -58,6 +58,10 @@ public:
     juce::Result optimiseDeviceForLivePerformance();
 
     juce::AudioDeviceManager& getAudioDeviceManager() noexcept;
+    juce::Array<juce::MidiDeviceInfo> getAvailableMidiOutputDevices() const;
+    juce::String getMidiOutputDeviceIdentifier() const;
+    // Control-thread operation. An empty identifier disconnects MIDI output.
+    juce::Result setMidiOutputDevice(const juce::String& identifier);
     float getTrackPeak(size_t trackIndex) const noexcept;
     float getTrackInputPeak(size_t trackIndex) const noexcept;
     float getBusPeak(size_t busIndex) const noexcept;
@@ -69,6 +73,7 @@ public:
     int getLiveProtectedPluginCount() const noexcept;
     LiveKeyDetector::Result getLiveKeyResult() const noexcept;
     int applyDetectedKeyToPitchCorrection();
+    int applyKeyToPitchCorrection(int rootNote, bool minor);
     void setFxProcessor(size_t trackIndex, size_t slot,
                         std::shared_ptr<AudioEffectProcessor> processor);
     void setFxBypassed(size_t trackIndex, size_t slot, bool bypassed) noexcept;
@@ -157,6 +162,7 @@ private:
                                int numSamples) noexcept;
     void prepareTrackMidiBuffers(const TrackDataModel::RenderStructureSnapshot* structure) noexcept;
     void processTrackMidiEffects(const TrackDataModel::RenderStructureSnapshot* structure) noexcept;
+    void sendExternalMidi(const TrackDataModel::RenderStructureSnapshot* structure) noexcept;
     void processTrackAudio(const TrackDataModel::RenderStructureSnapshot* structure,
                            double automationSample, bool anyTrackSoloed, int numSamples) noexcept;
     void processBusReturns(const TrackDataModel::RenderStructureSnapshot* structure, int numSamples) noexcept;
@@ -169,6 +175,10 @@ private:
                        size_t route, float level, int numSamples) noexcept;
 
     juce::AudioDeviceManager deviceManager;
+    std::unique_ptr<juce::MidiOutput> midiOutput;
+    std::atomic<juce::MidiOutput*> publishedMidiOutput { nullptr };
+    std::atomic<unsigned int> midiOutputCallbackUsers { 0 };
+    juce::String midiOutputDeviceIdentifier;
     AudioGraph graph;
     std::atomic<float> masterGain { 1.0f };
     std::atomic<bool> metronomeEnabled { false };
@@ -199,10 +209,7 @@ private:
     MidiEventBuffer scheduledMidiEvents;
     struct IncomingMidiEvent
     {
-        int pitch = 60;
-        float velocity = 0.0f;
-        int channel = 1;
-        bool noteOn = false;
+        MidiRealtimeEvent message;
     };
     static constexpr int incomingMidiCapacity = 256;
     std::array<IncomingMidiEvent, incomingMidiCapacity> incomingMidiEvents {};

@@ -313,6 +313,7 @@ juce::PopupMenu MainWindow::getMenuForIndex(int topLevelMenuIndex, const juce::S
         importMenu.addItem(importAudio, "Audio File...", "Ctrl+I");
         importMenu.addItem(importMidi, "MIDI File...");
         menu.addSubMenu("Import", importMenu);
+        menu.addItem(analyzeYoutubeKaraoke, "Analyze YouTube / Karaoke URL...");
 
         juce::PopupMenu bounceMenu;
         bounceMenu.addItem(bounceProject, "Project Mix...");
@@ -403,6 +404,7 @@ void MainWindow::menuItemSelected(int menuItemID, int)
         case newProjectAlternative: chooseProjectAlternativeToSave(); break;
         case importAudio: chooseAudioToImport(); break;
         case importMidi: chooseMidiToImport(); break;
+        case analyzeYoutubeKaraoke: if (mainComponent != nullptr) mainComponent->requestTuneAiUrlAnalysis(); break;
         case bounceProject: if (mainComponent != nullptr) mainComponent->requestProjectBounce(); break;
         case projectSettings: showProjectSettings(); break;
         case deviceSettings: showDeviceSettings(); break;

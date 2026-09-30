@@ -108,9 +108,29 @@ MainComponent::MainComponent()
     startupWorkflow.onPerformanceConfigured = [this](const LiveSetupConfig& setup)
     {
         audioEngine.setPlaybackState(false);
+        enableAvailablePerformanceInputs();
         const auto result = trackDataModel.applyProjectState(ProjectTemplates::createLiveSetup(setup));
         if (result.failed())
             return;
+
+        // A Performance Room is immediately playable: every configured source
+        // is armed, while audio sources monitor only when armed.
+        const auto* device = audioEngine.getAudioDeviceManager().getCurrentAudioDevice();
+        const auto availableInputs = device != nullptr ? device->getActiveInputChannels().countNumberOfSetBits() : 0;
+        auto nextAudioInput = 0;
+        auto hasExternalMidi = false;
+        for (size_t index = 0; index < trackDataModel.getTrackCount(); ++index)
+        {
+            const auto& track = trackDataModel.getTrack(index);
+            if (track.type == TrackType::audio)
+            {
+                const auto input = availableInputs > 0 ? nextAudioInput++ % availableInputs : 0;
+                trackDataModel.setTrackInputConfiguration(index, true, false,
+                                                          input, 1);
+            }
+            hasExternalMidi = hasExternalMidi || track.type == TrackType::externalMidi;
+            trackDataModel.setTrackArmed(index, true);
+        }
 
         audioEngine.prepareActiveEffects();
         selectTrack(0);
@@ -119,6 +139,10 @@ MainComponent::MainComponent()
         pianoRoll.repaint();
         markProjectSaved();
         showWorkspace();
+        if (hasExternalMidi && audioEngine.getMidiOutputDeviceIdentifier().isEmpty())
+            juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::InfoIcon,
+                                                   "MIDI Hardware needs an output",
+                                                   "Your hardware MIDI tracks are ready. Choose the target device in Device Settings > MIDI OUTPUT.");
     };
     arrangeWindow.onTrackSelected = [this](int track) { selectTrack(track); };
     arrangeWindow.onPerformanceSetupRequested = [this]
@@ -152,6 +176,60 @@ MainComponent::MainComponent()
     });
 }
 
+void MainComponent::requestTuneAiUrlAnalysis()
+{
+    auto* dialog = new juce::AlertWindow("Analyze YouTube / Karaoke",
+                                         "Paste a YouTube or YouTube Music URL. Tune-AI will analyze it only after you confirm.",
+                                         juce::MessageBoxIconType::QuestionIcon);
+    dialog->addTextEditor("url", {}, "YouTube URL:");
+    dialog->addButton("Analyze", 1, juce::KeyPress(juce::KeyPress::returnKey));
+    dialog->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+    const auto safeThis = juce::Component::SafePointer<MainComponent>(this);
+    const auto safeDialog = juce::Component::SafePointer<juce::AlertWindow>(dialog);
+    dialog->enterModalState(true, juce::ModalCallbackFunction::create([safeThis, safeDialog] (int button)
+    {
+        if (button == 1 && safeThis != nullptr && safeDialog != nullptr)
+            safeThis->startTuneAiUrlAnalysis(safeDialog->getTextEditorContents("url"));
+    }), true);
+}
+
+void MainComponent::startTuneAiUrlAnalysis(const juce::String& rawUrl)
+{
+    const auto url = rawUrl.trim();
+    if (! (url.containsIgnoreCase("youtube.com") || url.containsIgnoreCase("youtu.be")))
+    {
+        StudioForgeDialog::showWarning("Tune-AI Analysis", "Enter a valid YouTube or YouTube Music URL.");
+        return;
+    }
+
+    const auto safeThis = juce::Component::SafePointer<MainComponent>(this);
+    juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::InfoIcon,
+                                           "Tune-AI Analysis",
+                                           "Analysis started. Tune-AI is reading the karaoke audio in the background.\n\n"
+                                           "This usually takes 30–120 seconds for a new video. Do not start it again; "
+                                           "StudioForge will show the detected key when it finishes.");
+    tuneAiAnalysis.analyseYouTubeUrlAsync(url, [safeThis] (TuneAiAnalysisService::Result result)
+    {
+        if (safeThis == nullptr) return;
+        if (! result.succeeded)
+        {
+            StudioForgeDialog::showWarning("Tune-AI Analysis Failed", result.error);
+            return;
+        }
+
+        const auto applied = safeThis->audioEngine.applyKeyToPitchCorrection(result.rootNote, result.minor);
+        static constexpr const char* noteNames[] { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+        const auto key = juce::String(noteNames[result.rootNote]) + (result.minor ? " minor" : " major");
+        auto message = (result.fromCache ? "Cached result: " : "Analysis complete: ") + key
+            + " (confidence " + juce::String(result.confidence, 2) + ").";
+        if (result.title.isNotEmpty()) message << "\n" << result.title;
+        message << (applied > 0
+                        ? "\nApplied directly to " + juce::String(applied) + " VibeAutotune instance(s)."
+                        : "\nNo VibeAutotune instance is inserted, so no plug-in parameter was changed.");
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::InfoIcon, "Tune-AI Analysis", message);
+    });
+}
+
 void MainComponent::showInitialTrackCreation()
 {
     configureTrackCreationDialog();
@@ -165,6 +243,26 @@ void MainComponent::configureTrackCreationDialog()
     const auto inputs = device != nullptr ? device->getActiveInputChannels().countNumberOfSetBits() : 0;
     const auto outputs = device != nullptr ? device->getActiveOutputChannels().countNumberOfSetBits() : 0;
     startupWorkflow.setAudioDeviceChannels(inputs, outputs);
+}
+
+void MainComponent::enableAvailablePerformanceInputs()
+{
+    auto& deviceManager = audioEngine.getAudioDeviceManager();
+    auto* device = deviceManager.getCurrentAudioDevice();
+    if (device == nullptr)
+        return;
+
+    const auto inputCount = device->getInputChannelNames().size();
+    if (inputCount <= 0)
+        return;
+
+    auto setup = deviceManager.getAudioDeviceSetup();
+    setup.inputChannels.clear();
+    for (int channel = 0; channel < inputCount; ++channel)
+        setup.inputChannels.setBit(channel);
+    if (deviceManager.setAudioDeviceSetup(setup, true).isEmpty())
+        audioEngine.saveAudioDeviceState();
+    configureTrackCreationDialog();
 }
 
 void MainComponent::selectAudioInputChannel(int oneBasedChannel)

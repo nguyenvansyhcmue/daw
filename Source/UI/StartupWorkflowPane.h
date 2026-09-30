@@ -70,6 +70,8 @@ private:
     std::array<juce::Label, PerformanceRoomModel::memberCount> setupQuantities;
     std::array<juce::TextButton, PerformanceRoomModel::memberCount> setupMinus;
     std::array<juce::TextButton, PerformanceRoomModel::memberCount> setupPlus;
+    std::array<juce::ComboBox, PerformanceRoomModel::memberCount> setupSources;
+    std::array<juce::Label, PerformanceRoomModel::memberCount> setupSourceHints;
     juce::ComboBox audioInputSelector;
     juce::ComboBox audioOutputSelector;
     juce::TextButton configureAudioDevice { "Configure audio device..." };

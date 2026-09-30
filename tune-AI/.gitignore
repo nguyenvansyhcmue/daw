@@ -28,6 +28,7 @@ dist/
 .vscode/
 .idea/
 .claude/worktrees/
+.claude/settings.local.json
 *.swp
 *.swo
 *~

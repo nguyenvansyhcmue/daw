@@ -3,6 +3,34 @@
 #include <algorithm>
 #include <cmath>
 
+bool MidiRealtimeEvent::fromMessage(const juce::MidiMessage& message, MidiRealtimeEvent& destination) noexcept
+{
+    destination.channel = juce::jlimit(1, 16, message.getChannel());
+    if (message.isNoteOn()) { destination = { MidiMessageType::noteOn, destination.channel, message.getNoteNumber(), juce::roundToInt(message.getFloatVelocity() * 127.0f) }; return true; }
+    if (message.isNoteOff()) { destination = { MidiMessageType::noteOff, destination.channel, message.getNoteNumber(), 0 }; return true; }
+    if (message.isController()) { destination = { MidiMessageType::controller, destination.channel, message.getControllerNumber(), message.getControllerValue() }; return true; }
+    if (message.isPitchWheel()) { destination = { MidiMessageType::pitchBend, destination.channel, message.getPitchWheelValue(), 0 }; return true; }
+    if (message.isChannelPressure()) { destination = { MidiMessageType::channelPressure, destination.channel, message.getChannelPressureValue(), 0 }; return true; }
+    if (message.isProgramChange()) { destination = { MidiMessageType::programChange, destination.channel, message.getProgramChangeNumber(), 0 }; return true; }
+    return false;
+}
+
+juce::MidiMessage MidiRealtimeEvent::toMessage() const noexcept
+{
+    const auto safeChannel = juce::jlimit(1, 16, channel);
+    switch (type)
+    {
+        case MidiMessageType::noteOn: return juce::MidiMessage::noteOn(safeChannel, juce::jlimit(0, 127, data1),
+                                                                         static_cast<juce::uint8>(juce::jlimit(0, 127, data2)));
+        case MidiMessageType::noteOff: return juce::MidiMessage::noteOff(safeChannel, juce::jlimit(0, 127, data1));
+        case MidiMessageType::controller: return juce::MidiMessage::controllerEvent(safeChannel, juce::jlimit(0, 127, data1), juce::jlimit(0, 127, data2));
+        case MidiMessageType::pitchBend: return juce::MidiMessage::pitchWheel(safeChannel, juce::jlimit(0, 16383, data1));
+        case MidiMessageType::channelPressure: return juce::MidiMessage::channelPressureChange(safeChannel, juce::jlimit(0, 127, data1));
+        case MidiMessageType::programChange: return juce::MidiMessage::programChange(safeChannel, juce::jlimit(0, 127, data1));
+    }
+    return {};
+}
+
 void MidiScheduler::scheduleBlock(const std::vector<MidiClipState>& clips, double blockStart,
                                   int numSamples, MidiEventBuffer& destination) noexcept
 {

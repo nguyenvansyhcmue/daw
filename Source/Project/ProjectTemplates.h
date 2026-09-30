@@ -11,6 +11,7 @@ enum class ProjectTemplate : uint8_t
 
 enum class LiveSessionMode : uint8_t { audio, midi, audioAndMidi };
 enum class MidiSessionMode : uint8_t { virtualInstruments, backingTrack, instrumentsAndBackingTrack };
+enum class PerformanceInputSource : uint8_t { audioInterface, softwareInstrument, externalMidiHardware };
 
 struct LiveSetupConfig
 {
@@ -28,6 +29,12 @@ struct LiveSetupConfig
     juce::StringArray keyboardNames;
     juce::StringArray drumNames;
     juce::StringArray backingTrackNames;
+    PerformanceInputSource vocalSource = PerformanceInputSource::audioInterface;
+    PerformanceInputSource guitarSource = PerformanceInputSource::audioInterface;
+    PerformanceInputSource bassSource = PerformanceInputSource::audioInterface;
+    PerformanceInputSource keyboardSource = PerformanceInputSource::softwareInstrument;
+    PerformanceInputSource drumSource = PerformanceInputSource::softwareInstrument;
+    PerformanceInputSource backingTrackSource = PerformanceInputSource::audioInterface;
 };
 
 class ProjectTemplates final

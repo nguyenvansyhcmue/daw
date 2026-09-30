@@ -76,6 +76,23 @@ DeviceSettingsPanel::DeviceSettingsPanel(AudioEngine& engine, TrackDataModel& mo
     settingsTabs.addTab("Track Inputs", juce::Colour(0xff2a2d31), &routingPage, false);
     addAndMakeVisible(settingsTabs);
     devicePage.addAndMakeVisible(selector);
+    midiOutputLabel.setColour(juce::Label::textColourId, StudioForgeTheme::primaryText);
+    midiOutputLabel.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
+    midiOutputLabel.setJustificationType(juce::Justification::centredLeft);
+    devicePage.addAndMakeVisible(midiOutputLabel);
+    midiOutputSelector.setTooltip("Sends External MIDI tracks directly to this device");
+    midiOutputSelector.onChange = [this]
+    {
+        const auto selected = midiOutputSelector.getSelectedId();
+        const auto devices = audioEngine.getAvailableMidiOutputDevices();
+        const auto identifier = selected <= 1 ? juce::String()
+            : devices[static_cast<int>(selected - 2)].identifier;
+        if (const auto result = audioEngine.setMidiOutputDevice(identifier); result.failed())
+            juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                                   "MIDI Output", result.getErrorMessage());
+        midiOutputDevicesKey.clear();
+    };
+    devicePage.addAndMakeVisible(midiOutputSelector);
 
     routingHeading.setText("AUDIO TRACK INPUTS", juce::dontSendNotification);
     routingHeading.setColour(juce::Label::textColourId, StudioForgeTheme::accentCyan);
@@ -143,7 +160,11 @@ void DeviceSettingsPanel::resized()
     area.removeFromTop(6);
     settingsTabs.setBounds(area);
 
-    selector.setBounds(devicePage.getLocalBounds().reduced(10));
+    auto deviceArea = devicePage.getLocalBounds().reduced(10);
+    auto midiOutputArea = deviceArea.removeFromTop(30);
+    midiOutputLabel.setBounds(midiOutputArea.removeFromLeft(105));
+    midiOutputSelector.setBounds(midiOutputArea.reduced(0, 2));
+    selector.setBounds(deviceArea);
 
     auto routingArea = routingPage.getLocalBounds().reduced(12);
     routingHeading.setBounds(routingArea.removeFromTop(22));
@@ -183,6 +204,7 @@ void DeviceSettingsPanel::resized()
 void DeviceSettingsPanel::timerCallback()
 {
     localizeAudioDeviceErrors();
+    refreshMidiOutputDevices();
 
     const auto diagnostics = audioEngine.getRealtimeDiagnostics();
     const auto currentSummary = "Active: " + juce::String(juce::roundToInt(diagnostics.sampleRate)) + " Hz, "
@@ -226,6 +248,30 @@ void DeviceSettingsPanel::timerCallback()
         refreshInputRouting();
         resized();
     }
+}
+
+void DeviceSettingsPanel::refreshMidiOutputDevices()
+{
+    const auto devices = audioEngine.getAvailableMidiOutputDevices();
+    juce::String deviceKey;
+    for (const auto& device : devices)
+        deviceKey << device.identifier << ":" << device.name << ";";
+    deviceKey << "|" << audioEngine.getMidiOutputDeviceIdentifier();
+    if (deviceKey == midiOutputDevicesKey)
+        return;
+
+    midiOutputDevicesKey = deviceKey;
+    midiOutputSelector.clear(juce::dontSendNotification);
+    midiOutputSelector.addItem("No external MIDI output", 1);
+    const auto selectedIdentifier = audioEngine.getMidiOutputDeviceIdentifier();
+    auto selectedId = 1;
+    for (int index = 0; index < devices.size(); ++index)
+    {
+        midiOutputSelector.addItem(devices[index].name, index + 2);
+        if (devices[index].identifier == selectedIdentifier)
+            selectedId = index + 2;
+    }
+    midiOutputSelector.setSelectedId(selectedId, juce::dontSendNotification);
 }
 
 void DeviceSettingsPanel::applyLiveOptimizedBuffer()

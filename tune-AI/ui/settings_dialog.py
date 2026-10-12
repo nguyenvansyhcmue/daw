@@ -18,6 +18,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ui.analog_dialog_theme import ANALOG_DIALOG_QSS, apply_analog_message_theme
+from ui.window_chrome import AnalogDialog
 
 
 
@@ -32,37 +34,12 @@ def _thm_silent_message_box(parent, title, text, buttons=None, default_button=No
     msg = QMessageBox(parent)
     msg.setIcon(QMessageBox.Icon.NoIcon)
     msg.setWindowTitle(str(title or ""))
+    msg.setProperty("analogTitle", str(title or ""))
     msg.setText(str(text or ""))
+    msg.setMinimumSize(620, 180)
     msg.setStandardButtons(buttons or QMessageBox.StandardButton.Ok)
 
-    # Ép style riêng cho QMessageBox để không bị ăn theme tối của app chính
-    # dẫn tới chữ đen trên nền đen/khó đọc như popup nhập/xuất dữ liệu.
-    msg.setStyleSheet("""
-        QMessageBox {
-            background-color: #f8fafc;
-            color: #0f172a;
-        }
-        QMessageBox QLabel {
-            color: #0f172a;
-            background: transparent;
-            font-size: 13px;
-            font-weight: 600;
-            min-width: 420px;
-        }
-        QMessageBox QPushButton {
-            background-color: #e8eefc;
-            color: #0f172a;
-            border: 1px solid #94a3b8;
-            border-radius: 8px;
-            padding: 7px 16px;
-            font-size: 13px;
-            font-weight: 800;
-            min-width: 72px;
-        }
-        QMessageBox QPushButton:hover {
-            background-color: #dbeafe;
-        }
-    """)
+    apply_analog_message_theme(msg)
 
     # Việt hóa nút để nhân viên/khách dễ hiểu.
     try:
@@ -123,21 +100,25 @@ QMessageBox.warning = staticmethod(_thm_silent_warning)
 QMessageBox.critical = staticmethod(_thm_silent_critical)
 QMessageBox.question = staticmethod(_thm_silent_question)
 
-class SettingsDialog(QDialog):
+class SettingsDialog(AnalogDialog):
     def __init__(self, controller, parent=None):
         super().__init__(parent)
         self.controller = controller
 
         self.setWindowTitle("Cài đặt")
         self.setModal(True)
-        self.resize(560, 560)
+        # Give the settings rack enough width for captured window metadata and
+        # enough height for every section without forcing the user into a
+        # nested scroll view.
+        self.resize(760, 760)
+        self.setMinimumSize(680, 680)
 
         self.settings = self.controller.get_settings()
         self.autokey_cfg = self.controller.get_autokey_config()
 
         self._build_ui()
         self._load_data()
-        self._apply_light_style()
+        self._apply_analog_style()
 
     # =========================================================
     # UI
@@ -147,7 +128,7 @@ class SettingsDialog(QDialog):
         self.setObjectName("SettingsRoot")
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(12, 12, 12, 12)
+        root.setContentsMargins(12, self.TITLE_HEIGHT + 10, 12, 12)
         root.setSpacing(10)
 
         # =========================
@@ -334,167 +315,35 @@ class SettingsDialog(QDialog):
         root.addLayout(row_btn)
 
     # =========================================================
-    # STYLE
+    # ANALOG RACK-DRAWER STYLE
     # =========================================================
 
-    def _apply_light_style(self):
-        self.setStyleSheet("""
-            /* ROOT */
-            #SettingsRoot {
-                background: #f4f6fb;
-            }
-
-            #SettingsRoot QGroupBox {
-                color: #111827;
-                font-size: 12px;
-                font-weight: 700;
-                border: 1px solid #d7dce5;
-                border-radius: 8px;
-                margin-top: 8px;
-                background: #ffffff;
-                padding-top: 6px;
-            }
-
-            #SettingsRoot QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 4px;
-                background: transparent;
-            }
-
-            #SettingsRoot QLabel {
-                color: #111827;
-                background: transparent;
-                font-size: 12px;
-            }
-
-            #SettingsRoot QLabel#SettingsValueLabel {
-                background: #ffffff;
-                color: #111827;
-                border: 1px solid #cfd7e6;
-                border-radius: 6px;
-                padding: 4px 6px;
-                min-height: 18px;
-            }
-
-            #SettingsRoot QLabel#SettingsHelpLabel {
-                color: #334155;
-                background: transparent;
-                line-height: 1.4;
-            }
-
-            #SettingsRoot QLineEdit#SettingsLineEdit,
-            #SettingsRoot QDoubleSpinBox#SettingsSpinBox {
-                background: #ffffff;
-                color: #111827;
-                border: 1px solid #cfd7e6;
-                border-radius: 6px;
-                padding: 4px 6px;
-                min-height: 18px;
-                font-size: 12px;
-                selection-background-color: #c7ddff;
-                selection-color: #111827;
-            }
-
-            #SettingsRoot QWidget#SettingsWrap {
-                background: transparent;
-            }
-
-            #SettingsRoot QPushButton#SettingsButton {
-                background: #e8eef9;
-                color: #111827;
-                border: 1px solid #c7d2e3;
-                border-radius: 6px;
-                padding: 5px 10px;
-                font-size: 12px;
-                font-weight: 600;
-                min-height: 20px;
-            }
-
-            #SettingsRoot QPushButton#SettingsButton:hover {
-                background: #dbe7ff;
-            }
-
-            #SettingsRoot QPushButton#SettingsButton:pressed {
-                background: #cfe0ff;
-            }
-
-            #SettingsRoot QCheckBox#SettingsCheckBox {
-                color: #111827;
-                background: transparent;
-                font-size: 12px;
-                font-weight: 600;
-                spacing: 6px;
-            }
-
-            #SettingsRoot QCheckBox#SettingsCheckBox::indicator {
-                width: 16px;
-                height: 16px;
-            }
-        """)
+    def _apply_analog_style(self):
+        """Make Settings feel like a pull-out rack drawer of the THM panel."""
+        self.setStyleSheet(ANALOG_DIALOG_QSS)
 
     # =========================================================
-    # POPUP SÁNG
+    # SILENT ANALOG POPUPS
     # =========================================================
 
     def _show_info(self, title: str, text: str):
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Icon.NoIcon)
         msg.setWindowTitle(title)
+        msg.setProperty("analogTitle", title)
         msg.setText(text)
         msg.setStandardButtons(QMessageBox.StandardButton.Ok)
-        msg.setStyleSheet("""
-            QMessageBox {
-                background: #f8fafc;
-            }
-            QMessageBox QLabel {
-                color: #111827;
-                font-size: 13px;
-                min-width: 220px;
-            }
-            QMessageBox QPushButton {
-                background: #e8eef9;
-                color: #111827;
-                border: 1px solid #c7d2e3;
-                border-radius: 6px;
-                padding: 6px 14px;
-                min-width: 70px;
-                font-weight: 600;
-            }
-            QMessageBox QPushButton:hover {
-                background: #dbe7ff;
-            }
-        """)
+        apply_analog_message_theme(msg)
         msg.exec()
 
     def _show_error(self, title: str, text: str):
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Icon.NoIcon)
         msg.setWindowTitle(title)
+        msg.setProperty("analogTitle", title)
         msg.setText(text)
         msg.setStandardButtons(QMessageBox.StandardButton.Ok)
-        msg.setStyleSheet("""
-            QMessageBox {
-                background: #fff7f7;
-            }
-            QMessageBox QLabel {
-                color: #7f1d1d;
-                font-size: 13px;
-                min-width: 240px;
-            }
-            QMessageBox QPushButton {
-                background: #fee2e2;
-                color: #7f1d1d;
-                border: 1px solid #fecaca;
-                border-radius: 6px;
-                padding: 6px 14px;
-                min-width: 70px;
-                font-weight: 700;
-            }
-            QMessageBox QPushButton:hover {
-                background: #fecaca;
-            }
-        """)
+        apply_analog_message_theme(msg)
         msg.exec()
 
     # =========================================================

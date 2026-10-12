@@ -19,14 +19,12 @@ void MidiTransposeProcessor::processBlock(juce::AudioBuffer<float>&)
 void MidiTransposeProcessor::processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer& midi)
 {
     transformedMidi.clear();
-    juce::MidiBuffer::Iterator iterator(midi);
-    juce::MidiMessage message;
-    int samplePosition = 0;
-    while (iterator.getNextEvent(message, samplePosition))
+    for (const auto metadata : midi)
     {
+        auto message = metadata.getMessage();
         if (message.isNoteOnOrOff())
             message.setNoteNumber(juce::jlimit(0, 127, message.getNoteNumber() + semitones));
-        transformedMidi.addEvent(message, samplePosition);
+        transformedMidi.addEvent(message, metadata.samplePosition);
     }
     midi.swapWith(transformedMidi);
 }

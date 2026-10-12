@@ -1,8 +1,11 @@
+import json
+import os
+import tempfile
 import threading
 import time
 
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QEvent, QSize
-from PyQt6.QtGui import QGuiApplication, QIcon, QPixmap, QPainter
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QEvent, QSize, QRect
+from PyQt6.QtGui import QGuiApplication, QIcon
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -16,7 +19,6 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSlider,
-    QStatusBar,
     QVBoxLayout,
     QWidget,
 )
@@ -25,9 +27,18 @@ from core.constants import APP_TITLE, ASSETS_DIR, BASE_DIR
 from ui.song_manager_dialog import SongEditDialog, SongManagerDialog
 from ui.youtube_panel import YouTubeBrowserDialog
 from ui.settings_dialog import SettingsDialog
-from ui.preset_assets import PRESET_CARD_ASSETS
-from ui.premium_widgets import HardwareButton, MicrophoneVisual, PresetCardButton, RotaryKnob, ToneShiftChassis, ToneShiftDisplay, VectorActionButton, WaveformDecoration
-from ui.analog_components import AnalogChassis, HardwarePanel, ReferenceOverlay
+from ui.analog_dialog_theme import ANALOG_DIALOG_QSS, apply_analog_message_theme
+from ui.audio_permissions_dialog import AudioPermissionsDialog
+from ui.premium_widgets import RotaryKnob, ToneShiftDisplay
+from ui.analog_components import AnalogKnobPanel, AutoKeyProgressStrip, AnalogChassis, AnalogPressButton, KnobValueReadout, ModeCardButton, ReactiveAudioWaveform, ReferenceOverlay, ToneDetectionReadout
+from ui.analog_theme import REFERENCE_LAYOUT
+from ui.tone_value_utils import (
+    coerce_tune_value,
+    key_for_pitch_class,
+    parse_mmss,
+    pitch_class_for_key,
+    seconds_to_mmss,
+)
 
 
 class MainWindow(QMainWindow):
@@ -36,8 +47,42 @@ class MainWindow(QMainWindow):
     DEFAULT_WINDOW_SIZE = QSize(1080, 684)
     MINIMUM_WINDOW_SIZE = QSize(900, 570)
 
+    @staticmethod
+    def _publish_studioforge_key(key: str, scale: str, confidence: float, title: str = "") -> None:
+        """Publish the confirmed Auto-Key result to the paired StudioForge host.
+
+        This is a deliberately small, atomic file bridge: it works for the
+        separately packaged Tune-AI app without coupling the UI to a DAW
+        process or requiring a network permission. StudioForge consumes and
+        validates the record before touching any plug-in parameters.
+        """
+        try:
+            target = os.path.join(tempfile.gettempdir(), "studioforge-autokey-result.json")
+            payload = {
+                "schema": 1,
+                "key": str(key or "").strip(),
+                "scale": str(scale or "").strip(),
+                "confidence": float(confidence or 0.0),
+                "title": str(title or "").strip(),
+                "published_at": time.time(),
+            }
+            temporary = target + ".tmp"
+            with open(temporary, "w", encoding="utf-8") as stream:
+                json.dump(payload, stream, ensure_ascii=False)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+        except (OSError, ValueError):
+            # The DAW bridge is optional; never interrupt Auto-Key UI/audio
+            # handling when the host is unavailable or the temp folder is not
+            # writable.
+            pass
+
     realtime_status_signal = pyqtSignal(str)
     realtime_tone_signal = pyqtSignal(object)
+    realtime_level_signal = pyqtSignal(float)
+    audio_snapshot_signal = pyqtSignal(object)
+    audio_capture_state_signal = pyqtSignal(object, str)
 
     external_browser_status_signal = pyqtSignal(str)
     external_browser_tone_signal = pyqtSignal(object)
@@ -105,8 +150,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_TITLE)
         self.resize(self.DEFAULT_WINDOW_SIZE)
         self.setMinimumSize(self.MINIMUM_WINDOW_SIZE)
-        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+        # The hardware chassis owns the full visual surface. Exit is an
+        # in-app control, and only empty header material can drag the window.
+        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
         self._window_drag_offset = None
+        self._studioforge_host_frame = None
 
         self.vang_on = True
         self.mic_on = True
@@ -153,6 +201,8 @@ class MainWindow(QMainWindow):
         self.progress_value = 0
         self.progress_target = 0
         self.progress_finish_pending = False
+        self._pending_control_values = {}
+        self._control_dispatch_timers = {}
 
         # Chế độ thu gọn Mini Bar.
         # Khi bấm nút minimize của cửa sổ chính, app sẽ chuyển sang thanh điều khiển nhỏ.
@@ -179,6 +229,9 @@ class MainWindow(QMainWindow):
 
         self.realtime_status_signal.connect(self._handle_realtime_status_on_ui)
         self.realtime_tone_signal.connect(self._handle_realtime_tone_on_ui)
+        self.realtime_level_signal.connect(self._handle_realtime_level_on_ui)
+        self.audio_snapshot_signal.connect(self._handle_audio_snapshot_on_ui)
+        self.audio_capture_state_signal.connect(self._handle_audio_capture_state_on_ui)
 
         self.external_browser_status_signal.connect(self._handle_external_browser_status)
         self.external_browser_tone_signal.connect(self._handle_external_browser_tone_result)
@@ -197,6 +250,7 @@ class MainWindow(QMainWindow):
         self._load_default_singing_mode_on_startup()
         self._update_transposed_tone_label()
         self._start_external_browser_auto_detect()
+        QTimer.singleShot(350, self._start_live_audio_after_consent)
 
         self.end_modulation_timer = QTimer(self)
         self.end_modulation_timer.setSingleShot(True)
@@ -224,10 +278,13 @@ class MainWindow(QMainWindow):
 
     def _fit_and_center_window(self):
         """Use a consistent 16:9 default while staying inside the active screen."""
-        screen = self.screen() or QGuiApplication.primaryScreen()
-        if screen is None:
-            return
-        available = screen.availableGeometry()
+        if self._studioforge_host_frame is not None:
+            available = QRect(*self._studioforge_host_frame).adjusted(28, 28, -28, -28)
+        else:
+            screen = self.screen() or QGuiApplication.primaryScreen()
+            if screen is None:
+                return
+            available = screen.availableGeometry()
         width = min(self.DEFAULT_WINDOW_SIZE.width(), max(self.MINIMUM_WINDOW_SIZE.width(), available.width() - 32))
         height = min(self.DEFAULT_WINDOW_SIZE.height(), max(self.MINIMUM_WINDOW_SIZE.height(), available.height() - 32))
         # Preserve the asset-pack reference aspect ratio.
@@ -242,12 +299,20 @@ class MainWindow(QMainWindow):
             available.y() + (available.height() - height) // 2,
         )
 
+    def present_over_studioforge(self, host_frame: tuple[int, int, int, int]):
+        """Show the real THM app as a borderless utility surface over the DAW."""
+        self._studioforge_host_frame = host_frame
+        self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
+        self._fit_and_center_window()
+
     def eventFilter(self, watched, event):
-        """Let the frameless header behave like a native title bar."""
-        if watched is getattr(self, "_header_card", None):
+        """Let only the non-interactive chassis header drag the frameless window."""
+        is_drag_surface = watched is getattr(self, "_analog_chassis", None)
+        if is_drag_surface:
             if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-                self._window_drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-                return True
+                if self._is_window_drag_zone(event.position().toPoint()):
+                    self._window_drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                    return True
             if event.type() == QEvent.Type.MouseMove and self._window_drag_offset is not None:
                 if event.buttons() & Qt.MouseButton.LeftButton:
                     self.move(event.globalPosition().toPoint() - self._window_drag_offset)
@@ -257,36 +322,30 @@ class MainWindow(QMainWindow):
                 return True
         return super().eventFilter(watched, event)
 
+    def _is_window_drag_zone(self, position) -> bool:
+        """The top chassis nameplate is decorative; controls begin below it."""
+        chassis = getattr(self, "_analog_chassis", None)
+        if not isinstance(chassis, AnalogChassis):
+            return False
+        reference = chassis.reference_rect()
+        if reference.isNull():
+            return False
+        header_bottom = reference.top() + reference.height() * 0.145
+        return reference.left() <= position.x() <= reference.right() and position.y() <= header_bottom
+
     def _seconds_to_mmss(self, total_seconds: int) -> str:
-        total_seconds = max(0, int(total_seconds))
-        mm = total_seconds // 60
-        ss = total_seconds % 60
-        return f"{mm:02d}:{ss:02d}"
+        return seconds_to_mmss(total_seconds)
 
     def _parse_raise_time_mmss(self, text: str) -> int:
-        text = str(text or "").strip()
-        if not text:
-            return 0
-        parts = text.split(":")
-        if len(parts) != 2:
-            return 0
-        try:
-            mm = int(parts[0])
-            ss = int(parts[1])
-            if mm < 0 or ss < 0:
-                return 0
-            return mm * 60 + ss
-        except Exception:
-            return 0
+        return parse_mmss(text)
 
     def _key_to_pitch_class(self, key: str) -> int:
-        return self.KEY_TO_PITCH_CLASS.get(str(key).strip(), 0)
+        return pitch_class_for_key(key, self.KEY_TO_PITCH_CLASS)
 
     def _pitch_class_to_key(self, pitch_class: int, scale: str) -> str:
-        pitch_class = pitch_class % 12
-        if str(scale) == "Minor":
-            return self.PITCH_CLASS_TO_MINOR[pitch_class]
-        return self.PITCH_CLASS_TO_MAJOR[pitch_class]
+        return key_for_pitch_class(pitch_class, scale,
+                                   self.PITCH_CLASS_TO_MAJOR,
+                                   self.PITCH_CLASS_TO_MINOR)
 
     def _transpose_key(self, key: str, scale: str, semitones: int) -> str:
         pc = self._key_to_pitch_class(key)
@@ -336,8 +395,8 @@ class MainWindow(QMainWindow):
     def _tone_display_text(self, label: str | None = None) -> str:
         """Return one end-user-safe representation for every tone surface."""
         if not getattr(self, "tone_is_resolved", False):
-            return "Đang dò tone"
-        return str(label or self.current_detected_tone.get("label", "") or "Đang dò tone")
+            return "Chờ tín hiệu"
+        return str(label or self.current_detected_tone.get("label", "") or "Chờ tín hiệu")
 
     def _set_pitch_step_value(self, semitone: int, send_midi: bool = True):
         """Đổi mức tăng/giảm tone nhạc trong trạng thái điều khiển nội bộ."""
@@ -497,28 +556,47 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         root = AnalogChassis()
         self.setCentralWidget(root)
+        self._analog_chassis = root
+        root.installEventFilter(self)
         overlay = ReferenceOverlay(root)
         self._reference_overlay = overlay
         overlay.setGeometry(root.rect())
+        overlay.set_reference_rect(root.reference_rect())
         self._build_live_reference_controls(overlay)
+        # The alpha knob frames need an exact opaque panel snapshot beneath
+        # them. Do this after the window enters the backing store.
+        QTimer.singleShot(0, self._refresh_knob_backdrops)
         self.setStatusBar(None)
 
     def _build_live_reference_controls(self, overlay):
-        """Build only live controls over the production reference surface.
+        """Compose the live controls in calibrated reference order."""
+        self._build_tone_reference_controls(overlay)
+        self._build_knob_reference_controls(overlay)
+        self._build_mode_and_footer_controls(overlay)
 
-        The old card builders are intentionally not instantiated.  Controller
-        methods continue to use the same public widget attributes, while the
-        reference image owns all static presentation and geometry.
-        """
-        def live_button(x, y, w, h, callback, text=""):
-            button = QPushButton(text, overlay)
-            button.setStyleSheet("QPushButton { background: transparent; border: 0; }")
-            button.clicked.connect(callback)
-            return overlay.place(button, x, y, w, h)
+    @staticmethod
+    def _place_reference_bounds(overlay, widget, bounds):
+        return overlay.place(widget, bounds.x, bounds.y, bounds.width, bounds.height)
 
-        self.lbl_tone = QLabel("Đang dò tone", overlay)
+    def _create_live_button(self, overlay, x, y, width, height, callback, text=""):
+        button = AnalogPressButton(overlay)
+        button.setText(text)
+        button.clicked.connect(callback)
+        return overlay.place(button, x, y, width, height)
+
+    def _build_tone_reference_controls(self, overlay):
+        """Build dynamic tone/meter controls; chassis artwork owns its shell."""
+
+        # The centre panel is for detected key/chord.  +/- remains exclusively
+        # in the separate Tone Shift panel, where transposition is meaningful.
+        self.lbl_tone = ToneDetectionReadout("Chờ tín hiệu", overlay)
+        self._place_reference_bounds(overlay, self.lbl_tone, REFERENCE_LAYOUT.tone_readout)
+        self.header_waveform = ReactiveAudioWaveform(overlay)
+        self._place_reference_bounds(overlay, self.header_waveform, REFERENCE_LAYOUT.header_waveform)
+        self.autokey_progress_strip = AutoKeyProgressStrip(overlay)
+        self._place_reference_bounds(overlay, self.autokey_progress_strip, REFERENCE_LAYOUT.signal_rail)
         self.lbl_tone_status = QLabel("", overlay)
-        self.lbl_tone.hide(); self.lbl_tone_status.hide()
+        self.lbl_tone_status.hide()
         # Non-visual compatibility handles retained for the existing tone
         # workflow; the production reference owns their visible surface.
         self.btn_detect_tone = QPushButton(overlay)
@@ -526,52 +604,128 @@ class MainWindow(QMainWindow):
         self.lbl_end_mod_info = QLabel("", overlay)
         self.lbl_end_mod_info.hide()
         self.tone_progress = QProgressBar(overlay)
-        self.tone_progress.setRange(0, 100); self.tone_progress.setValue(0)
+        self.tone_progress.setRange(0, 100)
+        self.tone_progress.setValue(0)
         self.tone_progress.hide()
 
-        self.btn_auto_detect = QPushButton(overlay); self.btn_auto_detect.setCheckable(True); self.btn_auto_detect.setChecked(True)
+        self.btn_auto_detect = AnalogPressButton(overlay)
+        self.btn_auto_detect.setCheckable(True)
+        self.btn_auto_detect.setChecked(True)
         self.btn_auto_detect.clicked.connect(self.on_toggle_auto_detect_clicked)
-        self.btn_fix_tone = QPushButton(overlay); self.btn_fix_tone.clicked.connect(self.on_fix_tone_clicked)
-        self.btn_verify_tone = QPushButton(overlay); self.btn_verify_tone.clicked.connect(self.on_confirm_tone_clicked)
-        for button, x in ((self.btn_auto_detect, 520), (self.btn_fix_tone, 611), (self.btn_verify_tone, 702)):
-            button.setStyleSheet("QPushButton { background: transparent; border: 0; }")
-            overlay.place(button, x, 118, 88, 88)
-        self._performance_action_buttons = (self.btn_auto_detect, self.btn_fix_tone, self.btn_verify_tone)
+        self.btn_fix_tone = AnalogPressButton(overlay)
+        self.btn_fix_tone.clicked.connect(self.on_fix_tone_clicked)
+        self.btn_verify_tone = AnalogPressButton(overlay)
+        self.btn_verify_tone.clicked.connect(self.on_confirm_tone_clicked)
+        action_buttons = (self.btn_auto_detect, self.btn_fix_tone, self.btn_verify_tone)
+        for button, x in zip(action_buttons, REFERENCE_LAYOUT.tone_actions):
+            overlay.place(button, x, REFERENCE_LAYOUT.tone_action_y,
+                          REFERENCE_LAYOUT.tone_action_size, REFERENCE_LAYOUT.tone_action_size)
+        self._performance_action_buttons = action_buttons
 
-        self.btn_tone_minus = live_button(835, 158, 48, 58, self.on_tone_minus_clicked)
-        self.btn_tone_plus = live_button(998, 158, 48, 58, self.on_tone_plus_clicked)
+        # The chassis already owns this module's outer frame and screws.  Do
+        # not add another panel over it; only the live hit areas and display
+        # are placed inside its original, calibrated bounds.
+        minus = REFERENCE_LAYOUT.tone_shift_minus
+        plus = REFERENCE_LAYOUT.tone_shift_plus
+        self.btn_tone_minus = self._create_live_button(
+            overlay, minus.x, minus.y, minus.width, minus.height, self.on_tone_minus_clicked,
+        )
+        self.btn_tone_plus = self._create_live_button(
+            overlay, plus.x, plus.y, plus.width, plus.height, self.on_tone_plus_clicked,
+        )
         self.lbl_tone_step_value = ToneShiftDisplay("+0", overlay)
         self.lbl_tone_step_value.step_requested.connect(self._adjust_tone_step_from_display)
         self.lbl_tone_step_value.reset_requested.connect(self._reset_tone_step_from_display)
-        overlay.place(self.lbl_tone_step_value, 887, 151, 110, 72)
-        self.tone_title_label = QLabel("T O N E   S H I F T", overlay); self.tone_title_label.hide()
+        self._place_reference_bounds(overlay, self.lbl_tone_step_value, REFERENCE_LAYOUT.tone_shift_display)
+
+    def _build_knob_reference_controls(self, overlay):
+        """Build static lower panels and their independently live knobs."""
+
+        # These panels intentionally replace (not overlay) the two baked lower
+        # sections of the reference. Every visible knob inside is a live Blender
+        # frame; no static knob remains underneath it.
+        self.effect_knob_panel = AnalogKnobPanel(
+            "HIỆU ỨNG", (("Vang Ngắn", 0, 100), ("Dài", 0, 100), ("Echo", 0, 100)), overlay
+        )
+        self.volume_knob_panel = AnalogKnobPanel(
+            "ÂM LƯỢNG", (("Mic Vol", 0, 100), ("Music Vol", 0, 100), ("Tune", -50, 50)), overlay
+        )
+        self._place_reference_bounds(overlay, self.effect_knob_panel, REFERENCE_LAYOUT.effect_panel)
+        self._place_reference_bounds(overlay, self.volume_knob_panel, REFERENCE_LAYOUT.volume_panel)
 
         knob_specs = (
-            ("lbl_reverb_short", "slider_reverb_short", "on_reverb_short_changed", 74, 425, 50),
-            ("lbl_reverb_long", "slider_reverb_long", "on_reverb_long_changed", 247, 425, 50),
-            ("lbl_echo", "slider_echo", "on_echo_changed", 420, 425, 50),
-            ("lbl_mic_vol", "slider_mic_vol", "on_mic_vol_changed", 616, 425, 0),
-            ("lbl_music_vol", "slider_music_vol", "on_music_vol_changed", 790, 425, 79),
-            ("lbl_tune", "slider_tune", "on_tune_changed", 934, 425, 41),
+            ("lbl_reverb_short", "slider_reverb_short", self.on_reverb_short_changed, 50, 0, 100),
+            ("lbl_reverb_long", "slider_reverb_long", self.on_reverb_long_changed, 50, 0, 100),
+            ("lbl_echo", "slider_echo", self.on_echo_changed, 50, 0, 100),
+            ("lbl_mic_vol", "slider_mic_vol", self.on_mic_vol_changed, 0, 0, 100),
+            ("lbl_music_vol", "slider_music_vol", self.on_music_vol_changed, 79, 0, 100),
+            ("lbl_tune", "slider_tune", self.on_tune_changed, 41, -50, 50),
         )
-        callbacks = {name: getattr(self, name) for _, _, name, *_ in knob_specs}
-        for label_name, slider_name, callback_name, x, y, default in knob_specs:
-            label = QLabel(str(default), overlay); label.hide(); setattr(self, label_name, label)
-            slider = self._slider(callbacks[callback_name], "#B8864B", 0, 100, default)
+        self._knob_value_readouts = {}
+        for (label_name, slider_name, callback, default, minimum, maximum), center_x in zip(
+            knob_specs, REFERENCE_LAYOUT.knob_centers
+        ):
+            label = QLabel(str(default), overlay)
+            label.hide()
+            setattr(self, label_name, label)
+            slider = self._slider(callback, "#B8864B", minimum, maximum, default)
             slider.setProperty("reference_overlay", True)
-            slider.setStyleSheet("background: transparent;")
+            slider.set_frame_directory(BASE_DIR / "assets" / "analog" / "02_KNOBS" / "frames" / "main")
+            # RotaryKnob defaults to a standalone fixed size. The reference
+            # overlay owns its geometry, so release those legacy constraints.
+            slider.setMinimumSize(1, 1)
+            slider.setMaximumSize(16777215, 16777215)
             setattr(self, slider_name, slider)
-            overlay.place(slider, x, y, 112, 112)
+            knob_size = REFERENCE_LAYOUT.knob_size
+            overlay.place(slider, center_x - knob_size // 2, REFERENCE_LAYOUT.knob_y, knob_size, knob_size)
+            readout = KnobValueReadout(default, overlay)
+            readout_width = REFERENCE_LAYOUT.knob_readout_width
+            overlay.place(
+                readout,
+                center_x - readout_width // 2,
+                REFERENCE_LAYOUT.knob_readout_y,
+                readout_width,
+                REFERENCE_LAYOUT.knob_readout_height,
+            )
+            self._knob_value_readouts[slider_name] = readout
 
-        mode_legacy_names = (("btn_mode_lofi", "LOFI"), ("btn_mode_tre", "nhac_tre"),
-                             ("btn_mode_bolero", "bolero"), ("btn_mode_remix", "remix"))
-        for index, (attribute, mode_name) in enumerate(mode_legacy_names):
-            if mode_name == "LOFI":
-                callback = self.on_lofi_clicked
+    def _build_mode_and_footer_controls(self, overlay):
+        """Build mode and footer hit areas over their fixed chassis artwork."""
+
+        mode_button_specs = (
+            ("btn_mode_lofi", "LOFI", REFERENCE_LAYOUT.lofi_tile, None),
+            ("btn_mode_tre", "nhac_tre", REFERENCE_LAYOUT.nhac_tre_tile,
+             ("nhac_tre_background.png", "NHẠC TRẺ", "music", None)),
+            ("btn_mode_bolero", "bolero", REFERENCE_LAYOUT.bolero_tile, None),
+            ("btn_mode_remix", "remix", REFERENCE_LAYOUT.remix_tile,
+             ("remix_background.png", "REMIX", "remix", "remix_icon.png")),
+        )
+        for attribute, mode_name, bounds, asset_spec in mode_button_specs:
+            callback = (
+                self.on_lofi_clicked if mode_name == "LOFI"
+                else lambda checked=False, n=mode_name, a=attribute: self.on_mode_clicked(n, getattr(self, a))
+            )
+            if asset_spec:
+                artwork_directory = ASSETS_DIR / "analog" / "05_MODE_TILES"
+                background_name, label, icon_kind, icon_name = asset_spec
+                button = ModeCardButton(
+                    artwork_directory / background_name,
+                    label,
+                    icon_kind,
+                    artwork_directory / icon_name if icon_name else None,
+                    overlay,
+                )
+                button.clicked.connect(callback)
+                overlay.place(button, bounds.x, bounds.y, bounds.width, bounds.height)
             else:
-                callback = lambda checked=False, n=mode_name, a=attribute: self.on_mode_clicked(n, getattr(self, a))
-            button = live_button((38, 280, 538, 795)[index], 285, 230, 84, callback)
-            button.setCheckable(True); setattr(self, attribute, button)
+                button = self._create_live_button(
+                    overlay, bounds.x, bounds.y, bounds.width, bounds.height, callback,
+                )
+            # The four mode tiles share one physical press-surface profile,
+            # even though Lofi/Bolero artwork is baked into the chassis.
+            button.setProperty("mode_tile", True)
+            button.setCheckable(True)
+            setattr(self, attribute, button)
         self.mode_buttons = [self.btn_mode_lofi, self.btn_mode_tre, self.btn_mode_bolero, self.btn_mode_remix]
         self.current_mode_button = self.btn_mode_tre
 
@@ -580,7 +734,7 @@ class MainWindow(QMainWindow):
                         ("btn_karaoke", 578, self.on_open_karaoke_clicked), ("btn_contact", 697, self.on_contact_clicked),
                         ("btn_settings", 816, self.on_settings_clicked), ("btn_exit", 935, self.close))
         for attribute, x, callback in bottom_specs:
-            button = live_button(x, 598, 108, 70, callback)
+            button = self._create_live_button(overlay, x, 598, 108, 70, callback)
             setattr(self, attribute, button)
         self._footer_action_buttons = tuple(getattr(self, name) for name, *_ in bottom_specs)
 
@@ -602,33 +756,31 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         if hasattr(self, "_reference_overlay") and self.centralWidget() is not None:
             self._reference_overlay.setGeometry(self.centralWidget().rect())
-        # Keep controls balanced between the compact default and the minimum size.
-        # physical control at smaller safe window sizes to prevent overlap.
-        if not hasattr(self, "slider_reverb_short"):
+            chassis = self.centralWidget()
+            if isinstance(chassis, AnalogChassis):
+                self._reference_overlay.set_reference_rect(chassis.reference_rect())
+        self._refresh_knob_backdrops()
+
+    def _refresh_knob_backdrops(self):
+        """Cache static panel pixels under alpha knob artwork after layout."""
+        if not hasattr(self, "effect_knob_panel"):
             return
-        ratio = max(0.0, min(1.0, (self.height() - 620) / 190))
-        # At the hard 1060×620 floor, reserve a real gap for the external
-        # numeric readout rather than letting the miniature knob overlap it.
-        diameter = 56 if self.height() <= 650 else round(68 + 48 * ratio)
-        for knob in (
-            self.slider_reverb_short, self.slider_reverb_long, self.slider_echo,
-            self.slider_mic_vol, self.slider_music_vol, self.slider_tune,
-        ):
-            knob.set_diameter(diameter)
-        # The reference surface uses generous performance tiles at its 1600px
-        # default, but their footprint must contract before the 1200px floor.
-        if hasattr(self, "_performance_action_buttons"):
-            wide = self.width() >= 1320
-            action_size = QSize(132, 92) if wide else QSize(98, 72)
-            for button in self._performance_action_buttons:
-                if button.size() != action_size:
-                    button.setFixedSize(action_size)
-            if hasattr(self, "_mic_block"):
-                self._mic_block.setMinimumWidth(136 if wide else 104)
-        if hasattr(self, "_footer_action_buttons"):
-            footer_width = 132 if self.width() >= 1320 else 92
-            for button in self._footer_action_buttons:
-                button.setMinimumWidth(footer_width)
+        panel_groups = (
+            (self.effect_knob_panel, (
+                "slider_reverb_short", "slider_reverb_long", "slider_echo",
+            )),
+            (self.volume_knob_panel, (
+                "slider_mic_vol", "slider_music_vol", "slider_tune",
+            )),
+        )
+        for panel, slider_names in panel_groups:
+            for slider_name in slider_names:
+                slider = getattr(self, slider_name, None)
+                if slider is None or slider.size().isEmpty():
+                    continue
+                source = slider.geometry().translated(-panel.x(), -panel.y()).intersected(panel.rect())
+                if source.size() == slider.size():
+                    slider.set_background_frame(panel.grab(source))
 
     def _ensure_compact_window(self):
         if self.compact_window is not None:
@@ -654,7 +806,7 @@ class MainWindow(QMainWindow):
         tone_box_layout.setContentsMargins(4, 2, 4, 2)
         tone_box_layout.setSpacing(1)
 
-        self.compact_lbl_tone = QLabel("TONE: Đang dò tone")
+        self.compact_lbl_tone = QLabel("TONE: Chờ tín hiệu")
         self.compact_lbl_tone.setObjectName("CompactToneLabel")
         self.compact_lbl_tone.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.compact_lbl_tone.setFixedHeight(27)
@@ -733,16 +885,16 @@ class MainWindow(QMainWindow):
 
         win.setStyleSheet(self.styleSheet() + """
             QWidget {
-                background-color: #071221;
+                background-color: #0b0c0b;
             }
             QFrame#CompactToneBox {
-                background-color: #0f1f3a;
-                border-radius: 12px;
-                border: 2px solid #67e8f9;
+                background-color: #141310;
+                border-radius: 8px;
+                border: 1px solid #8c765e;
             }
             QLabel#CompactToneLabel {
                 background: transparent;
-                color: #67e8f9;
+                color: #e5ca9e;
                 font-size: 14px;
                 font-weight: 900;
                 border: none;
@@ -751,8 +903,8 @@ class MainWindow(QMainWindow):
             QProgressBar#CompactToneProgress {
                 border: none;
                 border-radius: 4px;
-                background-color: #1f2a44;
-                color: white;
+                background-color: #070807;
+                color: #ead8b8;
                 font-size: 8px;
                 font-weight: 800;
                 text-align: center;
@@ -761,17 +913,17 @@ class MainWindow(QMainWindow):
                 border-radius: 4px;
                 background: qlineargradient(
                     x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #67e8f9,
-                    stop:1 #d946ef
+                    stop:0 #8d5c2c,
+                    stop:1 #deb16f
                 );
             }
             QFrame#CompactMusicBox {
-                background-color: #0b1426;
-                border-radius: 10px;
-                border: 2px solid #22d3ee;
+                background-color: #11110f;
+                border-radius: 8px;
+                border: 1px solid #6f5b43;
             }
             QLabel#CompactSmallLabel {
-                color: white;
+                color: #e8d9c2;
                 font-size: 10px;
                 font-weight: 800;
                 background: transparent;
@@ -893,12 +1045,15 @@ class MainWindow(QMainWindow):
             pass
 
     def _sync_compact_progress(self):
-        """Đồng bộ ống tiến trình chính sang Mini Bar."""
+        """Đồng bộ tiến trình Auto-Key sang mọi bề mặt hiển thị."""
         try:
+            progress = int(self.tone_progress.value())
+            if hasattr(self, "autokey_progress_strip"):
+                self.autokey_progress_strip.set_progress(progress)
             if hasattr(self, "compact_tone_progress"):
                 self.compact_tone_progress.setRange(0, 100)
                 self.compact_tone_progress.setFormat("%p%")
-                self.compact_tone_progress.setValue(int(self.tone_progress.value()))
+                self.compact_tone_progress.setValue(progress)
         except Exception:
             pass
 
@@ -913,71 +1068,15 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    def _icon_path(self, name: str):
-        """Tra ve duong dan icon trong assets/icon/ hoac None neu khong ton tai."""
-        try:
-            p = ASSETS_DIR / "icon" / f"{name}.png"
-            if p.exists():
-                return p
-        except Exception:
-            pass
-        return None
-
-    def _load_icon_white(self, name: str) -> QIcon:
-        """
-        Load PNG icon va to mau toan bo vung khong trong suot thanh trang.
-        Dung QPainter.CompositionMode_SourceIn:
-            - Ve original PNG vao pixmap mask trong suot
-            - Set composition mode SourceIn
-            - Fill rect mau trang -> chi pixel co alpha > 0 cua source duoc to trang
-        Cho ket qua icon trang sach, hop voi nen toi cua app.
-        """
-        try:
-            p = self._icon_path(name)
-            if p is None:
-                return QIcon()
-            src = QPixmap(str(p))
-            if src.isNull():
-                return QIcon()
-
-            masked = QPixmap(src.size())
-            masked.fill(Qt.GlobalColor.transparent)
-
-            painter = QPainter(masked)
-            painter.drawPixmap(0, 0, src)
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-            painter.fillRect(masked.rect(), Qt.GlobalColor.white)
-            painter.end()
-
-            return QIcon(masked)
-        except Exception:
-            return QIcon()
-
     def _slider(self, callback, accent, minimum=0, maximum=100, value=50):
         slider = RotaryKnob(accent, value)
-        if callback.__name__ in {
-            "on_tune_changed",
-            "on_mic_vol_changed",
-            "on_music_vol_changed",
-        }:
+        # A new physical drag starts a fresh realtime transaction. Clear an
+        # earlier 16 ms cooldown so the first changed integer is dispatched
+        # immediately instead of waiting for stale coalescing state.
+        slider.dragStarted.connect(self._flush_all_control_backends)
+        if callback.__name__ in {"on_tune_changed", "on_mic_vol_changed", "on_music_vol_changed"}:
             slider.dragStarted.connect(self._pause_external_polling_for_drag)
             slider.dragFinished.connect(self._resume_external_polling_after_drag)
-            slider.displayValueChanged.connect(
-                lambda value, callback_name=callback.__name__: self._on_rendered_knob_display_changed(
-                    callback_name, value
-                )
-            )
-        if callback.__name__ in {
-            "on_tune_changed",
-            "on_mic_vol_changed",
-            "on_music_vol_changed",
-        }:
-            rendered_asset = BASE_DIR / "assets" / "knobs" / "tune_knob_v1_small.png"
-            if rendered_asset.exists():
-                slider.set_rendered_asset(rendered_asset)
-                rendered_face = BASE_DIR / "assets" / "knobs" / "tune_knob_frames.png"
-                if rendered_face.exists():
-                    slider.set_rendered_face_asset(rendered_face)
         slider.setRange(minimum, maximum)
         slider.setValue(value)
         slider.valueChanged.connect(callback)
@@ -986,7 +1085,59 @@ class MainWindow(QMainWindow):
                 callback_name, committed
             )
         )
+        slider.valueCommitted.connect(
+            lambda _committed, callback_name=callback.__name__: self._flush_control_backend(callback_name)
+        )
         return slider
+
+    _CONTROL_BACKEND_METHODS = {
+        "on_reverb_short_changed": "set_reverb_short",
+        "on_reverb_long_changed": "set_reverb_long",
+        "on_echo_changed": "set_echo",
+        "on_mic_vol_changed": "set_mic_volume",
+        "on_music_vol_changed": "set_music_volume",
+        "on_tune_changed": "set_tune",
+    }
+
+    def _queue_control_backend(self, callback_name: str, value: int):
+        """Deliver the first drag value immediately, then coalesce at 60 Hz.
+
+        Mouse movement never performs drawing or blocking work here.  It only
+        updates a latest-value buffer.  The independent timer drains that
+        buffer, while the first value starts the audible/control response with
+        no mouse-release dependency.
+        """
+        if callback_name not in self._CONTROL_BACKEND_METHODS:
+            return
+        timer = self._control_dispatch_timers.get(callback_name)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setTimerType(Qt.TimerType.PreciseTimer)
+            timer.timeout.connect(lambda name=callback_name: self._flush_control_backend(name))
+            self._control_dispatch_timers[callback_name] = timer
+        if timer.isActive():
+            self._pending_control_values[callback_name] = int(value)
+            return
+
+        # Fast path: effect/MIDI state changes as soon as a rendered integer
+        # crosses a step. The timer only batches later movement.
+        getattr(self.controller, self._CONTROL_BACKEND_METHODS[callback_name])(int(value))
+        timer.start(16)
+
+    def _flush_control_backend(self, callback_name: str):
+        """Immediately deliver the latest queued value, including mouse release."""
+        value = self._pending_control_values.pop(callback_name, None)
+        timer = self._control_dispatch_timers.get(callback_name)
+        if timer is not None:
+            timer.stop()
+        if value is None:
+            return
+        getattr(self.controller, self._CONTROL_BACKEND_METHODS[callback_name])(value)
+
+    def _flush_all_control_backends(self):
+        for callback_name in tuple(self._pending_control_values):
+            self._flush_control_backend(callback_name)
 
     def _pause_external_polling_for_drag(self):
         self._drag_paused_timers = []
@@ -1007,16 +1158,6 @@ class MainWindow(QMainWindow):
         if hasattr(self, "lbl_tune"):
             self.lbl_tune.setText(str(int(value)))
 
-    def _on_rendered_knob_display_changed(self, callback_name: str, value: int):
-        labels = {
-            "on_tune_changed": "lbl_tune",
-            "on_mic_vol_changed": "lbl_mic_vol",
-            "on_music_vol_changed": "lbl_music_vol",
-        }
-        label = getattr(self, labels.get(callback_name, ""), None)
-        if label is not None:
-            label.setText(str(int(value)))
-
     def _remember_slider_value(self, callback_name: str, value: int):
         """Persist knob values only after dragging ends, not on every mouse move."""
         fields = {
@@ -1035,52 +1176,28 @@ class MainWindow(QMainWindow):
         """Popup không phát âm thanh Windows."""
         box = QMessageBox(self)
         box.setWindowTitle(title)
+        box.setProperty("analogTitle", title)
         box.setText(text)
         box.setIcon(QMessageBox.Icon.NoIcon)
         box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        apply_analog_message_theme(box)
         return box.exec()
 
     def _silent_question(self, title: str, text: str, yes_text: str = "LƯU", no_text: str = "BỎ QUA") -> bool:
         """Popup hỏi không âm thanh. Trả True nếu bấm nút yes_text."""
         box = QMessageBox(self)
         box.setWindowTitle(title)
+        box.setProperty("analogTitle", title)
         box.setText(text)
         box.setIcon(QMessageBox.Icon.NoIcon)
         btn_yes = box.addButton(yes_text, QMessageBox.ButtonRole.AcceptRole)
         box.addButton(no_text, QMessageBox.ButtonRole.RejectRole)
+        apply_analog_message_theme(box)
         box.exec()
         return box.clickedButton() == btn_yes
 
-    def _silent_save_edit_skip(self, title: str, text: str) -> str:
-        """Popup không âm thanh có 3 lựa chọn: LƯU / SỬA / BỎ QUA."""
-        box = QMessageBox(self)
-        box.setWindowTitle(title)
-        box.setText(text)
-        box.setIcon(QMessageBox.Icon.NoIcon)
-        btn_save = box.addButton("LƯU", QMessageBox.ButtonRole.AcceptRole)
-        btn_edit = box.addButton("SỬA", QMessageBox.ButtonRole.ActionRole)
-        btn_skip = box.addButton("BỎ QUA", QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked == btn_save:
-            return "save"
-        if clicked == btn_edit:
-            return "edit"
-        return "skip"
-
     def _mmss_to_seconds(self, text: str) -> int:
-        text = str(text or "").strip()
-        if not text:
-            return 0
-        try:
-            parts = text.split(":")
-            if len(parts) == 2:
-                return max(0, int(parts[0]) * 60 + int(parts[1]))
-            if len(parts) == 3:
-                return max(0, int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2]))
-            return max(0, int(float(text)))
-        except Exception:
-            return 0
+        return parse_mmss(text, allow_hours=True)
 
 
     def _tone_result_from_key_scale(self, key: str, scale: str, confidence: float = 1.0) -> dict:
@@ -1124,6 +1241,16 @@ class MainWindow(QMainWindow):
             return None
 
         self.end_modulation_applied_stage = str(stage or "base")
+        # The DAW's Auto-Key link owns the song's base signature. End-section
+        # modulation is an internal playback event and must not unexpectedly
+        # rewrite the singer's global VibeAutotune key while a take is running.
+        if self.end_modulation_applied_stage == "base":
+            self._publish_studioforge_key(
+                tone_result.get("key", key),
+                tone_result.get("scale", scale),
+                tone_result.get("confidence", 0.0),
+                tone_result.get("title", ""),
+            )
         self.current_detected_tone = dict(tone_result)
         self.tone_is_resolved = True
         self.lbl_tone.setText(self._tone_display_text(tone_result.get("label", "")))
@@ -1504,6 +1631,7 @@ class MainWindow(QMainWindow):
         dlg = QDialog(self)
         dlg.setWindowTitle("Sửa thông tin lên tone cuối bài")
         dlg.setModal(True)
+        dlg.setStyleSheet(ANALOG_DIALOG_QSS)
         dlg.resize(420, 260)
 
         root = QVBoxLayout(dlg)
@@ -1585,64 +1713,6 @@ class MainWindow(QMainWindow):
         fixed["debug_reason"] = str(fixed.get("debug_reason", "")) + "|manual_edit_popup"
         return fixed
 
-    # ======================================================================
-    # P0 — END MOD ACTION HANDLERS (nút SỬA MOD CUỐI và HỦY LẦN NÀY)
-    # ======================================================================
-
-    def _apply_compact_tone_layout(self, has_active: bool):
-        """
-        P0 fix UX — Khi có active end_mod, mode card thêm ~50px content
-        (divider + info + 2 nút) → tone card bị compress làm 3 nút detect_row
-        bị clip một phần.
-
-        Cách giải (compact mode):
-            - Shrink 3 nút detect_row: 86×38 → 78×32  (-6px)
-            - Ẩn dòng title "Tăng/Giảm Tone"          (-18px)
-            - Shrink lbl_tone "TONE: F Minor": 34 → 28 (-6px)
-            - Shrink tone_row buttons (-/+): 56×34 → 56×30 (-4px)
-            → Tổng tiết kiệm 34px, vừa khít với +50px của mode card
-              (mode card có sẵn ~14px buffer trong allotment)
-
-        Khi không có active: restore tất cả kích thước gốc.
-        """
-        try:
-            if not hasattr(self, "btn_auto_detect"):
-                return
-
-            # The responsive strip owns its own geometry now.  The former
-            # compact-mode branch forced fixed sizes and broke alignment after
-            # an end-modulation result appeared.
-            if hasattr(self, "tone_title_label"):
-                self.tone_title_label.setVisible(True)
-            return
-
-            if has_active:
-                # Compact mode
-                for btn in (self.btn_auto_detect, self.btn_fix_tone, self.btn_verify_tone):
-                    btn.setFixedSize(78, 32)
-                if hasattr(self, "tone_title_label"):
-                    self.tone_title_label.setVisible(False)
-                if hasattr(self, "lbl_tone"):
-                    self.lbl_tone.setFixedHeight(28)
-                if hasattr(self, "btn_tone_minus"):
-                    self.btn_tone_minus.setFixedSize(56, 30)
-                if hasattr(self, "btn_tone_plus"):
-                    self.btn_tone_plus.setFixedSize(56, 30)
-            else:
-                # Normal mode — restore
-                for btn in (self.btn_auto_detect, self.btn_fix_tone, self.btn_verify_tone):
-                    btn.setFixedSize(86, 38)
-                if hasattr(self, "tone_title_label"):
-                    self.tone_title_label.setVisible(True)
-                if hasattr(self, "lbl_tone"):
-                    self.lbl_tone.setFixedHeight(34)
-                if hasattr(self, "btn_tone_minus"):
-                    self.btn_tone_minus.setFixedSize(56, 34)
-                if hasattr(self, "btn_tone_plus"):
-                    self.btn_tone_plus.setFixedSize(56, 34)
-        except Exception as e:
-            print("Không apply được compact tone layout:", e)
-
     def _update_end_mod_action_section(self):
         """
         Show/hide divider + info + 2 buttons trong mode card dựa vào
@@ -1663,10 +1733,6 @@ class MainWindow(QMainWindow):
             self.end_mod_divider.setVisible(has_active)
             self.lbl_end_mod_info.setVisible(has_active)
             self.end_mod_action_widget.setVisible(has_active)
-
-            # P0 fix UX — compact tone card khi có active để 3 nút detect_row
-            # không bị clip do mode card đẩy lên.
-            self._apply_compact_tone_layout(has_active)
 
             if has_active:
                 semi = int(end_mod.get("semitone_up", 0) or 0)
@@ -2079,109 +2145,6 @@ class MainWindow(QMainWindow):
             print("Lỗi auto-save end mod:", e)
         return
 
-        # ===================================================================
-        # LEGACY popup code (giữ lại nhưng KHÔNG chạy do return ở trên).
-        # Có thể xóa sau khi auto-save chứng minh ổn định.
-        # ===================================================================
-        confidence_pct = int(round(float(result.get("confidence", 0.0) or 0.0) * 100))
-
-        step = int(getattr(self, "tone_step_value", 0) or 0)
-        base_key = str(result.get("base_key", "") or "")
-        base_scale = str(result.get("base_scale", "") or "")
-        new_key = str(result.get("new_key", "") or "")
-        new_scale = str(result.get("new_scale", base_scale) or base_scale)
-
-        if step == 0:
-            transpose_text = "Nhạc hiện tại: không tăng/giảm (+0 semitone)."
-        else:
-            direction = "đang tăng" if step > 0 else "đang hạ"
-            try:
-                base_show = self._transpose_key(base_key, base_scale, step) if base_key and base_scale else ""
-                end_show = self._transpose_key(new_key, new_scale, step) if new_key and new_scale else ""
-                transpose_text = (
-                    f"Nhạc hiện tại: {direction} {step:+d} semitone.\n"
-                    f"Tone đầu đang hát: {base_show} {base_scale}\n"
-                    f"Đoạn cuối theo nhạc hiện tại: {end_show} {new_scale}"
-                )
-            except Exception:
-                transpose_text = f"Nhạc hiện tại: {direction} {step:+d} semitone."
-
-        window_text = ""
-        if result.get("window_start_sec") is not None and result.get("window_end_sec") is not None:
-            ws = int(result.get("window_start_sec", 0) or 0)
-            we = int(result.get("window_end_sec", 0) or 0)
-            window_text = f"Cửa sổ phát hiện: {self._seconds_to_mmss(ws)} - {self._seconds_to_mmss(we)}\n"
-
-        title_prefix = "PHÁT HIỆN LÊN TONE CUỐI BÀI" if has_mod else "NGHI NGỜ CÓ LÊN TONE CUỐI BÀI"
-        note = "" if has_mod else "\nLưu ý: Độ tin cậy chưa cao, anh nghe kiểm tra trước khi lưu.\n"
-
-        algo_ver = str(result.get("algorithm_version", "") or "?")
-
-        msg = (
-            f"{title_prefix}\n\n"
-            f"Tone đầu dùng để phân tích: {result.get('base_label', '')}\n"
-            f"Đoạn cuối đề xuất: {result.get('new_label', '')}\n"
-            f"Lên: +{result.get('semitone_up', '')} semitone\n"
-            f"{window_text}"
-            f"Thời điểm ước tính: {result.get('raise_time_text', '')}\n"
-            f"Nên tự đổi sớm lúc: {result.get('apply_time_text', result.get('raise_time_text', ''))}\n"
-            f"{transpose_text}\n"
-            f"Độ tin cậy: {confidence_pct}%\n"
-            f"Thuật toán: {algo_ver}\n"
-            f"{note}\n"
-            "Bạn có muốn lưu thông tin này cho bài hát không?\n"
-            "Bản này chỉ lưu dữ liệu, chưa tự đổi key/scale ngay lần đầu."
-        )
-
-        # V8: Cho phép SỬA thời gian/key-scale ngay trong popup trước khi lưu.
-        save_result = result
-        while True:
-            action = self._silent_save_edit_skip("Lên tone cuối bài", msg)
-            if action == "skip":
-                return
-            if action == "edit":
-                edited = self._edit_end_modulation_result_dialog(save_result)
-                if edited is None:
-                    return
-                save_result = edited
-                msg = (
-                    f"{title_prefix}\n\n"
-                    f"Tone đầu dùng để phân tích: {save_result.get('base_label', '')}\n"
-                    f"Đoạn cuối đề xuất: {save_result.get('new_label', '')}\n"
-                    f"Lên: +{save_result.get('semitone_up', '')} semitone\n"
-                    f"Thời điểm đã sửa: {save_result.get('raise_time_text', '')}\n"
-                    f"Nên tự đổi sớm lúc: {save_result.get('apply_time_text', '')}\n"
-                    f"{transpose_text}\n"
-                    f"Độ tin cậy: {confidence_pct}%\n"
-                    "\nBạn có muốn lưu thông tin này cho bài hát không?\n"
-                    "Bản này chỉ lưu dữ liệu, chưa tự đổi key/scale ngay lần đầu."
-                )
-                continue
-            break
-
-        try:
-            saved = self.controller.save_end_modulation_for_youtube(
-                youtube_url=str(save_result.get("url", "") or ""),
-                title=str(save_result.get("title", "") or ""),
-                modulation_result=save_result,
-                base_result=save_result.get("base_result", self._build_base_result_for_end_modulation()),
-            )
-            end_mod = saved.get("end_modulation", {}) if isinstance(saved, dict) else {}
-            if isinstance(end_mod, dict) and end_mod:
-                self.active_end_modulation = end_mod
-                self.end_modulation_applied_stage = "base"
-                self._update_end_modulation_status_line()
-            self._silent_message(
-                "Đã lưu",
-                "Đã lưu thông tin lên tone cuối bài.\n\n"
-                f"Tone đầu: {end_mod.get('base_label', save_result.get('base_label', ''))}\n"
-                f"Đoạn cuối: {end_mod.get('end_label', save_result.get('new_label', ''))}\n"
-                f"Thời điểm phát hiện: {end_mod.get('raise_time_text', save_result.get('raise_time_text', ''))}\n"
-                f"Tự đổi sớm lúc: {end_mod.get('apply_time_text', save_result.get('apply_time_text', ''))}"
-            )
-        except Exception as e:
-            self._silent_message("Lỗi lưu", f"Không lưu được thông tin lên tone cuối bài:\n{e}")
-
     # COMMON
     # =========================================================
 
@@ -2214,6 +2177,21 @@ class MainWindow(QMainWindow):
             self.ytdlp_version_signal.emit(info)
 
         threading.Thread(target=_check_version, daemon=True).start()
+
+    def _start_live_audio_after_consent(self):
+        """Request live-audio consent once, then restore it on future runs."""
+        settings = self.controller.get_settings()
+        if not settings.get("audio_onboarding_seen", False):
+            dialog = AudioPermissionsDialog(self)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            settings["audio_onboarding_seen"] = True
+            self.controller.settings_service.settings = settings
+            self.controller.settings_service.save()
+        self.controller.start_audio_visualizer(
+            on_snapshot=lambda snapshot: self.audio_snapshot_signal.emit(snapshot),
+            on_state=lambda state, message: self.audio_capture_state_signal.emit(state, message),
+        )
 
     def _on_ytdlp_version_result(self, info: dict):
         if info.get("is_outdated"):
@@ -2249,8 +2227,7 @@ class MainWindow(QMainWindow):
             self.slider_music_vol.setValue(int(preset.get("music_vol", 50)))
 
             if "tune" in preset:
-                tune_value = max(0, min(100, int(preset.get("tune", 50))))
-                self.slider_tune.setValue(tune_value)
+                self.slider_tune.setValue(self._coerce_tune_value(preset.get("tune", 0)))
 
             self._refresh_mode_button_colors()
 
@@ -2275,6 +2252,21 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
                 self.realtime_running = False
+                self._analog_chassis.reset_input_level()
+                self.header_waveform.reset()
+
+    def start_realtime_input(self, device_index: int, device_mode: str):
+        """Start one capture stream and route its measured RMS to the meter."""
+        self.tone_is_resolved = False
+        self.lbl_tone.setText("Đang dò tone")
+        self.controller.start_realtime(
+            device_index,
+            device_mode,
+            on_stable_tone=self.on_realtime_tone_detected,
+            on_status=self.on_realtime_status,
+            on_audio_level=self.on_realtime_level,
+        )
+        self.realtime_running = True
 
     def _reset_ui_mode_and_values(self):
         self.current_mode_button = None
@@ -2290,7 +2282,7 @@ class MainWindow(QMainWindow):
         self.slider_echo.setValue(defaults["echo"])
         self.slider_mic_vol.setValue(defaults["mic_vol"])
         self.slider_music_vol.setValue(defaults["music_vol"])
-        self.slider_tune.setValue(defaults["tune"])
+        self.slider_tune.setValue(self._coerce_tune_value(defaults["tune"]))
 
         self._refresh_mode_button_colors()
 
@@ -2495,6 +2487,7 @@ class MainWindow(QMainWindow):
         else:
             self.tone_progress.setRange(0, 100)
             self.tone_progress.setValue(0)
+            self._sync_compact_progress()
 
         end_key_raw = self.current_song_playing.get("end_key", "--")
         end_scale = self.current_song_playing.get("end_scale", "--")
@@ -2534,8 +2527,37 @@ class MainWindow(QMainWindow):
     def on_realtime_tone_detected(self, tone_result):
         self.realtime_tone_signal.emit(tone_result)
 
+    def on_realtime_level(self, level: float):
+        """Thread-safe callback supplied to the audio input service."""
+        self.realtime_level_signal.emit(float(level))
+
     def _handle_realtime_status_on_ui(self, text: str):
         pass
+
+    def _handle_realtime_level_on_ui(self, level: float):
+        self._analog_chassis.set_input_level(level)
+        if hasattr(self, "header_waveform"):
+            self.header_waveform.set_level(level)
+
+    def _handle_audio_snapshot_on_ui(self, snapshot):
+        """Render the mixed mic/system-audio snapshot on the Qt thread."""
+        import math
+        rms = max(1e-6, (snapshot.rms_left + snapshot.rms_right) * .5)
+        normalized = max(0.0, min(1.0, (20.0 * math.log10(rms) + 60.0) / 60.0))
+        self._analog_chassis.set_input_level(normalized)
+        if hasattr(self, "header_waveform"):
+            self.header_waveform.set_level(normalized)
+            self.header_waveform.set_waveform(snapshot.waveform)
+
+    def _handle_audio_capture_state_on_ui(self, state, message: str):
+        # Tone readout stays reserved for tone detection. The status is still
+        # available to users and support without covering the performance UI.
+        self._analog_chassis.setToolTip(message)
+        self.setWindowTitle(f"THM Vocal Panel — {message}")
+
+    @staticmethod
+    def _coerce_tune_value(value) -> int:
+        return coerce_tune_value(value)
 
     def _handle_realtime_tone_on_ui(self, tone_result):
         if self.realtime_locked_by_song:
@@ -2584,6 +2606,8 @@ class MainWindow(QMainWindow):
             return
 
         self.autokey_running = True
+        self.tone_is_resolved = False
+        self.lbl_tone.setText("Đang dò tone")
         try:
             self.btn_detect_tone.setEnabled(False)
             self.btn_detect_tone.setText("ĐANG\nDÒ")
@@ -2656,6 +2680,8 @@ class MainWindow(QMainWindow):
             return
 
         self.fix_tone_running = True
+        self.tone_is_resolved = False
+        self.lbl_tone.setText("Đang dò tone")
         try:
             self.btn_fix_tone.setEnabled(False)
             self.btn_fix_tone.setText("ĐANG\nFIX")
@@ -3255,29 +3281,41 @@ class MainWindow(QMainWindow):
 
     def on_reverb_short_changed(self, value: int):
         self.lbl_reverb_short.setText(str(value))
-        self.controller.set_reverb_short(value)
+        self._set_knob_readout_value("slider_reverb_short", value)
+        self._queue_control_backend("on_reverb_short_changed", value)
 
     def on_reverb_long_changed(self, value: int):
         self.lbl_reverb_long.setText(str(value))
-        self.controller.set_reverb_long(value)
+        self._set_knob_readout_value("slider_reverb_long", value)
+        self._queue_control_backend("on_reverb_long_changed", value)
 
     def on_echo_changed(self, value: int):
         self.lbl_echo.setText(str(value))
-        self.controller.set_echo(value)
+        self._set_knob_readout_value("slider_echo", value)
+        self._queue_control_backend("on_echo_changed", value)
 
     def on_mic_vol_changed(self, value: int):
         self.lbl_mic_vol.setText(str(value))
-        self.controller.set_mic_volume(value)
+        self._set_knob_readout_value("slider_mic_vol", value)
+        self._queue_control_backend("on_mic_vol_changed", value)
 
     def on_music_vol_changed(self, value: int):
         self.lbl_music_vol.setText(str(value))
-        self.controller.set_music_volume(value)
+        self._set_knob_readout_value("slider_music_vol", value)
+        self._queue_control_backend("on_music_vol_changed", value)
         self._sync_compact_controls()
 
     def on_tune_changed(self, raw_slider_value: int):
-        value = max(0, min(100, int(raw_slider_value)))
+        value = max(-50, min(50, int(raw_slider_value)))
         self.lbl_tune.setText(str(value))
-        self.controller.set_tune_from_slider_position(value)
+        self._set_knob_readout_value("slider_tune", value)
+        self._queue_control_backend("on_tune_changed", value)
+
+    def _set_knob_readout_value(self, slider_name: str, value: int):
+        """Update only the small value field; the panel itself is static."""
+        readout = getattr(self, "_knob_value_readouts", {}).get(slider_name)
+        if readout is not None:
+            readout.set_value(value)
 
     def on_mode_clicked(self, mode_name: str, btn: QPushButton):
         self.current_mode_button = btn
@@ -3292,7 +3330,8 @@ class MainWindow(QMainWindow):
         self.slider_echo.setValue(preset["echo"])
         self.slider_mic_vol.setValue(preset["mic_vol"])
         self.slider_music_vol.setValue(preset["music_vol"])
-        self.slider_tune.setValue(preset["tune"])
+        self.slider_tune.setValue(self._coerce_tune_value(preset["tune"]))
+        self._flush_all_control_backends()
 
         self._refresh_mode_button_colors()
 

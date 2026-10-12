@@ -34,6 +34,10 @@ class ToneResult:
 
 
 class RealtimeToneService:
+    # Realtime analysis must favor the newest audio. A growing queue makes
+    # detection correct for the past but visibly delayed for the performer.
+    MAX_PENDING_AUDIO_CHUNKS = 16
+
     def __init__(self):
         self.sample_rate = 22050
         self.channels = 1
@@ -42,7 +46,10 @@ class RealtimeToneService:
         self.min_rms = 0.005
 
         self.running = False
-        self.audio_queue: queue.Queue = queue.Queue()
+        self.audio_queue: queue.Queue[np.ndarray] = queue.Queue(
+            maxsize=self.MAX_PENDING_AUDIO_CHUNKS,
+        )
+        self.dropped_audio_chunks = 0
         self.stream = None
         self.worker_thread = None
 
@@ -127,14 +134,17 @@ class RealtimeToneService:
         device_mode: str,
         on_stable_tone: Callable[[ToneResult], None],
         on_status: Optional[Callable[[str], None]] = None,
+        on_audio_level: Optional[Callable[[float], None]] = None,
     ):
         if self.running:
             self.stop()
 
         self.running = True
-        self.audio_queue = queue.Queue()
+        self.audio_queue = queue.Queue(maxsize=self.MAX_PENDING_AUDIO_CHUNKS)
+        self.dropped_audio_chunks = 0
         self.last_results = []
         self.last_emit_time = 0.0
+        self._last_level_emit = 0.0
 
         if on_status:
             on_status("Đang khởi động realtime detect...")
@@ -143,7 +153,16 @@ class RealtimeToneService:
             if status and on_status:
                 on_status(f"Audio status: {status}")
             if self.running:
-                self.audio_queue.put(indata.copy())
+                # RMS is calculated on the capture thread and delivered at a
+                # capped rate. This keeps the GUI meter truthful without
+                # flooding Qt's event queue at the device buffer frequency.
+                now = time.monotonic()
+                if on_audio_level and now - self._last_level_emit >= 1 / 30:
+                    rms = float(np.sqrt(np.mean(np.square(indata), dtype=np.float64)))
+                    level = max(0.0, min(1.0, (20.0 * np.log10(max(rms, 1e-6)) + 60.0) / 60.0))
+                    self._last_level_emit = now
+                    on_audio_level(level)
+                self._enqueue_latest_audio(indata.copy())
 
         try:
             if device_mode == "loopback_output":
@@ -202,6 +221,30 @@ class RealtimeToneService:
         self.stream = None
         self.worker_thread = None
         self.last_results = []
+
+    def _enqueue_latest_audio(self, audio_chunk: np.ndarray) -> None:
+        """Queue only fresh capture data; never let analysis fall behind live input."""
+        try:
+            self.audio_queue.put_nowait(audio_chunk)
+            return
+        except queue.Full:
+            pass
+
+        discarded = 0
+        while True:
+            try:
+                self.audio_queue.get_nowait()
+                discarded += 1
+            except queue.Empty:
+                break
+        self.dropped_audio_chunks += discarded
+
+        try:
+            self.audio_queue.put_nowait(audio_chunk)
+        except queue.Full:
+            # A worker may have raced this callback. Dropping this chunk is
+            # still preferable to blocking PortAudio's real-time thread.
+            self.dropped_audio_chunks += 1
 
     # =========================================================
     # PROCESS LOOP

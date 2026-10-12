@@ -15,7 +15,7 @@ class MainWindow final : public juce::DocumentWindow,
                          private juce::Timer
 {
 public:
-    explicit MainWindow(const juce::String& name);
+    explicit MainWindow(const juce::String& name, bool startAutomatedVibeTrace = false);
     ~MainWindow() override;
 
     void closeButtonPressed() override;

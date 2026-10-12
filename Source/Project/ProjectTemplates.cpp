@@ -21,6 +21,26 @@ ProjectState makeBaseProject()
     return state;
 }
 
+void addVocalControlRoutes(ProjectState& state, const std::vector<size_t>& vocalTrackIndices)
+{
+    const auto add = [&state] (ControlTarget target, size_t trackIndex)
+    {
+        if (trackIndex >= state.tracks.size()) return;
+        ControlRoute route;
+        route.target = target;
+        route.effect = ControlEffect::pitchCorrection;
+        route.track = state.tracks[trackIndex].id;
+        route.fxSlot = 0;
+        route.parameterIdentifier = "root";
+        route.secondaryParameterIdentifier = "scale";
+        state.controlRoutingProfile.routes.push_back(std::move(route));
+    };
+    if (! vocalTrackIndices.empty())
+        add(ControlTarget::mic1, vocalTrackIndices[0]);
+    if (vocalTrackIndices.size() > 1)
+        add(ControlTarget::mic2, vocalTrackIndices[1]);
+}
+
 void addNumberedTracks(ProjectState& state, TrackType type, const juce::String& name,
                        const juce::StringArray& customNames, int count,
                        uint64_t& nextId, int& nextInput, int midiInputChannel = 0)
@@ -69,6 +89,8 @@ ProjectState ProjectTemplates::create(ProjectTemplate projectTemplate)
             break;
     }
 
+    if (projectTemplate == ProjectTemplate::audioRecording)
+        addVocalControlRoutes(state, { 0 });
     return state;
 }
 
@@ -86,8 +108,10 @@ ProjectState ProjectTemplates::createLiveSetup(const LiveSetupConfig& setup)
     {
         return source == PerformanceInputSource::audioInterface ? includesAudio : includesMidi;
     };
+    const auto vocalStart = state.tracks.size();
     if (canUseSource(setup.vocalSource))
         addPerformanceRoleTracks(state, "Vocal", setup.vocalNames, setup.vocalCount, setup.vocalSource, 1, nextId, nextInput);
+    const auto vocalEnd = state.tracks.size();
     if (canUseSource(setup.guitarSource))
         addPerformanceRoleTracks(state, "Guitar", setup.guitarNames, setup.guitarCount, setup.guitarSource, 1, nextId, nextInput);
     if (canUseSource(setup.bassSource))
@@ -102,6 +126,12 @@ ProjectState ProjectTemplates::createLiveSetup(const LiveSetupConfig& setup)
         addPerformanceRoleTracks(state, "Backing Track", setup.backingTrackNames, setup.backingTrackCount,
                                  setup.backingTrackSource, 1, nextId, nextInput);
 
+    std::vector<size_t> vocalTrackIndices;
+    vocalTrackIndices.reserve(vocalEnd - vocalStart);
+    for (auto index = vocalStart; index < vocalEnd; ++index)
+        if (state.tracks[index].type == TrackType::audio)
+            vocalTrackIndices.push_back(index);
+    addVocalControlRoutes(state, vocalTrackIndices);
     return state;
 }
 

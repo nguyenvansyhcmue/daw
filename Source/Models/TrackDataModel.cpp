@@ -52,6 +52,7 @@ int TrackDataModel::RenderStructureSnapshot::getBusIndex(BusId id) const noexcep
 TrackDataModel::TrackDataModel()
 {
     tempoMap.push_back({ 0.0, 120.0 });
+    timeSignatureMap.push_back({ 0.0, 4, 4 });
     audioClipSnapshot = std::make_unique<const std::vector<AudioClipState>>();
     publishedAudioClipSnapshot.store(audioClipSnapshot.get(), std::memory_order_seq_cst);
     midiClipSnapshot = std::make_unique<const std::vector<MidiClipState>>();
@@ -77,6 +78,8 @@ void TrackDataModel::setBpm(double value) noexcept
     if (bpm.load(std::memory_order_relaxed) != clamped)
     {
         bpm.store(clamped, std::memory_order_relaxed);
+        if (tempoMap.empty()) tempoMap.push_back({ 0.0, clamped });
+        else if (tempoMap.front().samplePosition == 0.0) tempoMap.front().bpm = clamped;
         markProjectModified();
     }
 }
@@ -87,10 +90,57 @@ void TrackDataModel::setTimeSignatureNumerator(int value) noexcept
     if (timeSignatureNumerator.load(std::memory_order_relaxed) != clamped)
     {
         timeSignatureNumerator.store(clamped, std::memory_order_relaxed);
+        if (timeSignatureMap.empty()) timeSignatureMap.push_back({ 0.0, clamped, getTimeSignatureDenominator() });
+        else if (timeSignatureMap.front().samplePosition == 0.0) timeSignatureMap.front().numerator = clamped;
         markProjectModified();
     }
 }
 int TrackDataModel::getTimeSignatureNumerator() const noexcept { return timeSignatureNumerator.load(); }
+void TrackDataModel::setTimeSignatureDenominator(int value) noexcept
+{
+    const auto valid = value == 1 || value == 2 || value == 4 || value == 8 || value == 16;
+    const auto denominator = valid ? value : 4;
+    if (timeSignatureDenominator.load(std::memory_order_relaxed) != denominator)
+    {
+        timeSignatureDenominator.store(denominator, std::memory_order_relaxed);
+        if (timeSignatureMap.empty()) timeSignatureMap.push_back({ 0.0, getTimeSignatureNumerator(), denominator });
+        else if (timeSignatureMap.front().samplePosition == 0.0) timeSignatureMap.front().denominator = denominator;
+        markProjectModified();
+    }
+}
+int TrackDataModel::getTimeSignatureDenominator() const noexcept { return timeSignatureDenominator.load(); }
+
+void TrackDataModel::setTimeSignatureAtSample(double samplePosition, int numerator, int denominator)
+{
+    const auto validDenominator = denominator == 1 || denominator == 2 || denominator == 4 || denominator == 8 || denominator == 16;
+    if (! std::isfinite(samplePosition) || samplePosition < 0.0 || numerator < 1 || numerator > 32 || ! validDenominator)
+        return;
+
+    const auto location = getBarBeatInfo(samplePosition);
+    const auto alignedSample = barBeatToSamples(location.bars, 0, 0);
+    const auto iter = std::lower_bound(timeSignatureMap.begin(), timeSignatureMap.end(), alignedSample,
+                                       [] (const TimeSignatureEvent& event, double sample) { return event.samplePosition < sample; });
+    if (iter != timeSignatureMap.end() && iter->samplePosition == alignedSample)
+        *iter = { alignedSample, numerator, denominator };
+    else
+        timeSignatureMap.insert(iter, { alignedSample, numerator, denominator });
+
+    if (alignedSample == 0.0)
+    {
+        timeSignatureNumerator.store(numerator, std::memory_order_relaxed);
+        timeSignatureDenominator.store(denominator, std::memory_order_relaxed);
+    }
+    markProjectModified();
+    sendChangeMessage();
+}
+
+TrackDataModel::TimeSignatureEvent TrackDataModel::getTimeSignatureAtSample(double samplePosition) const noexcept
+{
+    if (timeSignatureMap.empty()) return { 0.0, getTimeSignatureNumerator(), getTimeSignatureDenominator() };
+    auto iter = timeSignatureMap.begin();
+    while (iter + 1 != timeSignatureMap.end() && (iter + 1)->samplePosition <= samplePosition) ++iter;
+    return *iter;
+}
 
 void TrackDataModel::addTempoEvent(double samplePosition, double eventBpm)
 {
@@ -117,11 +167,59 @@ double TrackDataModel::getTempoAtSample(double samplePosition) const noexcept
     return iter->bpm;
 }
 
+double TrackDataModel::quarterNotesAtSample(double samplePosition) const noexcept
+{
+    if (samplePosition <= 0.0 || tempoMap.empty()) return 0.0;
+    double quarters = 0.0;
+    for (size_t index = 0; index < tempoMap.size(); ++index)
+    {
+        const auto& event = tempoMap[index];
+        if (samplePosition <= event.samplePosition) break;
+        const auto next = index + 1 < tempoMap.size() ? tempoMap[index + 1].samplePosition : samplePosition;
+        const auto end = std::min(samplePosition, next);
+        quarters += std::max(0.0, end - event.samplePosition) / getSampleRate() * event.bpm / 60.0;
+        if (samplePosition <= next) break;
+    }
+    return quarters;
+}
+
+double TrackDataModel::sampleAtQuarterNotes(double quarterNotes) const noexcept
+{
+    if (quarterNotes <= 0.0 || tempoMap.empty()) return 0.0;
+    double accumulated = 0.0;
+    for (size_t index = 0; index < tempoMap.size(); ++index)
+    {
+        const auto& event = tempoMap[index];
+        const auto next = index + 1 < tempoMap.size() ? tempoMap[index + 1].samplePosition
+                                                       : std::numeric_limits<double>::infinity();
+        const auto segmentQuarters = std::isfinite(next)
+            ? std::max(0.0, next - event.samplePosition) / getSampleRate() * event.bpm / 60.0
+            : std::numeric_limits<double>::infinity();
+        if (quarterNotes <= accumulated + segmentQuarters)
+            return event.samplePosition + (quarterNotes - accumulated) * 60.0 / event.bpm * getSampleRate();
+        accumulated += segmentQuarters;
+    }
+    return 0.0;
+}
+
 TrackDataModel::BarBeatInfo TrackDataModel::getBarBeatInfo(double samplePosition) const noexcept
 {
-    const auto totalBeats = (samplePosition / getSampleRate()) * getTempoAtSample(samplePosition) / 60.0;
-    const auto bars = static_cast<int>(totalBeats / 4.0);
-    const auto phase = totalBeats - (bars * 4.0);
+    const auto targetQuarterNotes = quarterNotesAtSample(samplePosition);
+    auto event = getTimeSignatureAtSample(0.0);
+    auto eventQuarterNotes = 0.0;
+    auto completedBars = 0;
+    for (size_t index = 1; index < timeSignatureMap.size() && timeSignatureMap[index].samplePosition <= samplePosition; ++index)
+    {
+        const auto nextQuarterNotes = quarterNotesAtSample(timeSignatureMap[index].samplePosition);
+        const auto quarterNotesPerBar = static_cast<double>(event.numerator) * 4.0 / event.denominator;
+        completedBars += static_cast<int>(std::round((nextQuarterNotes - eventQuarterNotes) / quarterNotesPerBar));
+        event = timeSignatureMap[index];
+        eventQuarterNotes = nextQuarterNotes;
+    }
+    const auto signatureBeats = (targetQuarterNotes - eventQuarterNotes) * static_cast<double>(event.denominator) / 4.0;
+    const auto beatsPerBar = std::max(1, event.numerator);
+    const auto bars = completedBars + static_cast<int>(signatureBeats / beatsPerBar);
+    const auto phase = signatureBeats - (static_cast<int>(signatureBeats / beatsPerBar) * beatsPerBar);
     const auto beats = static_cast<int>(phase);
     const auto subBeat = phase - beats;
     const auto pulses = static_cast<int>(subBeat * 960.0);
@@ -130,8 +228,24 @@ TrackDataModel::BarBeatInfo TrackDataModel::getBarBeatInfo(double samplePosition
 
 double TrackDataModel::barBeatToSamples(int bars, int beats, int pulses, double subPulse) const noexcept
 {
-    const auto totalBeats = (bars * 4.0) + static_cast<double>(beats) + (static_cast<double>(pulses) / 960.0) + subPulse;
-    return ((totalBeats * 60.0) / getTempoAtSample(0.0)) * getSampleRate();
+    const auto targetBar = std::max(0, bars);
+    auto event = getTimeSignatureAtSample(0.0);
+    auto eventQuarterNotes = 0.0;
+    auto completedBars = 0;
+    for (size_t index = 1; index < timeSignatureMap.size(); ++index)
+    {
+        const auto nextQuarterNotes = quarterNotesAtSample(timeSignatureMap[index].samplePosition);
+        const auto quartersPerBar = static_cast<double>(event.numerator) * 4.0 / event.denominator;
+        const auto barsInSegment = static_cast<int>(std::round((nextQuarterNotes - eventQuarterNotes) / quartersPerBar));
+        if (targetBar < completedBars + barsInSegment) break;
+        completedBars += barsInSegment;
+        event = timeSignatureMap[index];
+        eventQuarterNotes = nextQuarterNotes;
+    }
+    const auto signatureBeats = (targetBar - completedBars) * static_cast<double>(event.numerator)
+        + static_cast<double>(juce::jlimit(0, event.numerator - 1, beats))
+        + juce::jlimit(0.0, 959.0, static_cast<double>(pulses)) / 960.0 + subPulse;
+    return sampleAtQuarterNotes(eventQuarterNotes + signatureBeats * 4.0 / event.denominator);
 }
 
 double TrackDataModel::sampleToXPosition(double samplePos, double pixelsPerSecond) const noexcept
@@ -141,9 +255,11 @@ double TrackDataModel::sampleToXPosition(double samplePos, double pixelsPerSecon
 
 double TrackDataModel::getSnappedSamplePosition(double rawSamplePos, double snapResolution) const noexcept
 {
-    const auto samplesPerBeat = (getSampleRate() * 60.0) / std::max(1.0, getBpm());
-    // snapResolution is measured in beats: 0.25 means one quarter beat.
-    const auto interval = std::max(1.0, samplesPerBeat * std::max(1.0 / 960.0, snapResolution));
+    const auto samplesPerQuarterNote = (getSampleRate() * 60.0) / std::max(1.0, getBpm());
+    const auto samplesPerSignatureBeat = samplesPerQuarterNote * 4.0 / getTimeSignatureDenominator();
+    // snapResolution is measured in signature beats: 0.25 means a quarter of
+    // the beat shown in the ruler, whether the meter is 4/4 or 6/8.
+    const auto interval = std::max(1.0, samplesPerSignatureBeat * std::max(1.0 / 960.0, snapResolution));
     return std::max(0.0, std::round(rawSamplePos / interval) * interval);
 }
 
@@ -279,7 +395,7 @@ bool TrackDataModel::setBusGain(BusId id, float gain)
 {
     const auto found = std::find_if(busStates.begin(), busStates.end(), [id] (const BusState& bus) { return bus.id == id; });
     if (found == busStates.end()) return false;
-    const auto value = juce::jlimit(0.0f, 2.0f, gain);
+    const auto value = juce::jlimit(0.0f, AudioGainRange::maximumChannelGain, gain);
     if (found->gain == value) return true;
     found->gain = value;
     publishRenderStructureSnapshot();
@@ -387,7 +503,7 @@ void TrackDataModel::setTrackVolume(size_t index, float value)
     if (index >= trackStates.size())
         return;
 
-    const auto constrainedValue = juce::jlimit(0.0f, 2.0f, value);
+    const auto constrainedValue = juce::jlimit(0.0f, AudioGainRange::maximumChannelGain, value);
     auto& track = trackStates[index];
     if (track.volume.load(std::memory_order_relaxed) == constrainedValue)
         return;
@@ -647,6 +763,10 @@ void TrackDataModel::setTrackInputMonitoring(size_t index, bool enabled, int cha
     auto before = captureEditState();
     track.inputMonitoring.store(enabled, std::memory_order_relaxed);
     track.autoInputMonitoring.store(false, std::memory_order_relaxed);
+    if (enabled && track.monitorDestination.load(std::memory_order_relaxed) == MonitorDestination::off)
+        track.monitorDestination.store(MonitorDestination::cue, std::memory_order_relaxed);
+    if (! enabled)
+        track.monitorPermitted.store(false, std::memory_order_relaxed);
     track.inputChannel.store(clampedChannel, std::memory_order_relaxed);
     publishRenderStructureSnapshot();
     commitEdit(std::move(before));
@@ -684,11 +804,87 @@ void TrackDataModel::setTrackInputConfiguration(size_t index, bool monitorWhenAr
     auto before = captureEditState();
     track.inputMonitoring.store(monitorAlways, std::memory_order_relaxed);
     track.autoInputMonitoring.store(monitorWhenArmed, std::memory_order_relaxed);
+    if ((monitorAlways || monitorWhenArmed)
+        && track.monitorDestination.load(std::memory_order_relaxed) == MonitorDestination::off)
+        track.monitorDestination.store(MonitorDestination::cue, std::memory_order_relaxed);
+    if (! monitorAlways && ! monitorWhenArmed)
+        track.monitorPermitted.store(false, std::memory_order_relaxed);
     track.inputChannel.store(clampedChannel, std::memory_order_relaxed);
     track.inputChannelCount.store(clampedChannelCount, std::memory_order_relaxed);
     publishRenderStructureSnapshot();
     commitEdit(std::move(before));
     sendChangeMessage();
+}
+
+void TrackDataModel::setTrackMonitorDestination(size_t index, MonitorDestination destination) noexcept
+{
+    if (index >= trackStates.size()) return;
+    auto& track = trackStates[index];
+    if (track.monitorDestination.load(std::memory_order_relaxed) == destination) return;
+    auto before = captureEditState();
+    track.monitorDestination.store(destination, std::memory_order_relaxed);
+    publishRenderStructureSnapshot();
+    commitEdit(std::move(before));
+    sendChangeMessage();
+}
+
+MonitorDestination TrackDataModel::getTrackMonitorDestination(size_t index) const noexcept
+{
+    return index < trackStates.size() ? trackStates[index].monitorDestination.load(std::memory_order_relaxed)
+                                      : MonitorDestination::off;
+}
+
+void TrackDataModel::setTrackMonitorPermission(size_t index, bool permitted) noexcept
+{
+    if (index >= trackStates.size()) return;
+    auto& track = trackStates[index];
+    if (track.monitorPermitted.exchange(permitted, std::memory_order_relaxed) == permitted) return;
+    publishRenderStructureSnapshot();
+    sendChangeMessage();
+}
+
+void TrackDataModel::clearTrackMonitorPermissions() noexcept
+{
+    auto changed = false;
+    for (auto& track : trackStates)
+        changed = track.monitorPermitted.exchange(false, std::memory_order_relaxed) || changed;
+    if (changed)
+    {
+        publishRenderStructureSnapshot();
+        sendChangeMessage();
+    }
+}
+
+void TrackDataModel::activateConfiguredMonitorRoutes(MonitorDestination destination) noexcept
+{
+    if (destination == MonitorDestination::off)
+    {
+        clearTrackMonitorPermissions();
+        return;
+    }
+
+    auto changed = false;
+    for (auto& track : trackStates)
+    {
+        // A workspace switch must never make an arbitrary audio track live.
+        // It only restores routes the user has explicitly marked In/Auto.
+        const auto configured = track.type == TrackType::audio
+            && (track.inputMonitoring.load(std::memory_order_relaxed)
+                || (track.autoInputMonitoring.load(std::memory_order_relaxed)
+                    && track.armed.load(std::memory_order_relaxed)));
+        if (! configured)
+            continue;
+
+        if (track.monitorDestination.exchange(destination, std::memory_order_relaxed) != destination)
+            changed = true;
+        if (! track.monitorPermitted.exchange(true, std::memory_order_relaxed))
+            changed = true;
+    }
+    if (changed)
+    {
+        publishRenderStructureSnapshot();
+        sendChangeMessage();
+    }
 }
 
 void TrackDataModel::setTrackMidiInputChannel(size_t index, int midiChannel) noexcept
@@ -712,6 +908,29 @@ int TrackDataModel::getTrackMidiInputChannel(size_t index) const noexcept
 {
     return index < trackStates.size()
         ? trackStates[index].midiInputChannel.load(std::memory_order_relaxed) : 0;
+}
+
+void TrackDataModel::setTrackMidiInputDevice(size_t index, const juce::String& identifier)
+{
+    if (index >= trackStates.size())
+        return;
+
+    auto& track = trackStates[index];
+    if (track.midiInputDeviceIdentifier == identifier)
+        return;
+
+    auto before = captureEditState();
+    track.midiInputDeviceIdentifier = identifier;
+    track.midiInputDeviceToken.store(identifier.isEmpty() ? 0u : static_cast<uint32_t>(identifier.hashCode()),
+                                     std::memory_order_relaxed);
+    publishRenderStructureSnapshot();
+    commitEdit(std::move(before));
+    sendChangeMessage();
+}
+
+juce::String TrackDataModel::getTrackMidiInputDevice(size_t index) const
+{
+    return index < trackStates.size() ? trackStates[index].midiInputDeviceIdentifier : juce::String {};
 }
 
 bool TrackDataModel::isTrackInputMonitoring(size_t index) const noexcept
@@ -769,6 +988,119 @@ MidiClipId TrackDataModel::addMidiRecording(TrackId track, double startSample, s
     commitEdit(std::move(before));
     sendChangeMessage();
     return midiClips.back().id;
+}
+
+bool TrackDataModel::moveMidiClip(MidiClipId clipId, TrackId destinationTrack, double startSample)
+{
+    if (getTrackIndex(destinationTrack) < 0)
+        return false;
+
+    for (auto& clip : midiClips)
+    {
+        if (clip.id != clipId)
+            continue;
+
+        auto before = captureEditState();
+        clip.trackId = destinationTrack;
+        clip.startSample = juce::jmax(0.0, startSample);
+        publishMidiClipSnapshot();
+        commitEdit(std::move(before));
+        sendChangeMessage();
+        return true;
+    }
+
+    return false;
+}
+
+MidiClipId TrackDataModel::duplicateMidiClip(MidiClipId clipId, TrackId destinationTrack, double startSample)
+{
+    if (getTrackIndex(destinationTrack) < 0)
+        return {};
+
+    for (const auto& clip : midiClips)
+    {
+        if (clip.id != clipId)
+            continue;
+
+        auto before = captureEditState();
+        auto duplicate = clip;
+        duplicate.id = { nextMidiClipId++ };
+        duplicate.trackId = destinationTrack;
+        duplicate.startSample = juce::jmax(0.0, startSample);
+        for (auto& note : duplicate.notes)
+            note.id = { nextMidiEventId++ };
+
+        midiClips.push_back(std::move(duplicate));
+        publishMidiClipSnapshot();
+        commitEdit(std::move(before));
+        sendChangeMessage();
+        return midiClips.back().id;
+    }
+
+    return {};
+}
+
+bool TrackDataModel::setMidiClipDuration(MidiClipId clipId, double durationSamples)
+{
+    if (! std::isfinite(durationSamples) || durationSamples < 1.0)
+        return false;
+
+    for (auto& clip : midiClips)
+    {
+        if (clip.id != clipId)
+            continue;
+
+        auto before = captureEditState();
+        clip.durationSamples = durationSamples;
+        publishMidiClipSnapshot();
+        commitEdit(std::move(before));
+        sendChangeMessage();
+        return true;
+    }
+
+    return false;
+}
+
+bool TrackDataModel::trimMidiClip(MidiClipId clipId, double startSample, double durationSamples)
+{
+    if (! std::isfinite(startSample) || ! std::isfinite(durationSamples)
+        || startSample < 0.0 || durationSamples < 1.0)
+        return false;
+
+    for (auto& clip : midiClips)
+    {
+        if (clip.id != clipId)
+            continue;
+
+        const auto delta = startSample - clip.startSample;
+        const auto newContentOffset = clip.contentOffsetSamples + delta;
+        if (newContentOffset < 0.0)
+            return false;
+
+        auto before = captureEditState();
+        clip.startSample = startSample;
+        clip.contentOffsetSamples = newContentOffset;
+        clip.durationSamples = durationSamples;
+        publishMidiClipSnapshot();
+        commitEdit(std::move(before));
+        sendChangeMessage();
+        return true;
+    }
+    return false;
+}
+
+bool TrackDataModel::deleteMidiClip(MidiClipId clipId)
+{
+    const auto found = std::find_if(midiClips.begin(), midiClips.end(), [clipId] (const auto& clip) { return clip.id == clipId; });
+    if (found == midiClips.end())
+        return false;
+
+    auto before = captureEditState();
+    midiClips.erase(found);
+    publishMidiClipSnapshot();
+    commitEdit(std::move(before));
+    sendChangeMessage();
+    return true;
 }
 
 juce::Result TrackDataModel::importMidiTracks(const std::vector<ImportedMidiTrack>& tracks, double startSample)
@@ -904,6 +1236,32 @@ ClipId TrackDataModel::addClipToTrack(int trackIndex, const juce::File& file, do
     return clip.id;
 }
 
+ClipId TrackDataModel::addUnloadedClipToTrack(int trackIndex, const juce::File& file, double startSample,
+                                              double durationSamples)
+{
+    if (trackIndex < 0 || durationSamples <= 0.0)
+        return {};
+    ensureTrackCount(static_cast<size_t>(trackIndex + 1));
+    if (static_cast<size_t>(trackIndex) >= trackStates.size())
+        return {};
+
+    auto before = captureEditState();
+    AudioClipState clip;
+    clip.id = { nextClipId++ };
+    clip.sourceFile = file;
+    clip.startSample = std::max(0.0, startSample);
+    clip.durationSamples = durationSamples;
+    clip.trackId = trackStates[static_cast<size_t>(trackIndex)].id;
+    clip.clipName = file.getFileNameWithoutExtension();
+    clip.mediaStatus = AudioMediaStatus::Unloaded;
+    trackStates[static_cast<size_t>(trackIndex)].clips.push_back(clip);
+    publishAudioClipSnapshot();
+    publishRenderStructureSnapshot();
+    commitEdit(std::move(before));
+    sendChangeMessage();
+    return clip.id;
+}
+
 TrackDataModel::RealtimeSnapshotRead TrackDataModel::acquireRealtimeSnapshot() const noexcept { return RealtimeSnapshotRead(*this); }
 
 const TrackDataModel::FxRackSnapshot* TrackDataModel::getFxRackSnapshot(size_t trackIndex) const noexcept
@@ -918,7 +1276,7 @@ void TrackDataModel::setActiveTool(EditTool tool) noexcept { activeTool.store(to
 float TrackDataModel::getHorizontalZoom() const noexcept { return horizontalZoom.load(); }
 void TrackDataModel::setHorizontalZoom(float zoom) noexcept { horizontalZoom.store(std::clamp(zoom, 0.5f, 4096.0f)); sendChangeMessage(); }
 int TrackDataModel::getTrackHeight() const noexcept { return trackHeight.load(); }
-void TrackDataModel::setTrackHeight(int height) noexcept { trackHeight.store(std::clamp(height, 36, 96)); sendChangeMessage(); }
+void TrackDataModel::setTrackHeight(int height) noexcept { trackHeight.store(std::clamp(height, 28, 160)); sendChangeMessage(); }
 bool TrackDataModel::isCycleActive() const noexcept { return cycleActive.load(); }
 double TrackDataModel::getCycleStartSample() const noexcept { return cycleStartSample.load(); }
 double TrackDataModel::getCycleEndSample() const noexcept { return cycleEndSample.load(); }
@@ -958,6 +1316,22 @@ void TrackDataModel::clearPunchRange() noexcept
     sendChangeMessage();
 }
 
+void TrackDataModel::addMarker(double samplePosition, const juce::String& requestedName)
+{
+    if (! std::isfinite(samplePosition) || samplePosition < 0.0)
+        return;
+    auto before = captureEditState();
+    const auto name = requestedName.isNotEmpty() ? requestedName
+                                                  : "Song " + juce::String(markers.size() + 1);
+    markers.push_back({ samplePosition, name });
+    std::stable_sort(markers.begin(), markers.end(), [] (const Marker& left, const Marker& right)
+    {
+        return left.samplePosition < right.samplePosition;
+    });
+    commitEdit(std::move(before));
+    sendChangeMessage();
+}
+
 void TrackDataModel::splitAudioClip(size_t trackIndex, size_t clipIndex, double splitSample)
 {
     if (trackIndex >= trackStates.size() || clipIndex >= trackStates[trackIndex].clips.size()) return;
@@ -983,11 +1357,26 @@ void TrackDataModel::trimAudioClip(size_t trackIndex, size_t clipIndex, double s
     auto before = captureEditState();
     auto& clip = trackStates[trackIndex].clips[clipIndex];
     const auto end = clip.startSample + clip.durationSamples;
-    const auto newStart = std::clamp(startSample, 0.0, end - 1.0);
-    const auto newEnd = std::clamp(newStart + durationSamples, newStart + 1.0, end);
-    clip.sourceOffsetSamples += newStart - clip.startSample;
+    // The left edge may be restored up to the source's original in-point, but
+    // never beyond it: a negative source offset has no audio to reveal.
+    const auto earliestStart = juce::jmax(0.0, clip.startSample - clip.sourceOffsetSamples);
+    const auto newStart = std::clamp(startSample, earliestStart, end - 1.0);
+    const auto newSourceOffset = clip.sourceOffsetSamples + newStart - clip.startSample;
+    auto newEnd = juce::jmax(newStart + 1.0, newStart + durationSamples);
+    // When decoded source media is available, a normal region cannot expose
+    // samples beyond its source end.  Missing/unloaded media retains its
+    // existing non-destructive timeline extent until it can be resolved.
+    if (! clip.loopEnabled && clip.cachedBuffer != nullptr && clip.cachedBuffer->getNumSamples() > 0)
+    {
+        const auto sourceEnd = newStart + juce::jmax(1.0,
+            static_cast<double>(clip.cachedBuffer->getNumSamples()) - newSourceOffset);
+        newEnd = juce::jmin(newEnd, sourceEnd);
+    }
+    clip.sourceOffsetSamples = newSourceOffset;
     clip.startSample = newStart;
     clip.durationSamples = newEnd - newStart;
+    clip.fadeInSamples = juce::jmin(clip.fadeInSamples, clip.durationSamples);
+    clip.fadeOutSamples = juce::jmin(clip.fadeOutSamples, clip.durationSamples);
     publishAudioClipSnapshot();
     publishRenderStructureSnapshot();
     commitEdit(std::move(before));
@@ -1080,6 +1469,77 @@ bool TrackDataModel::deleteAudioClip(ClipId clipId)
     return false;
 }
 
+bool TrackDataModel::deleteAudioRange(double startSample, double endSample, int firstTrack, int lastTrack)
+{
+    if (! std::isfinite(startSample) || ! std::isfinite(endSample) || endSample <= startSample
+        || trackStates.empty())
+        return false;
+
+    firstTrack = juce::jlimit(0, static_cast<int>(trackStates.size()) - 1, firstTrack);
+    lastTrack = juce::jlimit(firstTrack, static_cast<int>(trackStates.size()) - 1, lastTrack);
+    auto before = captureEditState();
+    auto changed = false;
+
+    for (auto trackIndex = firstTrack; trackIndex <= lastTrack; ++trackIndex)
+    {
+        auto& clips = trackStates[static_cast<size_t>(trackIndex)].clips;
+        for (size_t index = 0; index < clips.size();)
+        {
+            auto& clip = clips[index];
+            const auto clipStart = clip.startSample;
+            const auto clipEnd = clip.startSample + clip.durationSamples;
+            if (clipEnd <= startSample || clipStart >= endSample)
+            {
+                ++index;
+                continue;
+            }
+
+            changed = true;
+            if (startSample <= clipStart && endSample >= clipEnd)
+            {
+                clips.erase(clips.begin() + static_cast<std::ptrdiff_t>(index));
+                continue;
+            }
+            if (startSample > clipStart && endSample < clipEnd)
+            {
+                auto right = clip;
+                right.id = { nextClipId++ };
+                right.startSample = endSample;
+                right.sourceOffsetSamples += endSample - clipStart;
+                right.durationSamples = clipEnd - endSample;
+                right.fadeInSamples = 0.0;
+                clip.durationSamples = startSample - clipStart;
+                clip.fadeOutSamples = 0.0;
+                clips.insert(clips.begin() + static_cast<std::ptrdiff_t>(index + 1), std::move(right));
+                index += 2;
+                continue;
+            }
+            if (startSample <= clipStart)
+            {
+                const auto removed = endSample - clipStart;
+                clip.startSample = endSample;
+                clip.sourceOffsetSamples += removed;
+                clip.durationSamples = clipEnd - endSample;
+                clip.fadeInSamples = 0.0;
+            }
+            else
+            {
+                clip.durationSamples = startSample - clipStart;
+                clip.fadeOutSamples = 0.0;
+            }
+            ++index;
+        }
+    }
+
+    if (! changed)
+        return false;
+    publishAudioClipSnapshot();
+    publishRenderStructureSnapshot();
+    commitEdit(std::move(before));
+    sendChangeMessage();
+    return true;
+}
+
 bool TrackDataModel::setClipGain(ClipId clipId, float value)
 {
     for (auto& track : trackStates)
@@ -1111,6 +1571,31 @@ bool TrackDataModel::setClipFades(ClipId clipId, double fadeIn, double fadeOut)
                 auto before = captureEditState();
                 clip.fadeInSamples = in;
                 clip.fadeOutSamples = out;
+                publishAudioClipSnapshot();
+                publishRenderStructureSnapshot();
+                commitEdit(std::move(before));
+                sendChangeMessage();
+                return true;
+            }
+    return false;
+}
+
+bool TrackDataModel::setClipLoopEnabled(ClipId clipId, bool enabled)
+{
+    for (auto& track : trackStates)
+        for (auto& clip : track.clips)
+            if (clip.id == clipId)
+            {
+                if (clip.loopEnabled == enabled)
+                    return true;
+                auto before = captureEditState();
+                clip.loopEnabled = enabled;
+                // A DAW loop repeats the currently visible region, not the
+                // remainder of its source file. This matters after trimming:
+                // a two-bar edit must repeat as two bars, even if its source
+                // file is five minutes long.
+                if (enabled)
+                    clip.loopLengthSamples = juce::jmax(1.0, clip.durationSamples);
                 publishAudioClipSnapshot();
                 publishRenderStructureSnapshot();
                 commitEdit(std::move(before));
@@ -1226,8 +1711,11 @@ TrackDataModel::EditState TrackDataModel::captureEditState() const
     state.buses = busStates;
     state.midiClips = midiClips;
     state.tempo = tempoMap;
+    state.timeSignatures = timeSignatureMap;
+    state.markers = markers;
     state.bpm = bpm.load(std::memory_order_relaxed);
     state.timeSignatureNumerator = timeSignatureNumerator.load(std::memory_order_relaxed);
+    state.timeSignatureDenominator = timeSignatureDenominator.load(std::memory_order_relaxed);
     state.cycleActive = cycleActive.load(std::memory_order_relaxed);
     state.cycleStartSample = cycleStartSample.load(std::memory_order_relaxed);
     state.cycleEndSample = cycleEndSample.load(std::memory_order_relaxed);
@@ -1254,8 +1742,11 @@ void TrackDataModel::restoreEditState(EditState state)
     busStates = std::move(state.buses);
     midiClips = std::move(state.midiClips);
     tempoMap = std::move(state.tempo);
+    timeSignatureMap = std::move(state.timeSignatures);
+    markers = std::move(state.markers);
     bpm.store(state.bpm, std::memory_order_relaxed);
     timeSignatureNumerator.store(state.timeSignatureNumerator, std::memory_order_relaxed);
+    timeSignatureDenominator.store(state.timeSignatureDenominator, std::memory_order_relaxed);
     cycleActive.store(state.cycleActive, std::memory_order_relaxed);
     cycleStartSample.store(state.cycleStartSample, std::memory_order_relaxed);
     cycleEndSample.store(state.cycleEndSample, std::memory_order_relaxed);
@@ -1303,8 +1794,11 @@ void TrackDataModel::clearUndoHistory()
 ProjectState TrackDataModel::createProjectState() const
 {
     ProjectState state;
+    state.controlRoutingProfile = controlRoutingProfile;
+    state.liveKeyReferenceTrack = liveKeyReferenceTrack;
     state.bpm = getBpm();
     state.timeSignatureNumerator = getTimeSignatureNumerator();
+    state.timeSignatureDenominator = getTimeSignatureDenominator();
     state.cycleActive = isCycleActive();
     state.cycleStartSample = getCycleStartSample();
     state.cycleEndSample = getCycleEndSample();
@@ -1313,6 +1807,10 @@ ProjectState TrackDataModel::createProjectState() const
     state.punchOutSample = getPunchOutSample();
     state.tempoMap.reserve(tempoMap.size());
     for (const auto& event : tempoMap) state.tempoMap.push_back({ event.samplePosition, event.bpm });
+    state.timeSignatureMap.reserve(timeSignatureMap.size());
+    for (const auto& event : timeSignatureMap)
+        state.timeSignatureMap.push_back({ event.samplePosition, event.numerator, event.denominator });
+    for (const auto& marker : markers) state.markers.push_back({ marker.samplePosition, marker.name });
     state.buses.reserve(busStates.size());
     for (size_t busIndex = 0; busIndex < busStates.size(); ++busIndex)
     {
@@ -1343,9 +1841,11 @@ ProjectState TrackDataModel::createProjectState() const
         savedTrack.soloSafe = track.soloSafe.load(std::memory_order_relaxed);
         savedTrack.inputMonitoring = track.inputMonitoring.load(std::memory_order_relaxed);
         savedTrack.autoInputMonitoring = track.autoInputMonitoring.load(std::memory_order_relaxed);
+        savedTrack.monitorDestination = track.monitorDestination.load(std::memory_order_relaxed);
         savedTrack.inputChannel = track.inputChannel.load(std::memory_order_relaxed);
         savedTrack.inputChannelCount = track.inputChannelCount.load(std::memory_order_relaxed);
         savedTrack.midiInputChannel = track.midiInputChannel.load(std::memory_order_relaxed);
+        savedTrack.midiInputDeviceIdentifier = track.midiInputDeviceIdentifier;
         savedTrack.outputBus = track.outputBus;
         savedTrack.activeSendCount = track.activeSendCount;
         for (size_t i = 0; i < maxSendsPerTrack; ++i)
@@ -1388,7 +1888,7 @@ ProjectState TrackDataModel::createProjectState() const
         for (const auto& clip : track.clips)
             savedTrack.clips.push_back({ clip.id, clip.trackId, clip.sourceFile.getFullPathName(), clip.clipName,
                                          clip.startSample, clip.durationSamples, clip.sourceOffsetSamples,
-                                         clip.gain, clip.fadeInSamples, clip.fadeOutSamples });
+                                         clip.loopEnabled, clip.loopLengthSamples, clip.gain, clip.fadeInSamples, clip.fadeOutSamples });
         state.tracks.push_back(std::move(savedTrack));
     }
     state.midiClips.reserve(midiClips.size());
@@ -1398,6 +1898,8 @@ ProjectState TrackDataModel::createProjectState() const
         savedClip.id = clip.id;
         savedClip.trackId = clip.trackId;
         savedClip.startSample = clip.startSample;
+        savedClip.contentOffsetSamples = clip.contentOffsetSamples;
+        savedClip.durationSamples = clip.durationSamples;
         savedClip.notes.reserve(clip.notes.size());
         for (const auto& note : clip.notes)
             savedClip.notes.push_back({ note.id, note.pitch, note.velocity, note.startSample,
@@ -1409,13 +1911,22 @@ ProjectState TrackDataModel::createProjectState() const
 
 juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
 {
+    if (const auto profileResult = state.controlRoutingProfile.validate(); profileResult.failed())
+        return juce::Result::fail("Project control routing is invalid: " + profileResult.getErrorMessage());
     if (state.tracks.size() > maxTracks)
         return juce::Result::fail("Project exceeds the current " + juce::String(maxTracks) + "-track engine limit");
     if (! std::isfinite(state.bpm) || state.bpm < 40.0 || state.bpm > 220.0)
         return juce::Result::fail("Project BPM is invalid");
     if (state.timeSignatureNumerator < 1 || state.timeSignatureNumerator > 32)
         return juce::Result::fail("Project time signature is invalid");
+    if (state.timeSignatureDenominator != 1 && state.timeSignatureDenominator != 2
+        && state.timeSignatureDenominator != 4 && state.timeSignatureDenominator != 8
+        && state.timeSignatureDenominator != 16)
+        return juce::Result::fail("Project time signature denominator is invalid");
     if (state.tempoMap.empty()) return juce::Result::fail("Project tempo map is empty");
+    for (const auto& marker : state.markers)
+        if (! std::isfinite(marker.samplePosition) || marker.samplePosition < 0.0 || marker.name.isEmpty())
+            return juce::Result::fail("Project marker state is invalid");
     if (! std::isfinite(state.cycleStartSample) || ! std::isfinite(state.cycleEndSample)
         || state.cycleStartSample < 0.0 || state.cycleEndSample < state.cycleStartSample
         || (state.cycleActive && state.cycleEndSample <= state.cycleStartSample))
@@ -1442,7 +1953,7 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
     for (const auto& bus : state.buses)
     {
         if (! bus.id.isValid() || std::find(busIds.begin(), busIds.end(), bus.id) != busIds.end()
-            || ! std::isfinite(bus.gain) || bus.gain < 0.0f || bus.gain > 2.0f)
+            || ! std::isfinite(bus.gain) || bus.gain < 0.0f || bus.gain > AudioGainRange::maximumChannelGain)
             return juce::Result::fail("Project bus state is invalid");
         busIds.push_back(bus.id);
         largestBusId = std::max(largestBusId, bus.id.value);
@@ -1452,7 +1963,7 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
         if (! track.id.isValid() || std::find(trackIds.begin(), trackIds.end(), track.id) != trackIds.end()
             || (track.type != TrackType::audio && track.type != TrackType::instrument && track.type != TrackType::externalMidi))
             return juce::Result::fail("Project has duplicate or invalid track IDs");
-        if (! std::isfinite(track.volume) || track.volume < 0.0f || track.volume > 2.0f
+        if (! std::isfinite(track.volume) || track.volume < 0.0f || track.volume > AudioGainRange::maximumChannelGain
             || ! std::isfinite(track.pan) || track.pan < -1.0f || track.pan > 1.0f)
             return juce::Result::fail("Project mixer values are invalid");
         if (track.inputChannel < 0 || track.inputChannel > 255
@@ -1514,9 +2025,9 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
                 || std::find(clipIds.begin(), clipIds.end(), clip.id) != clipIds.end())
                 return juce::Result::fail("Project has invalid clip IDs or relationships");
             if (! std::isfinite(clip.startSample) || ! std::isfinite(clip.durationSamples)
-                || ! std::isfinite(clip.sourceOffsetSamples) || ! std::isfinite(clip.gain)
+                || ! std::isfinite(clip.sourceOffsetSamples) || ! std::isfinite(clip.loopLengthSamples) || ! std::isfinite(clip.gain)
                 || ! std::isfinite(clip.fadeInSamples) || ! std::isfinite(clip.fadeOutSamples) || clip.startSample < 0.0
-                || clip.durationSamples <= 0.0 || clip.sourceOffsetSamples < 0.0
+                || clip.durationSamples <= 0.0 || clip.sourceOffsetSamples < 0.0 || clip.loopLengthSamples < 0.0
                 || clip.gain < 0.0f || clip.gain > 4.0f || clip.fadeInSamples < 0.0
                 || clip.fadeOutSamples < 0.0 || clip.fadeInSamples > clip.durationSamples
                 || clip.fadeOutSamples > clip.durationSamples)
@@ -1554,6 +2065,17 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
             return juce::Result::fail("Project tempo map is invalid");
         previousTempoPosition = event.samplePosition;
     }
+    double previousSignaturePosition = -1.0;
+    for (const auto& event : state.timeSignatureMap)
+    {
+        const auto validDenominator = event.denominator == 1 || event.denominator == 2 || event.denominator == 4
+            || event.denominator == 8 || event.denominator == 16;
+        if (! std::isfinite(event.samplePosition) || event.samplePosition < 0.0
+            || event.samplePosition < previousSignaturePosition || event.numerator < 1 || event.numerator > 32
+            || ! validDenominator)
+            return juce::Result::fail("Project time signature map is invalid");
+        previousSignaturePosition = event.samplePosition;
+    }
     if (largestTrackId == std::numeric_limits<uint64_t>::max() || largestBusId == std::numeric_limits<uint64_t>::max()
         || largestClipId == std::numeric_limits<uint64_t>::max()
         || largestMidiClipId == std::numeric_limits<uint64_t>::max() || largestMidiEventId == std::numeric_limits<uint64_t>::max())
@@ -1576,9 +2098,14 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
         restored.soloSafe.store(track.soloSafe, std::memory_order_relaxed);
         restored.inputMonitoring.store(track.inputMonitoring, std::memory_order_relaxed);
         restored.autoInputMonitoring.store(track.autoInputMonitoring, std::memory_order_relaxed);
+        restored.monitorDestination.store(track.monitorDestination, std::memory_order_relaxed);
+        restored.monitorPermitted.store(false, std::memory_order_relaxed);
         restored.inputChannel.store(track.inputChannel, std::memory_order_relaxed);
         restored.inputChannelCount.store(track.inputChannelCount, std::memory_order_relaxed);
         restored.midiInputChannel.store(track.midiInputChannel, std::memory_order_relaxed);
+        restored.midiInputDeviceIdentifier = track.midiInputDeviceIdentifier;
+        restored.midiInputDeviceToken.store(track.midiInputDeviceIdentifier.isEmpty() ? 0u
+            : static_cast<uint32_t>(track.midiInputDeviceIdentifier.hashCode()), std::memory_order_relaxed);
         restored.outputBus = track.outputBus;
         restored.activeSendCount = track.activeSendCount;
         for (size_t i = 0; i < maxSendsPerTrack; ++i)
@@ -1607,6 +2134,8 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
             restoredClip.startSample = clip.startSample;
             restoredClip.durationSamples = clip.durationSamples;
             restoredClip.sourceOffsetSamples = clip.sourceOffsetSamples;
+            restoredClip.loopEnabled = clip.loopEnabled;
+            restoredClip.loopLengthSamples = clip.loopLengthSamples;
             restoredClip.gain = clip.gain;
             restoredClip.fadeInSamples = clip.fadeInSamples;
             restoredClip.fadeOutSamples = clip.fadeOutSamples;
@@ -1622,6 +2151,8 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
         restoredClip.id = clip.id;
         restoredClip.trackId = clip.trackId;
         restoredClip.startSample = clip.startSample;
+        restoredClip.contentOffsetSamples = clip.contentOffsetSamples;
+        restoredClip.durationSamples = clip.durationSamples;
         restoredClip.notes.reserve(clip.notes.size());
         for (const auto& note : clip.notes)
             restoredClip.notes.push_back({ note.id, note.pitch, note.velocity, note.startSample,
@@ -1638,11 +2169,24 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
     trackStates = std::move(restoredTracks);
     midiClips = std::move(restoredMidiClips);
     busStates = std::move(restoredBuses);
+    controlRoutingProfile = state.controlRoutingProfile;
+    liveKeyReferenceTrack = state.liveKeyReferenceTrack;
     tempoMap.clear();
     tempoMap.reserve(state.tempoMap.size());
     for (const auto& event : state.tempoMap) tempoMap.push_back({ event.samplePosition, event.bpm });
+    timeSignatureMap.clear();
+    timeSignatureMap.reserve(std::max<size_t>(1, state.timeSignatureMap.size()));
+    if (state.timeSignatureMap.empty())
+        timeSignatureMap.push_back({ 0.0, state.timeSignatureNumerator, state.timeSignatureDenominator });
+    else
+        for (const auto& event : state.timeSignatureMap)
+            timeSignatureMap.push_back({ event.samplePosition, event.numerator, event.denominator });
+    markers.clear();
+    markers.reserve(state.markers.size());
+    for (const auto& marker : state.markers) markers.push_back({ marker.samplePosition, marker.name });
     bpm.store(state.bpm, std::memory_order_relaxed);
     timeSignatureNumerator.store(state.timeSignatureNumerator, std::memory_order_relaxed);
+    timeSignatureDenominator.store(state.timeSignatureDenominator, std::memory_order_relaxed);
     cycleStartSample.store(state.cycleStartSample, std::memory_order_relaxed);
     cycleEndSample.store(state.cycleEndSample, std::memory_order_relaxed);
     cycleActive.store(state.cycleActive, std::memory_order_relaxed);
@@ -1669,6 +2213,22 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
     markProjectModified();
     sendChangeMessage();
     return juce::Result::ok();
+}
+
+juce::Result TrackDataModel::setControlRoutingProfile(ControlRoutingProfile profile)
+{
+    if (const auto result = profile.validate(); result.failed()) return result;
+    controlRoutingProfile = std::move(profile);
+    markProjectModified();
+    sendChangeMessage();
+    return juce::Result::ok();
+}
+
+void TrackDataModel::setLiveKeyReferenceTrack(TrackId track) noexcept
+{
+    liveKeyReferenceTrack = track;
+    markProjectModified();
+    sendChangeMessage();
 }
 
 void TrackDataModel::setFxProcessor(size_t trackIndex, size_t slot, std::shared_ptr<AudioEffectProcessor> processor)
@@ -1798,9 +2358,12 @@ void TrackDataModel::publishRenderStructureSnapshot()
         renderTrack.armed = track.armed.load(std::memory_order_relaxed);
         renderTrack.inputMonitoring = track.inputMonitoring.load(std::memory_order_relaxed);
         renderTrack.autoInputMonitoring = track.autoInputMonitoring.load(std::memory_order_relaxed);
+        renderTrack.monitorDestination = track.monitorDestination.load(std::memory_order_relaxed);
+        renderTrack.monitorPermitted = track.monitorPermitted.load(std::memory_order_relaxed);
         renderTrack.inputChannel = track.inputChannel.load(std::memory_order_relaxed);
         renderTrack.inputChannelCount = track.inputChannelCount.load(std::memory_order_relaxed);
         renderTrack.midiInputChannel = track.midiInputChannel.load(std::memory_order_relaxed);
+        renderTrack.midiInputDeviceToken = track.midiInputDeviceToken.load(std::memory_order_relaxed);
         const auto rackSlot = getFxRackSlot(track.id);
         renderTrack.fxRack = rackSlot >= 0 ? publishedFxRacks[static_cast<size_t>(rackSlot)].load(std::memory_order_acquire) : nullptr;
         renderTrack.outputBus = track.outputBus;

@@ -18,38 +18,36 @@ MainComponent::MainComponent()
 
     // Keep the selected channel's controls in view by default, matching the
     // arrangement-first workflow rather than starting with a blank left rail.
-    inspectorPane.setVisible(true);
-    controlBar.setInspectorVisible(true);
-    assetBrowser.setVisible(false);
-    controlBar.setBrowserVisible(false);
+    setWorkspacePanelsVisible(true, false, false, false);
+
+    workspaceModeController = std::make_unique<WorkspaceModeController>(audioEngine,
+        [this](const WorkspaceProfile& profile) { applyWorkspaceMode(profile); });
+
+    mixerPane.onHeightChangeRequested = [this] (int height)
+    {
+        juce::ignoreUnused(height);
+        resized();
+    };
 
     controlBar.onMixerToggle = [this]
     {
-        const auto visible = ! mixerPane.isVisible();
-        mixerPane.setVisible(visible);
-        controlBar.setMixerVisible(visible);
-        resized();
+        setMixerPanelVisible(! mixerPane.isVisible());
     };
     controlBar.onInspectorToggle = [this]
     {
-        const auto visible = ! inspectorPane.isVisible();
-        inspectorPane.setVisible(visible);
-        controlBar.setInspectorVisible(visible);
-        resized();
+        setInspectorPanelVisible(! inspectorPane.isVisible());
     };
     controlBar.onPianoRollToggle = [this]
     {
-        const auto visible = ! pianoRoll.isVisible();
-        pianoRoll.setVisible(visible);
-        controlBar.setPianoRollVisible(visible);
-        resized();
+        setPianoRollPanelVisible(! pianoRoll.isVisible());
     };
     controlBar.onBrowserToggle = [this]
     {
-        const auto visible = ! assetBrowser.isVisible();
-        assetBrowser.setVisible(visible);
-        controlBar.setBrowserVisible(visible);
-        resized();
+        setBrowserPanelVisible(! assetBrowser.isVisible());
+    };
+    controlBar.onAutoKeyRequested = [this]
+    {
+        requestTuneAiUrlAnalysis();
     };
     controlBar.onCreateTrack = [this](TrackType)
     {
@@ -58,11 +56,10 @@ MainComponent::MainComponent()
         startupWorkflow.showTrackCreation(true);
     };
     controlBar.onRecordRequested = [this] { toggleRecording(); };
-    controlBar.onLiveModeChanged = [this](bool enabled)
+    controlBar.onWorkspaceModeChanged = [this](WorkspaceMode mode)
     {
-        audioEngine.setLivePerformanceEnabled(enabled);
-        if (enabled)
-            audioEngine.optimiseDeviceForLivePerformance();
+        if (! suppressWorkspaceModeCallback)
+            requestWorkspaceMode(mode);
     };
     controlBar.onCountInChanged = [this](bool enabled) { countInEnabled = enabled; };
     controlBar.onCountInBarsChanged = [this](int bars) { countInBars = juce::jlimit(1, 2, bars); };
@@ -113,10 +110,11 @@ MainComponent::MainComponent()
         if (result.failed())
             return;
 
+        repairAudioTrackInputAssignments();
+
         // A Performance Room is immediately playable: every configured source
         // is armed, while audio sources monitor only when armed.
-        const auto* device = audioEngine.getAudioDeviceManager().getCurrentAudioDevice();
-        const auto availableInputs = device != nullptr ? device->getActiveInputChannels().countNumberOfSetBits() : 0;
+        const auto availableInputs = audioEngine.getActiveAudioInputChannels();
         auto nextAudioInput = 0;
         auto hasExternalMidi = false;
         for (size_t index = 0; index < trackDataModel.getTrackCount(); ++index)
@@ -124,7 +122,8 @@ MainComponent::MainComponent()
             const auto& track = trackDataModel.getTrack(index);
             if (track.type == TrackType::audio)
             {
-                const auto input = availableInputs > 0 ? nextAudioInput++ % availableInputs : 0;
+                const auto input = availableInputs.isEmpty() ? 0
+                    : availableInputs[(preferredStartupInputChannel + nextAudioInput++) % availableInputs.size()];
                 trackDataModel.setTrackInputConfiguration(index, true, false,
                                                           input, 1);
             }
@@ -145,6 +144,10 @@ MainComponent::MainComponent()
                                                    "Your hardware MIDI tracks are ready. Choose the target device in Device Settings > MIDI OUTPUT.");
     };
     arrangeWindow.onTrackSelected = [this](int track) { selectTrack(track); };
+    arrangeWindow.onAudioFileImported = [this](int track, const juce::File&)
+    {
+        beginBeatKeyLearning(track);
+    };
     arrangeWindow.onPerformanceSetupRequested = [this]
     {
         configureTrackCreationDialog();
@@ -152,12 +155,17 @@ MainComponent::MainComponent()
         startupWorkflow.showTrackCreation(true);
     };
     arrangeWindow.onAudioClipSelected = [this](ClipId) {};
-    arrangeWindow.onMidiClipSelected = [this](MidiClipId clip)
+    arrangeWindow.onAudioClipOpenRequested = [this](ClipId)
+    {
+        // The inspector remains the audio-region editor until the dedicated
+        // waveform editor pane is introduced; opening is deliberate, unlike selection.
+        setInspectorPanelVisible(true);
+    };
+    arrangeWindow.onMidiClipSelected = [this](MidiClipId) {};
+    arrangeWindow.onMidiClipOpenRequested = [this](MidiClipId clip)
     {
         pianoRoll.setActiveClip(clip);
-        pianoRoll.setVisible(true);
-        controlBar.setPianoRollVisible(true);
-        resized();
+        setPianoRollPanelVisible(true);
     };
     assetBrowser.onAudioFileActivated = [this](const juce::File& file)
     {
@@ -176,58 +184,159 @@ MainComponent::MainComponent()
     });
 }
 
-void MainComponent::requestTuneAiUrlAnalysis()
+void MainComponent::requestWorkspaceMode(WorkspaceMode mode)
 {
-    auto* dialog = new juce::AlertWindow("Analyze YouTube / Karaoke",
-                                         "Paste a YouTube or YouTube Music URL. Tune-AI will analyze it only after you confirm.",
-                                         juce::MessageBoxIconType::QuestionIcon);
-    dialog->addTextEditor("url", {}, "YouTube URL:");
-    dialog->addButton("Analyze", 1, juce::KeyPress(juce::KeyPress::returnKey));
-    dialog->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
-    const auto safeThis = juce::Component::SafePointer<MainComponent>(this);
-    const auto safeDialog = juce::Component::SafePointer<juce::AlertWindow>(dialog);
-    dialog->enterModalState(true, juce::ModalCallbackFunction::create([safeThis, safeDialog] (int button)
+    const auto restoreActiveMode = [this]
     {
-        if (button == 1 && safeThis != nullptr && safeDialog != nullptr)
-            safeThis->startTuneAiUrlAnalysis(safeDialog->getTextEditorContents("url"));
-    }), true);
-}
+        suppressWorkspaceModeCallback = true;
+        controlBar.setWorkspaceMode(workspaceModeController->getActiveMode());
+        suppressWorkspaceModeCallback = false;
+    };
 
-void MainComponent::startTuneAiUrlAnalysis(const juce::String& rawUrl)
-{
-    const auto url = rawUrl.trim();
-    if (! (url.containsIgnoreCase("youtube.com") || url.containsIgnoreCase("youtu.be")))
+    if (mode == WorkspaceMode::studio || ! audioEngine.needsLiveBufferOptimisation())
     {
-        StudioForgeDialog::showWarning("Tune-AI Analysis", "Enter a valid YouTube or YouTube Music URL.");
+        if (const auto result = workspaceModeController->requestMode(mode); result.failed())
+        {
+            restoreActiveMode();
+            StudioForgeDialog::showWarning("LIVE is not ready", result.getErrorMessage());
+        }
         return;
     }
 
+    auto* device = audioEngine.getAudioDeviceManager().getCurrentAudioDevice();
+    const auto current = device != nullptr ? device->getCurrentBufferSizeSamples() : 0;
+    const auto recommended = audioEngine.getRecommendedLiveBufferSize();
     const auto safeThis = juce::Component::SafePointer<MainComponent>(this);
-    juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::InfoIcon,
-                                           "Tune-AI Analysis",
-                                           "Analysis started. Tune-AI is reading the karaoke audio in the background.\n\n"
-                                           "This usually takes 30–120 seconds for a new video. Do not start it again; "
-                                           "StudioForge will show the detected key when it finishes.");
-    tuneAiAnalysis.analyseYouTubeUrlAsync(url, [safeThis] (TuneAiAnalysisService::Result result)
+    juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon,
+                                       "Ready for LIVE?",
+                                       "Your audio buffer is set to " + juce::String(current)
+                                           + " samples, which may feel delayed while singing.\n\n"
+                                           + "Switch to " + juce::String(recommended)
+                                           + " samples for responsive live monitoring?",
+                                       "Switch & enter LIVE", "Keep current setup", nullptr,
+                                       juce::ModalCallbackFunction::create([safeThis, mode] (int choice)
     {
         if (safeThis == nullptr) return;
-        if (! result.succeeded)
+        if (choice == 0)
         {
-            StudioForgeDialog::showWarning("Tune-AI Analysis Failed", result.error);
+            safeThis->suppressWorkspaceModeCallback = true;
+            safeThis->controlBar.setWorkspaceMode(safeThis->workspaceModeController->getActiveMode());
+            safeThis->suppressWorkspaceModeCallback = false;
             return;
         }
+        if (const auto optimisation = safeThis->audioEngine.optimiseDeviceForLivePerformance(); optimisation.failed())
+        {
+            safeThis->suppressWorkspaceModeCallback = true;
+            safeThis->controlBar.setWorkspaceMode(safeThis->workspaceModeController->getActiveMode());
+            safeThis->suppressWorkspaceModeCallback = false;
+            StudioForgeDialog::showWarning("Could not prepare LIVE", optimisation.getErrorMessage());
+            return;
+        }
+        if (const auto result = safeThis->workspaceModeController->requestMode(mode); result.failed())
+        {
+            safeThis->suppressWorkspaceModeCallback = true;
+            safeThis->controlBar.setWorkspaceMode(safeThis->workspaceModeController->getActiveMode());
+            safeThis->suppressWorkspaceModeCallback = false;
+            StudioForgeDialog::showWarning("LIVE is not ready", result.getErrorMessage());
+        }
+    }));
+}
 
-        const auto applied = safeThis->audioEngine.applyKeyToPitchCorrection(result.rootNote, result.minor);
-        static constexpr const char* noteNames[] { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
-        const auto key = juce::String(noteNames[result.rootNote]) + (result.minor ? " minor" : " major");
-        auto message = (result.fromCache ? "Cached result: " : "Analysis complete: ") + key
-            + " (confidence " + juce::String(result.confidence, 2) + ").";
-        if (result.title.isNotEmpty()) message << "\n" << result.title;
-        message << (applied > 0
-                        ? "\nApplied directly to " + juce::String(applied) + " VibeAutotune instance(s)."
-                        : "\nNo VibeAutotune instance is inserted, so no plug-in parameter was changed.");
-        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::InfoIcon, "Tune-AI Analysis", message);
+void MainComponent::requestTuneAiUrlAnalysis()
+{
+    const auto hostBounds = getTopLevelComponent() != nullptr ? getTopLevelComponent()->getScreenBounds()
+                                                               : getScreenBounds();
+    if (const auto result = tuneAiAnalysis.launchStandaloneApp(hostBounds); result.failed())
+        StudioForgeDialog::showWarning("Could not open Auto Key", result.getErrorMessage());
+}
+
+juce::String MainComponent::applyTuneAiKey(const MusicalKey& key, bool useMic1, bool useMic2)
+{
+    juce::StringArray applied;
+    juce::StringArray errors;
+    if (useMic1)
+    {
+        const auto result = pitchCorrection.applyKey(ControlTarget::mic1, key);
+        result.succeeded ? applied.add("Mic 1") : errors.add("Mic 1: " + result.error);
+    }
+    if (useMic2)
+    {
+        const auto result = pitchCorrection.applyKey(ControlTarget::mic2, key);
+        result.succeeded ? applied.add("Mic 2") : errors.add("Mic 2: " + result.error);
+    }
+    if (! applied.isEmpty())
+    {
+        // An explicit Tune-AI result owns the key until the user imports a new
+        // beat (which starts a new learn pass). Live detection must not chase
+        // the singer and rewrite the scale during performance.
+        autoKeyState = AutoKeyState::locked;
+        return key.displayName() + " applied to " + applied.joinIntoString(" + ")
+            + (errors.isEmpty() ? juce::String {} : " • " + errors.joinIntoString(" • "));
+    }
+    return errors.isEmpty() ? "No compatible pitch-correction target is configured."
+                            : errors.joinIntoString(" • ");
+}
+
+void MainComponent::consumeTuneAiKeyBridge()
+{
+    // Tune-AI is a separately packaged app. It publishes only confirmed
+    // results through an atomic JSON hand-off; all plug-in mutation remains
+    // on StudioForge's control thread and therefore goes through the normal
+    // routing/parameter readback path.
+    const auto resultFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                .getChildFile("studioforge-autokey-result.json");
+    if (! resultFile.existsAsFile())
+        return;
+
+    const auto parsed = juce::JSON::parse(resultFile);
+    const auto* object = parsed.getDynamicObject();
+    if (object == nullptr || static_cast<int>(object->getProperty("schema")) != 1)
+        return;
+
+    const auto publishedAt = static_cast<double>(object->getProperty("published_at"));
+    if (! std::isfinite(publishedAt) || publishedAt <= consumedTuneAiKeyPublishedAt)
+        return;
+
+    const auto keyText = object->getProperty("key").toString().trim();
+    const auto scaleText = object->getProperty("scale").toString().trim();
+    const auto confidence = static_cast<float>(object->getProperty("confidence"));
+    const auto key = MusicalKey::parse(keyText, scaleText);
+    if (! key.has_value() || ! std::isfinite(confidence) || confidence < 0.60f)
+        return;
+
+    const auto summary = applyTuneAiKey(*key, true, true);
+    consumedTuneAiKeyPublishedAt = publishedAt;
+    DBG("Auto-Key bridge: " + key->displayName() + " • " + summary);
+}
+
+void MainComponent::beginBeatKeyLearning(int trackIndex)
+{
+    if (trackIndex < 0 || static_cast<size_t>(trackIndex) >= trackDataModel.getTrackCount())
+        return;
+
+    const auto& track = trackDataModel.getTrack(static_cast<size_t>(trackIndex));
+    if (track.type != TrackType::audio)
+        return;
+
+    // Never learn harmony from the vocal that is being corrected. Imported
+    // audio on any non-vocal route is treated as the rehearsal beat.
+    const auto& profile = trackDataModel.getControlRoutingProfile();
+    const auto isVocalRoute = std::any_of(profile.routes.begin(), profile.routes.end(), [&track] (const ControlRoute& route)
+    {
+        return route.effect == ControlEffect::pitchCorrection && route.track == track.id;
     });
+    if (isVocalRoute)
+        return;
+
+    trackDataModel.setLiveKeyReferenceTrack(track.id);
+    audioEngine.setLiveKeyReferenceTrack(track.id);
+    audioEngine.resetLiveKeyDetection();
+    appliedLiveKeyRevision = 0;
+    autoKeyState = AutoKeyState::learning;
+
+    // This is control-thread setup. It inserts VibeAutotune only on configured
+    // vocal routes and leaves every subsequent EQ/comp/reverb insert intact.
+    pitchCorrectionStatus = pitchCorrection.ensureVibeAutotuneForVocalLive();
 }
 
 void MainComponent::showInitialTrackCreation()
@@ -247,44 +356,71 @@ void MainComponent::configureTrackCreationDialog()
 
 void MainComponent::enableAvailablePerformanceInputs()
 {
-    auto& deviceManager = audioEngine.getAudioDeviceManager();
-    auto* device = deviceManager.getCurrentAudioDevice();
+    if (audioEngine.enableAllAvailableInputChannels().wasOk())
+        audioEngine.saveAudioDeviceState();
+    repairAudioTrackInputAssignments();
+    configureTrackCreationDialog();
+}
+
+void MainComponent::repairAudioTrackInputAssignments()
+{
+    const auto* device = audioEngine.getAudioDeviceManager().getCurrentAudioDevice();
     if (device == nullptr)
         return;
 
-    const auto inputCount = device->getInputChannelNames().size();
-    if (inputCount <= 0)
+    const auto active = device->getActiveInputChannels();
+    if (active.countNumberOfSetBits() == 0)
         return;
 
-    auto setup = deviceManager.getAudioDeviceSetup();
-    setup.inputChannels.clear();
-    for (int channel = 0; channel < inputCount; ++channel)
-        setup.inputChannels.setBit(channel);
-    if (deviceManager.setAudioDeviceSetup(setup, true).isEmpty())
-        audioEngine.saveAudioDeviceState();
-    configureTrackCreationDialog();
+    juce::Array<int> availableInputs;
+    for (int channel = active.findNextSetBit(0); channel >= 0; channel = active.findNextSetBit(channel + 1))
+        availableInputs.add(channel);
+
+    auto nextInput = 0;
+    for (size_t index = 0; index < trackDataModel.getTrackCount(); ++index)
+    {
+        const auto& track = trackDataModel.getTrack(index);
+        if (track.type != TrackType::audio)
+            continue;
+
+        const auto current = track.inputChannel.load(std::memory_order_relaxed);
+        if (availableInputs.contains(current))
+            continue;
+
+        // Preserve the user's monitor choice. This only repairs source
+        // indexes that vanished after connecting a smaller interface.
+        trackDataModel.setTrackInputConfiguration(index,
+            track.autoInputMonitoring.load(std::memory_order_relaxed),
+            track.inputMonitoring.load(std::memory_order_relaxed),
+            availableInputs[nextInput++ % availableInputs.size()], 1);
+    }
 }
 
 void MainComponent::selectAudioInputChannel(int oneBasedChannel)
 {
-    auto& deviceManager = audioEngine.getAudioDeviceManager();
-    auto setup = deviceManager.getAudioDeviceSetup();
-    setup.inputChannels.clear();
-    setup.inputChannels.setBit(oneBasedChannel - 1);
-    deviceManager.setAudioDeviceSetup(setup, true);
-    audioEngine.saveAudioDeviceState();
-    configureTrackCreationDialog();
+    preferredStartupInputChannel = juce::jmax(0, oneBasedChannel - 1);
+    // Selecting Input 1 in the creation UI means "use Input 1 for the next
+    // audio track".  It must not reconfigure a live interface to expose only
+    // that channel; that tears down a Core Audio input session and is unlike
+    // the track-input selectors in commercial DAWs.
+    const auto selected = getSelectedTrackIndex();
+    if (selected < 0 || static_cast<size_t>(selected) >= trackDataModel.getTrackCount())
+        return;
+    const auto& track = trackDataModel.getTrack(static_cast<size_t>(selected));
+    if (track.type != TrackType::audio)
+        return;
+    trackDataModel.setTrackInputConfiguration(static_cast<size_t>(selected),
+        track.autoInputMonitoring.load(std::memory_order_relaxed),
+        track.inputMonitoring.load(std::memory_order_relaxed),
+        preferredStartupInputChannel, track.inputChannelCount.load(std::memory_order_relaxed));
 }
 
 void MainComponent::selectAudioOutputChannel(int oneBasedChannel)
 {
-    auto& deviceManager = audioEngine.getAudioDeviceManager();
-    auto setup = deviceManager.getAudioDeviceSetup();
-    setup.outputChannels.clear();
-    setup.outputChannels.setBit(oneBasedChannel - 1);
-    setup.outputChannels.setBit(oneBasedChannel);
-    deviceManager.setAudioDeviceSetup(setup, true);
+    if (audioEngine.selectStereoOutputPair(oneBasedChannel - 1).failed())
+        return;
     audioEngine.saveAudioDeviceState();
+    repairAudioTrackInputAssignments();
     configureTrackCreationDialog();
 }
 
@@ -296,6 +432,57 @@ MainComponent::~MainComponent()
     setLookAndFeel(nullptr);
 }
 
+void MainComponent::applyWorkspaceMode(const WorkspaceProfile& profile)
+{
+    const auto mode = profile.mode;
+    if (workspaceMode == mode)
+        return;
+
+    // The project model is never touched here. Workspace modes only alter UI
+    // priority and the global audio policy; per-track monitoring remains the
+    // track's own explicit state.
+    if (workspaceMode == WorkspaceMode::studio)
+    {
+        studioInspectorVisible = inspectorPane.isVisible();
+        studioMixerVisible = mixerPane.isVisible();
+        studioBrowserVisible = assetBrowser.isVisible();
+        studioPianoRollVisible = pianoRoll.isVisible();
+        studioTrackHeight = trackDataModel.getTrackHeight();
+    }
+
+    if (mode == WorkspaceMode::studio)
+    {
+        setWorkspacePanelsVisible(studioInspectorVisible, studioBrowserVisible,
+                                  studioMixerVisible, studioPianoRollVisible);
+        trackDataModel.setTrackHeight(studioTrackHeight);
+    }
+    else if (mode == WorkspaceMode::stage)
+    {
+        // Stage prioritises large strips and meters; no project or mixer
+        // values are reset and returning to Studio restores the snapshot.
+        setWorkspacePanelsVisible(false, false, true, false);
+        // The reference Stage workspace shows five concise track headers
+        // above the mixer. Larger rows starve the arrangement unnecessarily.
+        trackDataModel.setTrackHeight(78);
+    }
+    else // stream
+    {
+        // Stream keeps the focused vocal controls accessible while retaining
+        // the arrangement and shared engine/project state.
+        setWorkspacePanelsVisible(true, false, false, false);
+        trackDataModel.setTrackHeight(88);
+    }
+
+    workspaceMode = mode;
+    // Both Stage and Stream are live-vocal workflows. Preparation is
+    // control-thread work: it may replace a legacy hosted Vibe with the
+    // StudioForge-native live processor, but can never run from audio I/O.
+    if (mode == WorkspaceMode::stage || mode == WorkspaceMode::stream)
+        pitchCorrectionStatus = pitchCorrection.ensureVibeAutotuneForVocalLive();
+    resized();
+    arrangeWindow.repaint();
+}
+
 bool MainComponent::keyPressed(const juce::KeyPress& key)
 {
     return handleGlobalKeyPress(key);
@@ -303,6 +490,22 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
 
 bool MainComponent::handleGlobalKeyPress(const juce::KeyPress& key)
 {
+    if (key.getModifiers().isAltDown() && key.getKeyCode() == '\'')
+    {
+        arrangeWindow.addMarkerAtPlayhead();
+        return true;
+    }
+    if ((key.getKeyCode() == 'z' || key.getKeyCode() == 'Z')
+        && ! key.getModifiers().isCommandDown() && ! key.getModifiers().isCtrlDown())
+    {
+        if (key.getModifiers().isShiftDown())
+            arrangeWindow.fitTracksToWindow();
+        else if (! key.getModifiers().isAnyModifierKeyDown())
+            arrangeWindow.toggleSelectedTrackZoom();
+        else
+            return false;
+        return true;
+    }
     if (key.getModifiers().isAnyModifierKeyDown())
         return false;
 
@@ -378,6 +581,16 @@ juce::Result MainComponent::loadProject(const juce::File& file, juce::StringArra
     const auto result = ProjectSerializer::load(trackDataModel, pluginHost, file, missingMediaReferences);
     if (result.wasOk())
     {
+        audioEngine.setLiveKeyReferenceTrack(trackDataModel.getLiveKeyReferenceTrack());
+        if (trackDataModel.getLiveKeyReferenceTrack().isValid())
+        {
+            audioEngine.resetLiveKeyDetection();
+            autoKeyState = AutoKeyState::learning;
+            appliedLiveKeyRevision = 0;
+        }
+        pitchCorrectionStatus = pitchCorrection.validate();
+        if (missingMediaReferences != nullptr)
+            missingMediaReferences->addArray(controlBridge.validateProfile());
         audioEngine.prepareActiveEffects();
         selectTrack(0);
         mixerPane.refreshFromModel();
@@ -398,12 +611,54 @@ juce::Result MainComponent::createNewProject()
     return createProjectFromTemplate(ProjectTemplate::empty);
 }
 
+void MainComponent::startAutomatedVibeTrace()
+{
+    // This is a support-only launch path. It creates no persistent project,
+    // does not start transport, and never enables monitoring before a real
+    // Core Audio device is available.
+    if (automatedVibeTraceStarted
+        || audioEngine.getAudioDeviceManager().getCurrentAudioDevice() == nullptr)
+        return;
+
+    if (const auto created = createProjectFromTemplate(ProjectTemplate::audioRecording); created.failed())
+        return;
+
+    enableAvailablePerformanceInputs();
+    const auto activeInputs = audioEngine.getActiveAudioInputChannels();
+    if (activeInputs.isEmpty())
+        return;
+
+    // The first track is the template's Vocal route. Its effect slot remains
+    // owned by PitchCorrectionIntegrationService, so no GUI click or plug-in
+    // browser timing is involved.
+    trackDataModel.setTrackInputConfiguration(0, true, false, activeInputs[0], 1);
+    trackDataModel.setTrackArmed(0, true);
+    selectTrack(0);
+
+    // STAGE applies the explicit low-latency device profile and grants the
+    // configured vocal a post-FX master monitor route. If this fails (for
+    // example no usable output), leave monitoring safely off.
+    if (const auto live = workspaceModeController->requestMode(WorkspaceMode::stage); live.failed())
+        return;
+
+    pitchCorrectionStatus = pitchCorrection.ensureVibeAutotuneForVocalLive();
+    if (pitchCorrectionStatus.ready())
+        audioEngine.prepareActiveEffects();
+    audioEngine.startAudioTrace();
+    audioEngine.markAudioTraceIssue();
+    automatedVibeTraceStarted = true;
+    mixerPane.refreshFromModel();
+    arrangeWindow.repaint();
+}
+
 juce::Result MainComponent::createProjectFromTemplate(ProjectTemplate projectTemplate)
 {
     audioEngine.setPlaybackState(false);
     const auto result = trackDataModel.applyProjectState(ProjectTemplates::create(projectTemplate));
     if (result.wasOk())
     {
+        audioEngine.setLiveKeyReferenceTrack(trackDataModel.getLiveKeyReferenceTrack());
+        pitchCorrectionStatus = pitchCorrection.validate();
         selectTrack(0);
         mixerPane.refreshFromModel();
         arrangeWindow.repaint();
@@ -454,17 +709,44 @@ void MainComponent::requestRecordToggle()
 
 void MainComponent::setInspectorPanelVisible(bool visible)
 {
-    inspectorPane.setVisible(visible); controlBar.setInspectorVisible(visible); resized();
+    inspectorPane.setVisible(visible);
+    controlBar.setInspectorVisible(visible);
+    resized();
+}
+
+void MainComponent::setWorkspacePanelsVisible(bool inspector, bool browser, bool mixer, bool pianoRollVisible)
+{
+    inspectorPane.setVisible(inspector);
+    assetBrowser.setVisible(browser);
+    mixerPane.setVisible(mixer);
+    pianoRoll.setVisible(pianoRollVisible);
+    controlBar.setInspectorVisible(inspector);
+    controlBar.setBrowserVisible(browser);
+    controlBar.setMixerVisible(mixer);
+    controlBar.setPianoRollVisible(pianoRollVisible);
 }
 
 void MainComponent::setBrowserPanelVisible(bool visible)
 {
-    assetBrowser.setVisible(visible); controlBar.setBrowserVisible(visible); resized();
+    assetBrowser.setVisible(visible);
+    controlBar.setBrowserVisible(visible);
+    resized();
+    if (visible)
+        assetBrowser.focusSearch();
 }
 
 void MainComponent::setMixerPanelVisible(bool visible)
 {
-    mixerPane.setVisible(visible); controlBar.setMixerVisible(visible); resized();
+    mixerPane.setVisible(visible);
+    controlBar.setMixerVisible(visible);
+    resized();
+}
+
+void MainComponent::setPianoRollPanelVisible(bool visible)
+{
+    pianoRoll.setVisible(visible);
+    controlBar.setPianoRollVisible(visible);
+    resized();
 }
 
 bool MainComponent::addTrackFromCommand(TrackType type)
@@ -472,6 +754,7 @@ bool MainComponent::addTrackFromCommand(TrackType type)
     const auto id = trackDataModel.addTrack(type);
     if (! id.isValid())
         return false;
+    repairAudioTrackInputAssignments();
     selectTrack(trackDataModel.getTrackIndex(id));
     arrangeWindow.repaint();
     mixerPane.refreshFromModel();
@@ -534,11 +817,13 @@ void MainComponent::selectTrack(int trackIndex)
     if (count <= 0)
     {
         selectedTrackId = {};
+        audioEngine.setFocusedMonitorTrack({});
         arrangeWindow.setSelectedTrack(-1);
         return;
     }
     const auto resolvedIndex = juce::jlimit(0, count - 1, trackIndex);
     selectedTrackId = trackDataModel.getTrackId(static_cast<size_t>(resolvedIndex));
+    audioEngine.setFocusedMonitorTrack(selectedTrackId);
     inspectorPane.setSelectedTrack(resolvedIndex);
     arrangeWindow.setSelectedTrack(resolvedIndex);
 }
@@ -579,26 +864,21 @@ void MainComponent::toggleRecording()
         return;
     }
 
-    std::vector<AudioEngine::AudioRecordingTarget> audioTargets;
-    for (size_t index = 0; index < trackDataModel.getTrackCount(); ++index)
-        if (const auto& track = trackDataModel.getTrack(index);
-            track.type == TrackType::audio && track.armed.load(std::memory_order_relaxed))
-        {
-            const auto destination = createRecordingDestination();
-            if (destination == juce::File {})
-                return;
-            audioTargets.push_back({ index, destination });
-        }
-
+    // Record follows the selected channel. The previous "first armed track"
+    // fallback made a take appear on an unrelated (often third) track when
+    // several tracks were record-ready. Multi-track capture is only used
+    // when no audio track is selected.
+    const auto selectedTrack = getSelectedTrackIndex();
     const auto armedTrack = trackDataModel.getFirstArmedTrackIndex();
-    const auto target = armedTrack >= 0 ? armedTrack : getSelectedTrackIndex();
+    const auto target = selectedTrack >= 0 ? selectedTrack : armedTrack;
     if (target < 0 || target >= static_cast<int>(trackDataModel.getTrackCount()))
         return;
 
     const auto type = trackDataModel.getTrack(static_cast<size_t>(target)).type;
     if (type != TrackType::audio && type != TrackType::instrument && type != TrackType::externalMidi)
         return;
-    if (audioTargets.empty() && type == TrackType::audio)
+    std::vector<AudioEngine::AudioRecordingTarget> audioTargets;
+    if (type == TrackType::audio)
     {
         const auto destination = createRecordingDestination();
         if (destination == juce::File {})
@@ -743,18 +1023,63 @@ void MainComponent::showRecordingFailure(const juce::Result& result) const
 
 void MainComponent::timerCallback()
 {
-    if (audioEngine.isLivePerformanceEnabled())
+    consumeTuneAiKeyBridge();
+    // Device scans never run on the audio thread. A one-second refresh gives
+    // USB MIDI controllers plug-and-play behaviour without polling per frame.
+    if (++midiDeviceRefreshTicks >= 30)
+    {
+        midiDeviceRefreshTicks = 0;
+        audioEngine.refreshMidiInputDevices();
+    }
+
+    // Registry scanning is asynchronous at startup. Retry setup only while it
+    // is unresolved, on the UI timer, never as a side effect of detected keys.
+    if ((workspaceMode == WorkspaceMode::stage || workspaceMode == WorkspaceMode::stream)
+        && ! pitchCorrectionStatus.ready()
+        && ++pitchCorrectionSetupTicks >= 30)
+    {
+        pitchCorrectionSetupTicks = 0;
+        pitchCorrectionStatus = pitchCorrection.ensureVibeAutotuneForVocalLive();
+    }
+
+    if (audioEngine.consumeRecordingInterruptedByDeviceDisconnect())
+    {
+        // Never finalise a take from the device callback. The UI thread owns
+        // the orderly close so unplugging an interface cannot leave a writer
+        // live against a vanished input stream.
+        audioEngine.stopRecording();
+        recordingCountdownActive = false;
+        recordingPunchStopSample = -1.0;
+        pendingRecordingTrack = -1;
+        pendingRecordingDestination = juce::File {};
+        pendingAudioRecordingTargets.clear();
+        controlBar.setRecordActive(false);
+        controlBar.setRecordCountdown(false);
+        arrangeWindow.hideRecordingPreview();
+        arrangeWindow.repaint();
+        StudioForgeDialog::showWarning("Audio interface disconnected",
+                                       "Recording stopped safely. Reconnect the interface, verify track inputs, then record again.");
+    }
+
+    if (autoKeyState == AutoKeyState::learning)
     {
         const auto key = audioEngine.getLiveKeyResult();
-        if (key.revision != 0 && key.revision != appliedLiveKeyRevision)
+        if (key.revision != 0 && key.revision != appliedLiveKeyRevision && key.confidence >= 0.60f)
         {
-            audioEngine.applyDetectedKeyToPitchCorrection();
+            const MusicalKey semanticKey { static_cast<PitchClass>(key.root), key.minor ? MusicalScale::minor : MusicalScale::major };
+            const auto summary = applyTuneAiKey(semanticKey, true, true);
             appliedLiveKeyRevision = key.revision;
+            if (autoKeyState == AutoKeyState::locked)
+            {
+                // End of rehearsal pass: return to the song start with the key
+                // frozen. The next Play is the actual singing/performance pass.
+                audioEngine.setPlaybackState(false);
+                trackDataModel.setPlayheadPosition(0.0);
+                StudioForgeDialog::showWarning("Key locked for performance",
+                    semanticKey.displayName() + " • " + summary
+                    + "\nRewound to the beginning. Press Play and sing; Auto-Key will not overwrite this setting.");
+            }
         }
-    }
-    else
-    {
-        appliedLiveKeyRevision = 0;
     }
 
     if (recordingCountdownActive && ! audioEngine.isPlaying())
@@ -819,12 +1144,12 @@ void MainComponent::resized()
     // Dock panes from a bounded budget so opening both lower editors never
     // collapses the arrange workspace or overlaps controls on smaller screens.
     const auto dockBudget = juce::jmax(0, area.getHeight() - 220);
-    const auto requestedDockHeight = (mixerPane.isVisible() ? 270 : 0)
+    const auto requestedDockHeight = (mixerPane.isVisible() ? mixerPane.getPreferredHeight() : 0)
                                    + (pianoRoll.isVisible() ? 250 : 0);
     const auto dockScale = requestedDockHeight > 0
         ? juce::jmin(1.0f, static_cast<float>(dockBudget) / static_cast<float>(requestedDockHeight)) : 0.0f;
     if (mixerPane.isVisible())
-        mixerPane.setBounds(area.removeFromBottom(juce::roundToInt(270.0f * dockScale)));
+        mixerPane.setBounds(area.removeFromBottom(juce::roundToInt(static_cast<float>(mixerPane.getPreferredHeight()) * dockScale)));
     if (pianoRoll.isVisible())
         pianoRoll.setBounds(area.removeFromBottom(juce::roundToInt(250.0f * dockScale)));
 

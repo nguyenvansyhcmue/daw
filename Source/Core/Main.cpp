@@ -10,9 +10,10 @@ public:
     const juce::String getApplicationName() override { return "StudioForge DAW"; }
     const juce::String getApplicationVersion() override { return "1.0.0"; }
 
-    void initialise(const juce::String&) override
+    void initialise(const juce::String& commandLine) override
     {
-        mainWindow = std::make_unique<MainWindow>("StudioForge DAW");
+        const auto automatedVibeTrace = commandLine.containsIgnoreCase("--automated-vibe-trace");
+        mainWindow = std::make_unique<MainWindow>("StudioForge DAW", automatedVibeTrace);
     }
 
     void shutdown() override

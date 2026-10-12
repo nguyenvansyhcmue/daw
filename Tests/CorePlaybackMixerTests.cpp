@@ -23,6 +23,9 @@ void operator delete(void* allocation) noexcept { std::free(allocation); }
 #include "AudioEngine/TrackMixing.h"
 #include "AudioEngine/TransportUtils.h"
 #include "AudioEngine/GlobalScaleContext.h"
+#include "Control/StudioForgeControlBridge.h"
+#include "Control/MusicalKey.h"
+#include "Control/VibeAutotuneAdapter.h"
 #include "Media/WaveformThumbnailCache.h"
 #include "Models/TrackDataModel.h"
 #include "Media/MediaReloadService.h"
@@ -37,11 +40,55 @@ void operator delete(void* allocation) noexcept { std::free(allocation); }
 #include "Project/ProjectTemplateStore.h"
 #include "Project/ProjectAlternativeStore.h"
 #include "UI/Inspector/InspectorViewState.h"
+#include "UI/AudioRegionInteraction.h"
+#include "UI/TimelineNavigation/TimelineViewportController.h"
+#include "UI/TimelineNavigation/TimelineZoomPolicy.h"
 #include "AutomationDomainTests.h"
 
 namespace
 {
 bool expect(bool condition, const char* message);
+
+bool testAudioRegionHitTesting()
+{
+    const AudioRegionBounds bounds { 100.0f, 20.0f, 200.0f, 60.0f };
+    return expect(detectAudioRegionMouseZone(102.0f, 30.0f, bounds) == AudioRegionMouseZone::leftTrim,
+                  "audio region upper-left resolves to left trim")
+        && expect(detectAudioRegionMouseZone(298.0f, 30.0f, bounds) == AudioRegionMouseZone::rightTrim,
+                  "audio region upper-right resolves to right trim")
+        && expect(detectAudioRegionMouseZone(102.0f, 70.0f, bounds) == AudioRegionMouseZone::leftTrim,
+                  "audio region lower-left resolves to left trim")
+        && expect(detectAudioRegionMouseZone(298.0f, 70.0f, bounds) == AudioRegionMouseZone::rightTrim,
+                  "audio region lower-right resolves to right trim")
+        && expect(detectAudioRegionMouseZone(200.0f, 50.0f, bounds) == AudioRegionMouseZone::move,
+                  "audio region body resolves to move")
+        && expect(detectAudioRegionMouseZone(99.0f, 50.0f, bounds) == AudioRegionMouseZone::none,
+                  "audio region outside resolves to none")
+        && expect(applyAudioRegionModifiers(AudioRegionMouseZone::leftTrim, true) == AudioRegionMouseZone::fadeIn
+                  && applyAudioRegionModifiers(AudioRegionMouseZone::rightTrim, true) == AudioRegionMouseZone::fadeOut
+                  && applyAudioRegionModifiers(AudioRegionMouseZone::move, true) == AudioRegionMouseZone::move,
+                  "audio region modifier policy exposes fades without changing moves")
+        && expect(audioRegionCursorIntent(AudioRegionMouseZone::move) == AudioRegionCursorIntent::move
+                  && audioRegionCursorIntent(AudioRegionMouseZone::leftTrim) == AudioRegionCursorIntent::trim
+                  && audioRegionCursorIntent(AudioRegionMouseZone::fadeOut) == AudioRegionCursorIntent::fade,
+                  "audio region cursor intents map to their interaction zones")
+        && expect(! audioRegionDragThresholdExceeded(0.0f, 0.0f, 3.0f, 0.0f)
+                  && audioRegionDragThresholdExceeded(0.0f, 0.0f, 4.0f, 0.0f),
+                  "audio region drag threshold is deterministic");
+}
+
+bool testTimelineViewportNavigation()
+{
+    const TimelineViewportState initial { 1000.0, 2.0f, 72, 1.0f };
+    const auto pivot = 48000.0;
+    const auto zoomed = TimelineZoomPolicy::zoomAroundSample(initial, pivot, 4.0f, 80.0, 48000.0, 240.0f);
+    const auto sampleAtPivot = zoomed.viewStartSample + 240.0 / (80.0 * zoomed.horizontalZoom) * 48000.0;
+    TimelineViewportController controller(initial);
+    controller.setState(zoomed);
+    return expect(std::abs(sampleAtPivot - pivot) < 0.01, "timeline zoom keeps pointer pivot stable")
+        && expect(controller.back() && controller.state().approximatelyEquals(initial), "timeline navigation restores prior viewport")
+        && expect(controller.forward() && controller.state().approximatelyEquals(zoomed), "timeline navigation reapplies forward viewport");
+}
 
 bool testGlobalScaleContext()
 {
@@ -80,14 +127,86 @@ bool testProjectTemplates()
     if (! expect(recording.tracks.size() == 4 && std::all_of(recording.tracks.begin(), recording.tracks.end(),
         [] (const PersistedTrackState& track) { return track.type == TrackType::audio && track.id.isValid(); }),
         "audio recording template creates valid audio tracks")) return false;
+    if (! expect(recording.controlRoutingProfile.routes.size() == 1
+                      && recording.controlRoutingProfile.routes.front().target == ControlTarget::mic1
+                      && recording.controlRoutingProfile.routes.front().track == recording.tracks.front().id,
+                 "audio template routes pitch correction only to its Vocal track")) return false;
 
     const auto midi = ProjectTemplates::create(ProjectTemplate::midiProduction);
     TrackDataModel model;
     return expect(midi.tracks.size() == 3 && midi.tracks[0].type == TrackType::instrument
                       && midi.tracks[2].type == TrackType::externalMidi,
                   "MIDI production template creates instrument and external MIDI tracks")
+        && expect(midi.controlRoutingProfile.routes.empty(),
+                  "MIDI template does not route pitch correction to instruments")
         && expect(model.applyProjectState(midi).wasOk() && model.getTrackCount() == 3,
                   "template project state is accepted by the model");
+}
+
+class ControlBridgeTestEffect final : public AudioEffectProcessor
+{
+public:
+    void prepareToPlay(double, int, int) override {}
+    void processBlock(juce::AudioBuffer<float>&) override {}
+    void releaseResources() override {}
+    juce::String getName() const override { return "Control bridge test effect"; }
+    bool setParameterText(const juce::String& identifier, const juce::String& value) override
+    {
+        if (identifier != "root" && identifier != "scale" && identifier != "RootNote" && identifier != "Mode") return false;
+        values.set(identifier, value);
+        return true;
+    }
+    juce::String getParameterText(const juce::String& identifier) const override { return values[identifier]; }
+    std::vector<EffectParameterDescriptor> getParameterDescriptors() const override
+    {
+        return { { "RootNote", "Key Root" }, { "Mode", "Scale Mode" } };
+    }
+
+private:
+    juce::HashMap<juce::String, juce::String> values;
+};
+
+bool testStudioForgeControlBridge()
+{
+    TrackDataModel model;
+    const auto mic1 = model.addTrack(TrackType::audio);
+    const auto mic2 = model.addTrack(TrackType::audio);
+    model.setFxProcessor(0, 0, std::make_shared<ControlBridgeTestEffect>());
+    model.setFxProcessor(1, 0, std::make_shared<ControlBridgeTestEffect>());
+    ControlRoutingProfile profile;
+    for (const auto [target, track] : { std::pair { ControlTarget::mic1, mic1 }, std::pair { ControlTarget::mic2, mic2 } })
+        profile.routes.push_back({ target, ControlEffect::pitchCorrection, track, 0, {}, "root", "scale" });
+    if (! expect(model.setControlRoutingProfile(profile).wasOk(), "control routing profile accepts two mic routes")) return false;
+    StudioForgeControlBridge bridge(model);
+    const auto first = bridge.apply(ControlCommand::keySignatureFor(ControlTarget::mic1, 9, true));
+    const auto second = bridge.apply(ControlCommand::keySignatureFor(ControlTarget::mic2, 9, true));
+    if (! expect(first.succeeded && second.succeeded, "control bridge applies a key signature to both configured microphones")) return false;
+    const auto* rack1 = model.getFxRackSnapshot(0);
+    const auto* rack2 = model.getFxRackSnapshot(1);
+    if (! expect(rack1->processors[0]->getParameterText("RootNote") == "A" && rack1->processors[0]->getParameterText("Mode") == "Natural Minor"
+                 && rack2->processors[0]->getParameterText("RootNote") == "A", "control bridge resolves exposed plug-in parameter aliases")) return false;
+    const auto missing = bridge.apply(ControlCommand::keySignatureFor(ControlTarget::music, 0, false));
+    if (! expect(! missing.succeeded && missing.error.contains("No control route"), "control bridge reports a missing route")) return false;
+    auto wrongPluginProfile = profile;
+    wrongPluginProfile.routes.front().expectedPluginIdentifier = "com.example.not-vibe";
+    if (! expect(model.setControlRoutingProfile(wrongPluginProfile).wasOk(), "strict test route is accepted")) return false;
+    const auto wrongPlugin = bridge.apply(ControlCommand::keySignatureFor(ControlTarget::mic1, 0, false));
+    if (! expect(! wrongPlugin.succeeded && wrongPlugin.error.contains("does not match"), "control bridge rejects a route targeting the wrong plug-in")) return false;
+    const auto invalid = ControlCommand::keySignatureFor(ControlTarget::mic1, 12, false);
+    return expect(! bridge.apply(invalid).succeeded, "control bridge rejects invalid key commands");
+}
+
+bool testMusicalKeyNormalization()
+{
+    const auto dbMinor = MusicalKey::parse("Db", "aeolian");
+    const auto abMajor = MusicalKey::parse("Ab", "ionian");
+    if (! expect(dbMinor.has_value() && dbMinor->root == PitchClass::cSharp && dbMinor->isMinor(), "Db normalizes to C# minor")) return false;
+    if (! expect(abMajor.has_value() && abMajor->root == PitchClass::gSharp && ! abMajor->isMinor(), "Ab normalizes to G# major")) return false;
+    ControlBridgeTestEffect effect;
+    const auto result = VibeAutotuneAdapter {}.apply(effect, *dbMinor, "root", "scale");
+    return expect(result.succeeded && result.mapping.root == "RootNote" && result.mapping.scale == "Mode"
+                      && effect.getParameterText("RootNote") == "C#" && effect.getParameterText("Mode") == "Natural Minor",
+                  "Vibe adapter resolves metadata and applies canonical key");
 }
 
 bool testPerformanceSetupRouting()
@@ -101,6 +220,10 @@ bool testPerformanceSetupRouting()
     setup.drumCount = 1;
     const auto project = ProjectTemplates::createLiveSetup(setup);
     if (! expect(project.tracks.size() == 5, "performance setup creates every selected band role")) return false;
+    if (! expect(project.controlRoutingProfile.routes.size() == 1
+                      && project.controlRoutingProfile.routes.front().target == ControlTarget::mic1
+                      && project.controlRoutingProfile.routes.front().track == project.tracks.front().id,
+                 "single-vocal setup never routes Mic 2 pitch correction to Guitar")) return false;
 
     const auto hasRole = [&project] (const juce::String& name, TrackType type, int channel)
     {
@@ -221,8 +344,9 @@ bool testProjectAlternativeStore()
 class OfflineAudioDevice final : public juce::AudioIODevice
 {
 public:
-    explicit OfflineAudioDevice(int size = 4, int inputs = 2)
-        : juce::AudioIODevice("Offline", "Test"), blockSize(size), inputCount(inputs) {}
+    explicit OfflineAudioDevice(int size = 4, int inputs = 2, int activeInputs = -1)
+        : juce::AudioIODevice("Offline", "Test"), blockSize(size), inputCount(inputs),
+          activeInputMask(activeInputs >= 0 ? activeInputs : (1 << inputs) - 1) {}
 
     juce::StringArray getOutputChannelNames() override { return { "L", "R" }; }
     juce::StringArray getInputChannelNames() override
@@ -246,12 +370,13 @@ public:
     double getCurrentSampleRate() override { return 44100.0; }
     int getCurrentBitDepth() override { return 32; }
     juce::BigInteger getActiveOutputChannels() const override { return 3; }
-    juce::BigInteger getActiveInputChannels() const override { return (1 << inputCount) - 1; }
+    juce::BigInteger getActiveInputChannels() const override { return activeInputMask; }
     int getOutputLatencyInSamples() override { return 0; }
     int getInputLatencyInSamples() override { return 0; }
 private:
     int blockSize;
     int inputCount;
+    int activeInputMask;
 };
 
 bool testMetronomeRendering()
@@ -300,11 +425,15 @@ public:
     void processBlock(juce::AudioBuffer<float>&) override {}
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer& midi) override
     {
-        juce::MidiBuffer::Iterator iterator(midi);
-        juce::MidiMessage message;
-        int samplePosition = 0;
-        if (iterator.getNextEvent(message, samplePosition) && message.isNoteOn())
-            receivedPitch = message.getNoteNumber();
+        for (const auto metadata : midi)
+        {
+            const auto message = metadata.getMessage();
+            if (message.isNoteOn())
+            {
+                receivedPitch = message.getNoteNumber();
+                break;
+            }
+        }
     }
     void releaseResources() override {}
     juce::String getName() const override { return "MIDI Pitch Probe"; }
@@ -472,6 +601,26 @@ bool testMasterGraph()
     return expect(approximatelyEqual(buffer.getSample(0, 0), 0.25f)
                       && approximatelyEqual(buffer.getSample(1, 0), 0.25f),
                   "master gain is applied exactly once");
+}
+
+bool testMasterOutputState()
+{
+    TrackDataModel model;
+    AudioEngine engine(&model);
+    AudioEngine::MasterOutputState state;
+    state.gain = 0.5f;
+    state.pan = -0.35f;
+    state.width = 1.6f;
+    state.mono = true;
+    state.dim = true;
+    state.muted = true;
+    engine.setMasterOutputState(state);
+    const auto restored = engine.getMasterOutputState();
+    return expect(approximatelyEqual(restored.gain, 0.5f)
+                  && approximatelyEqual(restored.pan, -0.35f)
+                  && approximatelyEqual(restored.width, 1.6f)
+                  && restored.mono && restored.dim && restored.muted,
+                  "master output controls round-trip through one state bundle");
 }
 
 bool testTransportLoopBoundary()
@@ -663,6 +812,7 @@ bool testProjectPersistence()
     sparseIdFile.deleteFile();
 
     TrackDataModel source;
+    source.setSampleRate(48000.0);
     const auto trackA = source.addTrack(TrackType::audio);
     const auto trackB = source.addTrack(TrackType::externalMidi);
     const auto trackC = source.addTrack(TrackType::instrument);
@@ -681,10 +831,13 @@ bool testProjectPersistence()
     source.setTrackSend(trackB, bus, 0.35f);
     source.setBpm(137.0);
     source.setTimeSignatureNumerator(7);
+    source.setTimeSignatureDenominator(8);
+    source.setTimeSignatureAtSample(192000.0, 6, 8);
     source.clearTempoMap();
     source.addTempoEvent(960.0, 90.0);
     source.setCycle(100.0, 500.0);
     source.setPunchRange(180.0, 420.0);
+    source.addMarker(240.0, "Song A");
     auto audio = std::make_shared<juce::AudioBuffer<float>>(2, 64);
     audio->clear();
     const auto clip = source.addClipToTrack(static_cast<int>(source.getTrackIndex(trackA)),
@@ -695,6 +848,9 @@ bool testProjectPersistence()
     const auto midiClip = source.addMidiClip(trackC, 120.0);
     const auto midiNote = source.addMidiNote(midiClip, 64, 0.75f, 24.0, 96.0, 3);
     if (! expect(midiClip.isValid() && midiNote.isValid(), "MIDI state is created for persistence")) return false;
+    ControlRoutingProfile controlProfile;
+    controlProfile.routes.push_back({ ControlTarget::mic1, ControlEffect::pitchCorrection, trackA, 0, {}, "root", "scale" });
+    if (! expect(source.setControlRoutingProfile(controlProfile).wasOk(), "control routing is accepted for persistence")) return false;
     const auto before = source.createProjectState();
     if (! expect(ProjectSerializer::save(source, projectFile).wasOk(), "project save succeeds")) return false;
 
@@ -704,13 +860,22 @@ bool testProjectPersistence()
     const auto after = loaded.createProjectState();
     if (! expect(after.tracks.size() == before.tracks.size() && after.tempoMap.size() == before.tempoMap.size()
                  && approximatelyEqual(static_cast<float>(after.bpm), static_cast<float>(before.bpm))
-                 && after.timeSignatureNumerator == before.timeSignatureNumerator && after.cycleActive
+                 && after.timeSignatureNumerator == before.timeSignatureNumerator
+                 && after.timeSignatureDenominator == before.timeSignatureDenominator
+                 && after.timeSignatureMap.size() == 2
+                 && after.timeSignatureMap[1].numerator == 6 && after.timeSignatureMap[1].denominator == 8 && after.cycleActive
                  && after.cycleStartSample == before.cycleStartSample && after.cycleEndSample == before.cycleEndSample
                  && after.punchActive && after.punchInSample == before.punchInSample
-                 && after.punchOutSample == before.punchOutSample,
+                 && after.punchOutSample == before.punchOutSample && after.markers.size() == 1
+                 && after.markers[0].samplePosition == 240.0 && after.markers[0].name == "Song A",
                  "transport and project state round-trip")) return false;
     if (! expect(after.tracks[0].id == trackC && after.tracks[1].id == trackA && after.tracks[2].id == trackB,
                  "track order and IDs round-trip")) return false;
+    if (! expect(after.controlRoutingProfile.routes.size() == 1
+                 && after.controlRoutingProfile.routes[0].track == trackA
+                 && after.controlRoutingProfile.routes[0].parameterIdentifier == "root"
+                 && after.controlRoutingProfile.routes[0].secondaryParameterIdentifier == "scale",
+                 "control routing profile round-trips with the project")) return false;
     if (! expect(after.tracks[0].name == "Drums", "track name round-trips")) return false;
     if (! expect(after.tracks[0].type == TrackType::instrument
                  && after.tracks[1].type == TrackType::audio
@@ -935,6 +1100,26 @@ bool testMediaReloadAndRelink()
     return true;
 }
 
+bool testImmediateAudioImportPlaceholder()
+{
+    TrackDataModel model;
+    const auto track = model.addTrack(TrackType::audio);
+    const auto file = juce::File::getSpecialLocation(juce::File::tempDirectory)
+        .getChildFile("studioforge-import-placeholder.wav");
+    const auto clip = model.addUnloadedClipToTrack(model.getTrackIndex(track), file, 960.0, 48000.0);
+    if (! expect(clip.isValid() && model.getTrack(0).clips.size() == 1
+                 && model.getTrack(0).clips.front().durationSamples == 48000.0
+                 && model.getClipMediaStatus(clip) == AudioMediaStatus::Unloaded,
+                 "audio import makes a visible unloaded region before decode")) return false;
+
+    auto decoded = std::make_shared<juce::AudioBuffer<float>>(2, 24000);
+    decoded->clear();
+    return expect(model.setClipMediaResource(clip, file, decoded)
+                      && model.getClipMediaStatus(clip) == AudioMediaStatus::Ready
+                      && model.getTrack(0).clips.front().durationSamples == 48000.0,
+                  "decoded media resolves the existing placeholder without changing timeline duration");
+}
+
 bool testUndoRedoHistory()
 {
     TrackDataModel model;
@@ -994,6 +1179,9 @@ bool testRecordingFoundation()
     recordingFile.deleteFile();
     TrackDataModel model;
     model.ensureTrackCount(1);
+    // The default live track is mono. This test deliberately verifies a
+    // stereo take, so make the intended physical route explicit.
+    model.setTrackInputConfiguration(0, false, false, 0, 2);
     OfflineAudioDevice device;
     AudioEngine engine(&model);
     engine.audioDeviceAboutToStart(&device);
@@ -1071,6 +1259,7 @@ bool testPunchRecordingCapture()
 
     TrackDataModel model;
     model.addTrack(TrackType::audio);
+    model.setTrackInputConfiguration(0, false, false, 0, 2);
     model.setPlaying(true);
     OfflineAudioDevice device;
     AudioEngine engine(&model);
@@ -1138,15 +1327,25 @@ bool testInputMonitoring()
     OfflineAudioDevice device;
     AudioEngine engine(&model);
     engine.audioDeviceAboutToStart(&device);
-    model.setTrackInputMonitoring(0, true);
+    model.setTrackInputConfiguration(0, false, true, 0, 2);
     float inputLeft[4] { 0.1f, 0.2f, 0.3f, 0.4f };
     float inputRight[4] { 0.4f, 0.3f, 0.2f, 0.1f };
     const float* inputs[] { inputLeft, inputRight };
     float outputLeft[4] {}, outputRight[4] {};
     float* outputs[] { outputLeft, outputRight };
     engine.audioDeviceIOCallbackWithContext(inputs, 2, outputs, 2, 4, {});
+    if (! expect(approximatelyEqual(outputLeft[2], 0.0f) && approximatelyEqual(outputRight[2], 0.0f)
+                 && engine.getTrackInputPeak(0) > 0.0f,
+                 "LIVE OFF meters input without routing it to speakers")) return false;
+    engine.setLivePerformanceEnabled(true);
+    engine.audioDeviceIOCallbackWithContext(inputs, 2, outputs, 2, 4, {});
+    if (! expect(approximatelyEqual(outputLeft[2], 0.0f) && approximatelyEqual(outputRight[2], 0.0f),
+                 "Auto/In configuration remains silent until runtime permission is explicitly granted")) return false;
+    model.setTrackMonitorDestination(0, MonitorDestination::master);
+    model.setTrackMonitorPermission(0, true);
+    engine.audioDeviceIOCallbackWithContext(inputs, 2, outputs, 2, 4, {});
     if (! expect(approximatelyEqual(outputLeft[2], 0.2121320f) && approximatelyEqual(outputRight[2], 0.1414213f),
-                 "input monitoring passes selected device input")) return false;
+                 "explicit PA permission passes selected device input")) return false;
     if (! expect(model.getPlayheadPosition() == 0.0,
                  "input monitoring does not move stopped transport")) return false;
     model.setTrackMuted(0, true);
@@ -1157,6 +1356,264 @@ bool testInputMonitoring()
     engine.audioDeviceIOCallbackWithContext(inputs, 2, outputs, 2, 4, {});
     return expect(approximatelyEqual(outputLeft[0], 0.0f) && approximatelyEqual(outputRight[0], 0.0f),
                   "disabled input monitoring produces no stopped-transport audio");
+}
+
+class CallbackSpanProbeEffect final : public AudioEffectProcessor
+{
+public:
+    void prepareToPlay(double, int, int) override {}
+    void processBlock(juce::AudioBuffer<float>& buffer) override
+    {
+        lastBlockSamples.store(buffer.getNumSamples(), std::memory_order_relaxed);
+        ++calls;
+    }
+    void releaseResources() override {}
+    juce::String getName() const override { return "Callback span probe"; }
+
+    std::atomic<int> lastBlockSamples { 0 };
+    std::atomic<int> calls { 0 };
+};
+
+class FixedLatencyImpulseEffect final : public AudioEffectProcessor
+{
+public:
+    void prepareToPlay(double, int, int) override
+    {
+        history = {};
+        writePosition = 0;
+    }
+
+    void processBlock(juce::AudioBuffer<float>& buffer) override
+    {
+        const auto channels = juce::jmin(2, buffer.getNumChannels());
+        for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+        {
+            for (int channel = 0; channel < channels; ++channel)
+            {
+                const auto input = buffer.getSample(channel, sample);
+                buffer.setSample(channel, sample, history[static_cast<size_t>(channel)][static_cast<size_t>(writePosition)]);
+                history[static_cast<size_t>(channel)][static_cast<size_t>(writePosition)] = input;
+            }
+            writePosition = (writePosition + 1) % latencySamples;
+        }
+    }
+
+    void releaseResources() override {}
+    juce::String getName() const override { return "Fixed latency impulse"; }
+    int getLatencySamples() const noexcept override { return latencySamples; }
+
+private:
+    static constexpr int latencySamples = 2;
+    std::array<std::array<float, latencySamples>, 2> history {};
+    int writePosition = 0;
+};
+
+bool testTrackPluginDelayCompensation()
+{
+    TrackDataModel model;
+    model.addTrack(TrackType::audio);
+    model.addTrack(TrackType::audio);
+    model.setFxProcessor(1, 0, std::make_shared<FixedLatencyImpulseEffect>());
+
+    auto impulse = std::make_shared<juce::AudioBuffer<float>>(2, 4);
+    impulse->clear();
+    impulse->setSample(0, 0, 0.25f);
+    impulse->setSample(1, 0, 0.25f);
+    model.addClipToTrack(0, {}, 0.0, impulse);
+    model.addClipToTrack(1, {}, 0.0, impulse);
+
+    OfflineAudioDevice device(4);
+    AudioEngine engine(&model);
+    engine.audioDeviceAboutToStart(&device);
+    model.setPlaying(true);
+    float left[4] {}, right[4] {};
+    float* outputs[] { left, right };
+    engine.audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, 4, {});
+    engine.audioDeviceStopped();
+
+    constexpr auto centredStereoSum = 2.0f * 0.25f * 0.70710678f;
+    return expect(approximatelyEqual(left[0], 0.0f) && approximatelyEqual(right[0], 0.0f)
+                      && approximatelyEqual(left[2], centredStereoSum)
+                      && approximatelyEqual(right[2], centredStereoSum),
+                  "track plugin latency compensation aligns a delayed insert with dry tracks");
+}
+
+bool testAuxOutputLatencyCompensation()
+{
+    TrackDataModel model;
+    const auto directTrack = model.addTrack(TrackType::audio);
+    const auto auxTrack = model.addTrack(TrackType::audio);
+    const auto aux = model.addBus();
+    model.setBusFxProcessor(aux, 0, std::make_shared<FixedLatencyImpulseEffect>());
+    model.setTrackOutputBus(auxTrack, aux);
+
+    auto impulse = std::make_shared<juce::AudioBuffer<float>>(2, 4);
+    impulse->clear();
+    impulse->setSample(0, 0, 0.25f);
+    impulse->setSample(1, 0, 0.25f);
+    model.addClipToTrack(model.getTrackIndex(directTrack), {}, 0.0, impulse);
+    model.addClipToTrack(model.getTrackIndex(auxTrack), {}, 0.0, impulse);
+
+    OfflineAudioDevice device(4);
+    AudioEngine engine(&model);
+    engine.audioDeviceAboutToStart(&device);
+    model.setPlaying(true);
+    float left[4] {}, right[4] {};
+    float* outputs[] { left, right };
+    engine.audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, 4, {});
+    engine.audioDeviceStopped();
+
+    constexpr auto alignedStereoSum = 2.0f * 0.25f * 0.70710678f;
+    return expect(approximatelyEqual(left[0], 0.0f) && approximatelyEqual(right[0], 0.0f)
+                      && approximatelyEqual(left[2], alignedStereoSum)
+                      && approximatelyEqual(right[2], alignedStereoSum),
+                  "Studio PDC aligns a direct track with an AUX-output track that owns latency");
+}
+
+bool testMonitoringPolicyGates()
+{
+    TrackDataModel model;
+    model.addTrack(TrackType::audio);
+    model.addTrack(TrackType::audio);
+    OfflineAudioDevice device;
+    AudioEngine engine(&model);
+    engine.audioDeviceAboutToStart(&device);
+    engine.setLivePerformanceEnabled(true);
+    model.setTrackInputConfiguration(0, false, true, 0, 1);
+    model.setTrackInputConfiguration(1, false, true, 1, 1);
+    model.setTrackMonitorDestination(0, MonitorDestination::master);
+    model.setTrackMonitorDestination(1, MonitorDestination::master);
+    model.setTrackMonitorPermission(0, true);
+    model.setTrackMonitorPermission(1, true);
+    const float inputA[4] { 0.2f, 0.2f, 0.2f, 0.2f };
+    const float inputB[4] { 0.4f, 0.4f, 0.4f, 0.4f };
+    const float* inputs[] { inputA, inputB };
+    float left[4] {}, right[4] {};
+    float* outputs[] { left, right };
+
+    engine.setSoftwareMonitoringEnabled(false);
+    engine.audioDeviceIOCallbackWithContext(inputs, 2, outputs, 2, 4, {});
+    if (! expect(approximatelyEqual(left[0], 0.0f),
+                 "global software-monitor gate silences monitor output without changing track state")) return false;
+    engine.setSoftwareMonitoringEnabled(true);
+    engine.setFocusedMonitorTrack(model.getTrackId(0));
+    engine.setFocusedInputMonitoringEnabled(true);
+    engine.audioDeviceIOCallbackWithContext(inputs, 2, outputs, 2, 4, {});
+    engine.audioDeviceStopped();
+    return expect(approximatelyEqual(left[0], 0.2f * 0.70710678f),
+                  "focused-monitor policy emits only the selected track input");
+}
+
+bool testPluginReceivesExactDeviceCallbackSpan()
+{
+    TrackDataModel model;
+    model.addTrack(TrackType::audio);
+    auto probe = std::make_shared<CallbackSpanProbeEffect>();
+    model.setFxProcessor(0, 0, probe);
+    OfflineAudioDevice device;
+    AudioEngine engine(&model);
+    engine.audioDeviceAboutToStart(&device);
+    engine.setLivePerformanceEnabled(true);
+    model.setTrackInputConfiguration(0, false, true, 0, 1);
+    model.setTrackMonitorDestination(0, MonitorDestination::master);
+    model.setTrackMonitorPermission(0, true);
+
+    float input[4] { 0.2f, 0.2f, 0.2f, 0.2f };
+    const float* inputs[] { input };
+    float outputLeft[4] {}, outputRight[4] {};
+    float* outputs[] { outputLeft, outputRight };
+    engine.audioDeviceIOCallbackWithContext(inputs, 1, outputs, 2, 4, {});
+    if (! expect(probe->calls.load(std::memory_order_relaxed) == 1,
+                 "an insert processes one time per device callback")) return false;
+    if (! expect(probe->lastBlockSamples.load(std::memory_order_relaxed) == 4,
+                 "an insert receives the exact device callback span, not backing-buffer capacity")) return false;
+    return expect(approximatelyEqual(outputLeft[0], 0.2f * 0.70710678f)
+                      && approximatelyEqual(outputRight[0], 0.2f * 0.70710678f),
+                  "the exact-span adapter preserves monitored audio");
+}
+
+bool testLiveInputRunsThroughTrackFx()
+{
+    TrackDataModel model;
+    model.addTrack(TrackType::audio);
+    model.setFxProcessor(0, 0, std::make_shared<GainUtilityProcessor>());
+    OfflineAudioDevice device;
+    AudioEngine engine(&model);
+    engine.audioDeviceAboutToStart(&device);
+    engine.setLivePerformanceEnabled(true);
+    model.setTrackInputConfiguration(0, false, true, 0, 1);
+    model.setTrackMonitorDestination(0, MonitorDestination::master);
+    model.setTrackMonitorPermission(0, true);
+
+    float input[4] { 0.8f, 0.8f, 0.8f, 0.8f };
+    const float* inputs[] { input };
+    float outputLeft[4] {}, outputRight[4] {};
+    float* outputs[] { outputLeft, outputRight };
+    engine.audioDeviceIOCallbackWithContext(inputs, 1, outputs, 2, 4, {});
+    constexpr auto centrePan = 0.70710678f;
+    return expect(approximatelyEqual(outputLeft[0], 0.8f * 0.5f * centrePan)
+                      && approximatelyEqual(outputRight[0], 0.8f * 0.5f * centrePan),
+                  "live input reaches master only after the track insert chain");
+}
+
+bool testInputMonitoringRecoversAfterWeakSource()
+{
+    TrackDataModel model;
+    model.addTrack(TrackType::audio);
+    OfflineAudioDevice device;
+    AudioEngine engine(&model);
+    engine.audioDeviceAboutToStart(&device);
+    engine.setLivePerformanceEnabled(true);
+    model.setTrackInputConfiguration(0, false, true, 0, 1);
+    model.setTrackMonitorDestination(0, MonitorDestination::master);
+    model.setTrackMonitorPermission(0, true);
+
+    float input[4] {};
+    const float* inputs[] { input };
+    float outputLeft[4] {}, outputRight[4] {};
+    float* outputs[] { outputLeft, outputRight };
+    for (int block = 0; block < 4096; ++block)
+    {
+        // Simulates the exact observed source condition: healthy voice level,
+        // then a weak USB input, then healthy level again.  The engine must
+        // never retain/gate the weak state after source samples recover.
+        const auto source = block < 1024 ? 0.80f : block < 3072 ? 0.002f : 0.80f;
+        std::fill(std::begin(input), std::end(input), source);
+        engine.audioDeviceIOCallbackWithContext(inputs, 1, outputs, 2, 4, {});
+        constexpr auto centrePanGain = 0.70710678f;
+        if (! approximatelyEqual(outputLeft[0], source * centrePanGain)
+            || ! approximatelyEqual(outputRight[0], source * centrePanGain))
+            return expect(false, "canonical monitor follows raw input without fading or latching after weak source");
+    }
+    return expect(approximatelyEqual(outputLeft[0], 0.80f * 0.70710678f),
+                  "canonical monitor fully recovers when the raw microphone source recovers");
+}
+
+bool testSparsePhysicalInputRouting()
+{
+    TrackDataModel model;
+    model.addTrack(TrackType::audio);
+    // Only physical Inputs 3 and 4 are enabled. The callback provides them as
+    // compact buffers 0 and 1, which is the exact mapping that used to be
+    // confused with UI list positions.
+    model.setTrackInputConfiguration(0, false, true, 2, 1);
+    OfflineAudioDevice device(4, 4, (1 << 2) | (1 << 3));
+    AudioEngine engine(&model);
+    engine.audioDeviceAboutToStart(&device);
+    engine.setLivePerformanceEnabled(true);
+    model.setTrackMonitorDestination(0, MonitorDestination::master);
+    model.setTrackMonitorPermission(0, true);
+
+    float physicalInput3[4] { 0.31f, 0.32f, 0.33f, 0.34f };
+    float physicalInput4[4] { 0.61f, 0.62f, 0.63f, 0.64f };
+    const float* inputs[] { physicalInput3, physicalInput4 };
+    float outputLeft[4] {}, outputRight[4] {};
+    float* outputs[] { outputLeft, outputRight };
+    engine.audioDeviceIOCallbackWithContext(inputs, 2, outputs, 2, 4, {});
+
+    return expect(approximatelyEqual(outputLeft[2], 0.2333452f)
+                      && approximatelyEqual(outputRight[2], 0.2333452f),
+                  "physical Input 3 maps to compact callback buffer 0 when Inputs 1-2 are disabled");
 }
 
 bool testMidiInputMonitoring()
@@ -1339,6 +1796,33 @@ bool testClipDuplicate()
     return expect(model.undo() && model.getTrack(0).clips.size() == 1, "duplicate is one undoable edit");
 }
 
+bool testMarqueeRangeDeletion()
+{
+    TrackDataModel model;
+    model.addTrack(TrackType::audio);
+    model.addTrack(TrackType::audio);
+    auto source = std::make_shared<juce::AudioBuffer<float>>(2, 100);
+    source->clear();
+    model.addClipToTrack(0, {}, 0.0, source);
+    model.addClipToTrack(1, {}, 0.0, source);
+    model.clearUndoHistory();
+
+    if (! expect(model.deleteAudioRange(30.0, 60.0, 0, 1),
+                 "marquee deletion edits every selected audio lane")) return false;
+    for (size_t track = 0; track < 2; ++track)
+    {
+        const auto& clips = model.getTrack(track).clips;
+        if (! expect(clips.size() == 2 && clips[0].startSample == 0.0
+                     && clips[0].durationSamples == 30.0 && clips[1].startSample == 60.0
+                     && clips[1].sourceOffsetSamples == 60.0 && clips[1].durationSamples == 40.0,
+                     "marquee deletion preserves non-destructive media offsets")) return false;
+    }
+    return expect(model.undo() && model.getTrack(0).clips.size() == 1
+                      && model.getTrack(1).clips.size() == 1
+                      && model.getTrack(0).clips[0].durationSamples == 100.0,
+                  "multi-lane marquee deletion is one undoable edit");
+}
+
 bool testClipCrossfades()
 {
     TrackDataModel model;
@@ -1493,8 +1977,35 @@ bool testWaveformThumbnailCache()
     const auto second = cache.prepare(sourceFile, source);
     if (! expect(first != nullptr && first == second, "duplicate clips reuse one source waveform thumbnail")) return false;
     const auto peak = first->peakForSourceRange(2.0, 3.0);
-    return expect(peak.minimum < -0.74f && peak.maximum <= 0.01f,
-                  "waveform thumbnail maps a clip source offset to prepared source peaks");
+    if (! expect(peak.minimum < -0.74f && peak.maximum <= 0.01f,
+                 "waveform thumbnail maps a clip source offset to prepared source peaks")) return false;
+    const auto energyPeak = first->peakForSourceRange(2.0, 4.0);
+    if (! expect(std::abs(energyPeak.rms() - std::sqrt((0.75f * 0.75f + 0.50f * 0.50f) / 2.0f)) < 0.001f,
+                 "waveform thumbnail aggregates RMS from sample energy rather than averaging amplitudes")) return false;
+
+    auto stereo = std::make_shared<juce::AudioBuffer<float>>(2, 8);
+    stereo->clear();
+    stereo->setSample(0, 4, 0.25f);
+    stereo->setSample(1, 4, -0.90f);
+    const auto stereoThumbnail = cache.prepare(juce::File("C:/StudioForgeTests/stereo.wav"), stereo);
+    if (! expect(stereoThumbnail != nullptr && stereoThumbnail->getDisplayChannelCount() == 2,
+                 "stereo source retains two display channels")) return false;
+    const auto left = stereoThumbnail->peakForSourceRange(4.0, 5.0, 0);
+    const auto right = stereoThumbnail->peakForSourceRange(4.0, 5.0, 1);
+    if (! expect(left.maximum > 0.24f && left.minimum >= -0.01f
+                 && right.minimum < -0.89f && right.maximum <= 0.01f,
+                 "stereo waveform peaks retain independent left and right envelopes")) return false;
+
+    juce::MemoryOutputStream payload;
+    if (! expect(stereoThumbnail->writePersistent(payload), "waveform peak pyramid serialises for disk cache")) return false;
+    juce::MemoryInputStream input(payload.getData(), payload.getDataSize(), false);
+    const auto restored = WaveformThumbnail::readPersistent(input);
+    if (! expect(restored != nullptr && restored->getDisplayChannelCount() == 2,
+                 "waveform peak cache restores a valid stereo payload")) return false;
+    const auto restoredRight = restored->peakForSourceRange(4.0, 5.0, 1);
+    juce::MemoryInputStream corrupt("bad", 3, false);
+    return expect(restoredRight.minimum < -0.89f && WaveformThumbnail::readPersistent(corrupt) == nullptr,
+                  "waveform cache preserves peaks and rejects corrupt payloads");
 }
 
 bool testMasterFxRouting()
@@ -1524,15 +2035,21 @@ bool testMasterFxRouting()
 
 bool testMidiCoreScheduling()
 {
-    MidiClipState clip { { 1 }, { 1 }, 100.0, { { { 1 }, 64, 0.8f, 10.0, 20.0, 2 } } };
+    MidiClipState clip { { 1 }, { 1 }, 100.0, 0.0,
+                         { { { 1 }, 64, 0.8f, 10.0, 20.0, 2 } } };
     MidiEventBuffer events;
     MidiScheduler::scheduleBlock({ clip }, 100.0, 16, events);
     if (! expect(events.size() == 1 && events[0].noteOn && events[0].sampleOffset == 10 && events[0].pitch == 64,
                  "MIDI scheduler emits note-on at clip-relative sample")) return false;
     MidiScheduler::scheduleBlock({ clip }, 120.0, 16, events);
-    return expect(events.size() == 1 && !events[0].noteOn && events[0].sampleOffset == 10
-                  && MidiScheduler::quantizeSample(123.0, 24.0) == 120.0,
-                  "MIDI scheduler emits note-off and quantizes samples");
+    if (! expect(events.size() == 1 && !events[0].noteOn && events[0].sampleOffset == 10
+                    && MidiScheduler::quantizeSample(123.0, 24.0) == 120.0,
+                 "MIDI scheduler emits note-off and quantizes samples")) return false;
+
+    clip.durationSamples = 15.0;
+    MidiScheduler::scheduleBlock({ clip }, 114.0, 4, events);
+    return expect(events.size() == 1 && ! events[0].noteOn && events[0].sampleOffset == 1,
+                  "MIDI trim emits a final note-off at the non-destructive clip boundary");
 }
 
 bool testRealtimeMidiEvents()
@@ -1592,6 +2109,46 @@ bool testMidiClipEditing()
     return expect(model.undo() && model.getMidiClips().front().notes.front().pitch == 60
                   && model.undo() && model.getMidiClips().front().notes.front().startSample == 13.0,
                   "MIDI clip bulk edits retain undo history");
+}
+
+bool testMidiClipArrangementEdits()
+{
+    TrackDataModel model;
+    const auto sourceTrack = model.addTrack(TrackType::instrument);
+    const auto destinationTrack = model.addTrack(TrackType::externalMidi);
+    const auto clip = model.addMidiClip(sourceTrack, 120.0);
+    const auto note = model.addMidiNote(clip, 60, 0.8f, 10.0, 20.0, 1);
+
+    if (! expect(note.isValid() && model.moveMidiClip(clip, destinationTrack, 360.0),
+                 "MIDI clips move atomically between MIDI-compatible tracks")) return false;
+
+    const auto moved = std::find_if(model.getMidiClips().begin(), model.getMidiClips().end(), [clip] (const auto& candidate)
+    {
+        return candidate.id == clip;
+    });
+    if (! expect(moved != model.getMidiClips().end() && moved->trackId == destinationTrack
+                     && moved->startSample == 360.0,
+                 "MIDI clip move preserves its clip identity and note content")) return false;
+
+    const auto duplicate = model.duplicateMidiClip(clip, sourceTrack, 720.0);
+    if (! expect(duplicate.isValid() && model.getMidiClips().size() == 2,
+                 "MIDI clip duplicate creates an independent clip")) return false;
+
+    const auto copied = std::find_if(model.getMidiClips().begin(), model.getMidiClips().end(), [duplicate] (const auto& candidate)
+    {
+        return candidate.id == duplicate;
+    });
+    if (! expect(copied != model.getMidiClips().end() && copied->trackId == sourceTrack
+                     && copied->startSample == 720.0 && copied->notes.size() == 1
+                     && copied->notes.front().id != note,
+                 "MIDI duplication assigns new immutable identities to copied notes")) return false;
+
+    if (! expect(model.setMidiClipDuration(clip, 15.0) && model.getMidiClips().front().durationSamples == 15.0,
+                 "MIDI clip length is an independent non-destructive edit")) return false;
+
+    return expect(model.deleteMidiClip(duplicate) && model.getMidiClips().size() == 1
+                      && model.undo() && model.getMidiClips().size() == 2,
+                  "MIDI clip deletion remains undoable");
 }
 
 bool testMidiInstrumentPath()
@@ -1690,10 +2247,12 @@ bool testMidiFxPersistence()
     juce::MidiBuffer midi;
     midi.addEvent(juce::MidiMessage::noteOn(1, 60, 1.0f), 0);
     rack->processors[0]->processBlock(buffer, midi);
-    juce::MidiBuffer::Iterator iterator(midi);
-    juce::MidiMessage message;
-    int samplePosition = 0;
-    const auto restoredCorrectly = iterator.getNextEvent(message, samplePosition) && message.getNoteNumber() == 67;
+    auto restoredCorrectly = false;
+    for (const auto metadata : midi)
+    {
+        restoredCorrectly = metadata.getMessage().getNoteNumber() == 67;
+        break;
+    }
     projectFile.deleteFile();
     catalogFile.deleteFile();
     return expect(restoredCorrectly, "restored MIDI FX retains its transpose parameter");
@@ -1937,9 +2496,13 @@ int main()
 {
     juce::ScopedJuceInitialiser_GUI juceInitialiser;
     const auto passed = testTrackMixing()
+        && testAudioRegionHitTesting()
+        && testTimelineViewportNavigation()
         && testGlobalScaleContext()
         && testLivePerformanceAssessment()
         && testProjectTemplates()
+        && testStudioForgeControlBridge()
+        && testMusicalKeyNormalization()
         && testPerformanceSetupRouting()
         && testPerformanceSourceChoices()
         && testProjectTemplateStore()
@@ -1952,6 +2515,7 @@ int main()
         && testRecordArmTargetSelection()
         && testProjectRevision()
         && testMasterGraph()
+        && testMasterOutputState()
         && testTransportLoopBoundary()
         && testModelSampleRate()
         && testTrackCapacity()
@@ -1964,12 +2528,21 @@ int main()
         && testAutosaveRecovery()
         && testRecentProjectsStore()
         && testMediaReloadAndRelink()
+        && testImmediateAudioImportPlaceholder()
         && testUndoRedoHistory()
         && testAutomationWriteModes()
         && testRecordingFoundation()
         && testMultiTrackRecording()
         && testPunchRecordingCapture()
+        && testMarqueeRangeDeletion()
+        && testTrackPluginDelayCompensation()
+        && testAuxOutputLatencyCompensation()
+        && testMonitoringPolicyGates()
+        && testPluginReceivesExactDeviceCallbackSpan()
         && testInputMonitoring()
+        && testLiveInputRunsThroughTrackFx()
+        && testInputMonitoringRecoversAfterWeakSource()
+        && testSparsePhysicalInputRouting()
         && testMidiInputMonitoring()
         && testMidiInputRoutesToArmedInstrument()
         && testMidiRecordingFoundation()
@@ -1988,6 +2561,7 @@ int main()
         && testRealtimeMidiEvents()
         && testMidiModelToEngineScheduling()
         && testMidiClipEditing()
+        && testMidiClipArrangementEdits()
         && testMidiInstrumentPath()
         && testTrackTypeCreation()
         && testMidiReachesTrackProcessor()

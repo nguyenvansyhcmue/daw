@@ -3,6 +3,24 @@
 
 namespace
 {
+juce::File bundledVst3Directory()
+{
+    // Product bundles are discovered by format and metadata. The host must
+    // never route a particular product name through a private processor path.
+    const auto executable = juce::File::getSpecialLocation (juce::File::currentApplicationFile);
+    return executable.getParentDirectory().getParentDirectory()
+        .getChildFile ("Resources").getChildFile ("PlugIns").getChildFile ("VST3");
+}
+
+juce::File vst3ProbeExecutable()
+{
+   #if defined(STUDIOFORGE_VST3_PROBE_PATH)
+    return juce::File { STUDIOFORGE_VST3_PROBE_PATH };
+   #else
+    return {};
+   #endif
+}
+
 class PluginScanJob final : public juce::ThreadPoolJob
 {
 public:
@@ -71,23 +89,59 @@ public:
 
     void prepareToPlay(double sampleRate, int samplesPerBlock, int numChannels) override
     {
+        if (instance == nullptr)
+            return;
+
+        // VST3 keeps an independent bus model. setPlayConfigDetails alone
+        // updates JUCE's legacy channel counters but does not guarantee that
+        // the VST3 component has activated matching input/output buses. A
+        // live mono mic is promoted to this canonical stereo track buffer.
+        // Without this explicit negotiation JUCE's VST3 client mapper may be
+        // handed a non-null input bus with null channel pointers.
+        const auto channels = juce::jlimit(1, 2, numChannels);
+        auto layout = instance->getBusesLayout();
+        if (instance->getBusCount(true) > 0)
+            layout.getMainInputChannelSet() = channels == 1 ? juce::AudioChannelSet::mono()
+                                                             : juce::AudioChannelSet::stereo();
+        if (instance->getBusCount(false) > 0)
+            layout.getMainOutputChannelSet() = channels == 1 ? juce::AudioChannelSet::mono()
+                                                              : juce::AudioChannelSet::stereo();
+
         instance->releaseResources();
-        instance->setPlayConfigDetails(numChannels, numChannels, sampleRate, samplesPerBlock);
+        if (! instance->setBusesLayout(layout))
+        {
+            prepared = false;
+            return;
+        }
+
+        instance->enableAllBuses();
+        instance->setPlayConfigDetails(channels, channels, sampleRate, samplesPerBlock);
         instance->prepareToPlay(sampleRate, samplesPerBlock);
+        expectedChannels = channels;
+        prepared = true;
     }
 
     void processBlock(juce::AudioBuffer<float>& buffer) override
     {
+        if (! prepared || instance == nullptr || buffer.getNumChannels() < expectedChannels)
+            return;
         midiBuffer.clear();
         instance->processBlock(buffer, midiBuffer);
     }
 
     void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) override
     {
+        if (! prepared || instance == nullptr || buffer.getNumChannels() < expectedChannels)
+            return;
         instance->processBlock(buffer, midi);
     }
 
-    void releaseResources() override { instance->releaseResources(); }
+    void releaseResources() override
+    {
+        prepared = false;
+        if (instance != nullptr)
+            instance->releaseResources();
+    }
     juce::String getName() const override { return instance->getName(); }
     int getLatencySamples() const noexcept override
     {
@@ -119,40 +173,22 @@ public:
         return true;
     }
 
-    bool applyDetectedKey(int rootNote, bool minor) override
+    bool setParameterValue(const juce::String& identifier, float normalisedValue) override
     {
-        if (instance == nullptr || ! instance->getName().containsIgnoreCase("VibeAutotune"))
-            return false;
-
-        static constexpr std::array<const char*, 12> noteNames {
-            "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
-        };
-        return setParameterText("root", noteNames[static_cast<size_t>(juce::jlimit(0, 11, rootNote))])
-            && setParameterText("scale", minor ? "Natural Minor" : "Major");
-    }
-
-    bool hasEditor() const override
-    {
-        return instance != nullptr && instance->hasEditor();
-    }
-
-    std::unique_ptr<juce::Component> createEditor() override
-    {
-        if (! hasEditor())
-            return {};
-        return std::unique_ptr<juce::Component>(instance->createEditorIfNeeded());
-    }
-
-private:
-    bool setParameterText(const juce::String& identifier, const juce::String& value)
-    {
-        for (auto* parameter : instance->getParameters())
+        if (auto* parameter = findParameter(identifier); parameter != nullptr)
         {
-            auto matches = parameter->getName(128).equalsIgnoreCase(identifier);
-            if (const auto* withId = dynamic_cast<const juce::AudioProcessorParameterWithID*>(parameter); withId != nullptr)
-                matches = matches || withId->getParameterID().equalsIgnoreCase(identifier);
-            if (! matches) continue;
+            parameter->beginChangeGesture();
+            parameter->setValueNotifyingHost(juce::jlimit(0.0f, 1.0f, normalisedValue));
+            parameter->endChangeGesture();
+            return true;
+        }
+        return false;
+    }
 
+    bool setParameterText(const juce::String& identifier, const juce::String& value) override
+    {
+        if (auto* parameter = findParameter(identifier); parameter != nullptr)
+        {
             const auto normalised = juce::jlimit(0.0f, 1.0f, parameter->getValueForText(value));
             parameter->beginChangeGesture();
             parameter->setValueNotifyingHost(normalised);
@@ -162,8 +198,64 @@ private:
         return false;
     }
 
+    juce::String getParameterText(const juce::String& identifier) const override
+    {
+        if (const auto* parameter = findParameter(identifier); parameter != nullptr)
+            return parameter->getCurrentValueAsText();
+        return {};
+    }
+
+    std::vector<EffectParameterDescriptor> getParameterDescriptors() const override
+    {
+        std::vector<EffectParameterDescriptor> descriptors;
+        if (instance == nullptr) return descriptors;
+        descriptors.reserve(static_cast<size_t>(instance->getParameters().size()));
+        for (auto* parameter : instance->getParameters())
+        {
+            if (parameter == nullptr) continue;
+            EffectParameterDescriptor descriptor;
+            descriptor.name = parameter->getName(128);
+            if (const auto* identified = dynamic_cast<const juce::AudioProcessorParameterWithID*>(parameter); identified != nullptr)
+                descriptor.identifier = identified->getParameterID();
+            if (descriptor.identifier.isEmpty()) descriptor.identifier = descriptor.name;
+            descriptors.push_back(std::move(descriptor));
+        }
+        return descriptors;
+    }
+
+    bool hasEditor() const override
+    {
+        return instance != nullptr && instance->hasEditor();
+    }
+
+    std::unique_ptr<juce::Component> createEditor() override
+    {
+        // Never create or re-parent an AppKit plug-in view from the audio or
+        // a worker thread. The caller receives no editor until the UI loop
+        // owns this transition.
+        auto* messageManager = juce::MessageManager::getInstanceWithoutCreating();
+        if (! hasEditor() || messageManager == nullptr || ! messageManager->isThisTheMessageThread())
+            return {};
+        return std::unique_ptr<juce::Component>(instance->createEditorIfNeeded());
+    }
+
+private:
+    juce::AudioProcessorParameter* findParameter(const juce::String& identifier) const
+    {
+        for (auto* parameter : instance->getParameters())
+        {
+            auto matches = parameter->getName(128).equalsIgnoreCase(identifier);
+            if (const auto* withId = dynamic_cast<const juce::AudioProcessorParameterWithID*>(parameter); withId != nullptr)
+                matches = matches || withId->getParameterID().equalsIgnoreCase(identifier);
+            if (matches) return parameter;
+        }
+        return nullptr;
+    }
+
     std::unique_ptr<juce::AudioPluginInstance> instance;
     juce::MidiBuffer midiBuffer;
+    int expectedChannels = 0;
+    bool prepared = false;
 };
 }
 
@@ -172,16 +264,22 @@ PluginHostService::PluginHostService(juce::File catalogFile) : catalog(std::move
     formatManager.addDefaultFormats();
     const auto hasSavedCatalog = catalog.existsAsFile();
     loadCatalogFromDisk();
-   #if JUCE_MAC
+
+    // Scan every product shipped in the application bundle using the same
+    // protected scanner and metadata path as a user-installed VST3.
+    const auto bundledDirectory = bundledVst3Directory();
+    if (bundledDirectory.isDirectory())
+        for (const auto& bundle : bundledDirectory.findChildFiles(juce::File::findDirectories, false, "*.vst3"))
+            scanVst3Async(bundle, {});
+
+   #if !defined(STUDIOFORGE_DISABLE_AUTOMATIC_PLUGIN_SCAN)
+    scanDefaultVst3LocationsAsync();
+   #endif
+   #if !defined(STUDIOFORGE_DISABLE_AUTOMATIC_PLUGIN_SCAN) && JUCE_MAC
     // Populate an empty catalog on first launch only. Re-scanning every launch
     // is costly and can unnecessarily contend with plug-in creation.
     if (! hasSavedCatalog)
         scanAudioUnitsAsync();
-   #else
-    // VST3 is the common cross-platform format. JUCE resolves Windows'
-    // per-user and system Common Files VST3 locations automatically.
-    if (! hasSavedCatalog)
-        scanDefaultVst3LocationsAsync();
    #endif
 }
 
@@ -198,12 +296,74 @@ juce::Result PluginHostService::scanVst3(const juce::File& bundleOrModule)
     if (! bundleOrModule.exists())
         return juce::Result::fail("VST3 file or bundle does not exist");
 
+    // JUCE's VST3 scanner wants the .vst3 bundle on macOS, while callers may
+    // reasonably hand us its executable module (for example a file chooser
+    // or a generated test target). Normalise that form on the control thread.
+    auto scanTarget = bundleOrModule;
+    auto parent = scanTarget.getParentDirectory();
+    for (auto depth = 0; ! scanTarget.hasFileExtension(".vst3") && parent.exists() && depth++ < 8;
+         parent = parent.getParentDirectory())
+    {
+        scanTarget = parent;
+    }
+    if (! scanTarget.hasFileExtension(".vst3"))
+        return juce::Result::fail("Selected file is not inside a VST3 bundle");
+
     auto* vst3Format = findVst3Format();
     if (vst3Format == nullptr)
         return juce::Result::fail("VST3 hosting is not enabled in this build");
-    juce::OwnedArray<juce::PluginDescription> found;
-    if (! knownPlugins.scanAndAddFile(bundleOrModule.getFullPathName(), true, found, *vst3Format))
-        return juce::Result::fail("No VST3 plugin type was found");
+    if (knownPlugins.isListingUpToDate(scanTarget.getFullPathName(), *vst3Format))
+        return juce::Result::ok();
+
+    const auto probe = vst3ProbeExecutable();
+    if (! probe.existsAsFile())
+        return juce::Result::fail("VST3 scanner helper is unavailable in this StudioForge build");
+
+    auto resultDirectory = catalog.getParentDirectory();
+    if (! resultDirectory.createDirectory())
+        return juce::Result::fail("Cannot prepare the VST3 scan result directory");
+    const auto resultFile = resultDirectory.getNonexistentChildFile(".vst3-probe", ".xml", false);
+    if (! resultFile.replaceWithText({}))
+        return juce::Result::fail("Cannot create a protected VST3 scan result file");
+    juce::ChildProcess process;
+    if (! process.start(juce::StringArray { probe.getFullPathName(), scanTarget.getFullPathName(), resultFile.getFullPathName() }))
+        return juce::Result::fail("Could not start the protected VST3 scanner");
+    if (! process.waitForProcessToFinish(15000))
+    {
+        process.kill();
+        resultFile.deleteFile();
+        knownPlugins.addToBlacklist(scanTarget.getFullPathName());
+        saveCatalogToDisk();
+        return juce::Result::fail("VST3 scan timed out and was quarantined: " + scanTarget.getFileName());
+    }
+    if (process.getExitCode() != 0 || ! resultFile.existsAsFile())
+    {
+        const auto exitCode = process.getExitCode();
+        const auto hasResult = resultFile.existsAsFile();
+        knownPlugins.addToBlacklist(scanTarget.getFullPathName());
+        saveCatalogToDisk();
+        resultFile.deleteFile();
+        return juce::Result::fail("VST3 scan failed safely and was quarantined: " + scanTarget.getFileName()
+                                  + " (exit " + juce::String(static_cast<int>(exitCode))
+                                  + ", metadata " + (hasResult ? "present" : "missing") + ")");
+    }
+
+    const auto document = juce::parseXML(resultFile);
+    resultFile.deleteFile();
+    if (document == nullptr || ! document->hasTagName("KNOWNPLUGINS"))
+        return juce::Result::fail("VST3 scanner returned invalid plug-in metadata");
+    auto found = false;
+    for (const auto* element : document->getChildIterator())
+    {
+        juce::PluginDescription description;
+        if (description.loadFromXml(*element))
+        {
+            knownPlugins.addType(description);
+            found = true;
+        }
+    }
+    if (! found)
+        return juce::Result::fail("No VST3 plug-in type was found");
     saveCatalogToDisk();
     return juce::Result::ok();
 }
@@ -220,13 +380,14 @@ juce::Result PluginHostService::scanDefaultVst3Locations()
         return juce::Result::fail("VST3 hosting is not enabled in this build");
 
     const auto candidates = vst3Format->searchPathsForPlugins(vst3Format->getDefaultLocationsToSearch(), true, false);
-    juce::OwnedArray<juce::PluginDescription> found;
-    const juce::ScopedLock lock(catalogLock);
+    juce::StringArray failed;
     for (const auto& candidate : candidates)
-        knownPlugins.scanAndAddFile(candidate, true, found, *vst3Format);
+        if (const auto result = scanVst3(juce::File { candidate }); result.failed())
+            failed.add(result.getErrorMessage());
 
     saveCatalogToDisk();
-    return juce::Result::ok();
+    return failed.isEmpty() ? juce::Result::ok()
+                            : juce::Result::fail("Some VST3 plug-ins were skipped safely: " + failed.joinIntoString(" | "));
 }
 
 void PluginHostService::scanDefaultVst3LocationsAsync(std::function<void(juce::Result)> completion)
@@ -273,15 +434,43 @@ juce::Array<juce::PluginDescription> PluginHostService::findKnownPlugins(const j
 {
     const auto normalisedQuery = query.trim().toLowerCase();
     const auto allPlugins = copyKnownPlugins();
-    if (normalisedQuery.isEmpty())
-        return allPlugins;
 
     juce::Array<juce::PluginDescription> matches;
     for (const auto& plugin : allPlugins)
-        if (plugin.name.toLowerCase().contains(normalisedQuery)
+        if (normalisedQuery.isEmpty()
+            || plugin.name.toLowerCase().contains(normalisedQuery)
             || plugin.category.toLowerCase().contains(normalisedQuery)
             || plugin.manufacturerName.toLowerCase().contains(normalisedQuery))
-            matches.add(plugin);
+        {
+            auto existingIndex = -1;
+            for (int index = 0; index < matches.size(); ++index)
+            {
+                const auto& existing = matches.getReference(index);
+                if (existing.manufacturerName.trim().equalsIgnoreCase(plugin.manufacturerName.trim())
+                    && existing.name.trim().equalsIgnoreCase(plugin.name.trim()))
+                {
+                    existingIndex = index;
+                    break;
+                }
+            }
+
+            if (existingIndex < 0)
+            {
+                matches.add(plugin);
+                continue;
+            }
+
+            // A VST3 entry is the preferred cross-platform route. If both
+            // formats exist, keep the VST3 bundle that actually remains on disk.
+            const auto& existing = matches.getReference(existingIndex);
+            const auto existingIsVst3 = existing.pluginFormatName.equalsIgnoreCase("VST3");
+            const auto candidateIsVst3 = plugin.pluginFormatName.equalsIgnoreCase("VST3");
+            const auto existingExists = existingIsVst3 && juce::File { existing.fileOrIdentifier }.exists();
+            const auto candidateExists = candidateIsVst3 && juce::File { plugin.fileOrIdentifier }.exists();
+            if ((candidateIsVst3 && ! existingIsVst3)
+                || (! existingExists && candidateExists))
+                matches.set(existingIndex, plugin);
+        }
     return matches;
 }
 

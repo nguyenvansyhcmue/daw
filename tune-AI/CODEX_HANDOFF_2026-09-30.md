@@ -39,7 +39,6 @@ Rebuild presentation layer theo `THM_full_app_reference.png` và asset pack Anal
 
 - `ui/main_window.py`
 - `ui/premium_widgets.py`
-- `ui/preset_assets.py`
 - `ui/analog_components.py`
 - `ui/analog_theme.py`
 - `assets/analog/`

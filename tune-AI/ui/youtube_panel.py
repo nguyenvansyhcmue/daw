@@ -10,10 +10,12 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QVBoxLayout,
 )
+from ui.window_chrome import AnalogDialog
 from PyQt6.QtWebEngineWidgets import QWebEngineView
+from ui.analog_dialog_theme import ANALOG_DIALOG_QSS
 
 
-class YouTubeBrowserDialog(QDialog):
+class YouTubeBrowserDialog(AnalogDialog):
     song_matched = pyqtSignal(dict)
     video_changed = pyqtSignal(str, str, str)        # video_id, title, url
     playback_state_changed = pyqtSignal(bool, float) # is_playing, current_time_sec
@@ -55,38 +57,10 @@ class YouTubeBrowserDialog(QDialog):
     # =========================================================
 
     def _build_ui(self):
-        self.setStyleSheet("""
-            QDialog {
-                background: #f4f6fb;
-            }
-            QLabel {
-                color: #111827;
-                font-size: 14px;
-                background: transparent;
-            }
-            QLineEdit {
-                background: white;
-                color: #111827;
-                border: 1px solid #cfd8e3;
-                border-radius: 8px;
-                padding: 8px 10px;
-                font-size: 14px;
-            }
-            QPushButton {
-                background: #e9eef8;
-                color: #111827;
-                border: 1px solid #cfd8e3;
-                border-radius: 8px;
-                padding: 8px 12px;
-                font-size: 13px;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background: #dbe7ff;
-            }
-        """)
+        self.setStyleSheet(ANALOG_DIALOG_QSS)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, self.TITLE_HEIGHT + 8, 12, 12)
 
         top_bar = QHBoxLayout()
         self.btn_back = QPushButton("◀")

@@ -15,6 +15,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from ui.analog_dialog_theme import ANALOG_DIALOG_QSS, apply_analog_message_theme
+from ui.window_chrome import AnalogDialog
 
 SCALE_NAMES = ["--", "Major", "Minor"]
 
@@ -30,8 +32,11 @@ def _thm_silent_message_box(parent, title, text, buttons=None, default_button=No
     msg = QMessageBox(parent)
     msg.setIcon(QMessageBox.Icon.NoIcon)
     msg.setWindowTitle(str(title or ""))
+    msg.setProperty("analogTitle", str(title or ""))
     msg.setText(str(text or ""))
+    msg.setMinimumSize(620, 180)
     msg.setStandardButtons(buttons or QMessageBox.StandardButton.Ok)
+    apply_analog_message_theme(msg)
     if default_button is not None:
         try:
             msg.setDefaultButton(default_button)
@@ -76,7 +81,7 @@ QMessageBox.question = staticmethod(_thm_silent_question)
 
 
 
-class SongEditDialog(QDialog):
+class SongEditDialog(AnalogDialog):
     def __init__(self, controller, parent=None, song_data=None):
         super().__init__(parent)
         self.controller = controller
@@ -84,54 +89,31 @@ class SongEditDialog(QDialog):
 
         self.setWindowTitle("Thông tin bài hát")
         self.setModal(True)
-        self.resize(760, 500)
+        self.resize(760, 540)
 
         self._build_ui()
         self._load_data()
 
     def _build_ui(self):
-        self.setStyleSheet("""
-            QDialog {
-                background: #f7f9fc;
-            }
-            QLabel {
-                color: #111827;
-                font-size: 15px;
-                font-weight: 700;
-                background: transparent;
-            }
-            QLineEdit, QComboBox {
-                background: #ffffff;
-                color: #111827;
-                border: 1px solid #cfd8e3;
-                border-radius: 10px;
-                padding: 10px 12px;
-                font-size: 15px;
-                min-height: 24px;
-            }
-            QPushButton {
-                background: #e9eef8;
-                color: #111827;
-                border: 1px solid #cfd8e3;
-                border-radius: 10px;
-                padding: 10px 18px;
-                font-size: 15px;
-                font-weight: 800;
-            }
-            QPushButton:hover {
-                background: #dbe7ff;
-            }
-        """)
+        self.setStyleSheet(ANALOG_DIALOG_QSS)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 22, 24, 22)
-        layout.setSpacing(18)
+        layout.setContentsMargins(24, self.TITLE_HEIGHT + 10, 24, 22)
+        layout.setSpacing(12)
+
+        heading = QLabel("THÔNG TIN BÀI HÁT")
+        heading.setObjectName("DialogTitle")
+        layout.addWidget(heading)
+
+        caption = QLabel("Thiết lập tone gốc và mốc chuyển tone để áp dụng chính xác khi hát.")
+        caption.setObjectName("DialogCaption")
+        layout.addWidget(caption)
 
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
         form.setHorizontalSpacing(18)
-        form.setVerticalSpacing(16)
+        form.setVerticalSpacing(10)
 
         self.edt_title = QLineEdit()
         self.edt_youtube = QLineEdit()
@@ -233,82 +215,34 @@ class SongEditDialog(QDialog):
         return data
 
 
-class SongManagerDialog(QDialog):
+class SongManagerDialog(AnalogDialog):
     def __init__(self, controller, apply_song_callback, parent=None):
         super().__init__(parent)
         self.controller = controller
         self.apply_song_callback = apply_song_callback
 
         self.setWindowTitle("Danh sách bài hát")
-        self.resize(1320, 760)
+        self.resize(1500, 760)
+        self.setMinimumSize(1180, 620)
         self.setModal(True)
 
         self._build_ui()
         self.load_table()
 
     def _build_ui(self):
-        self.setStyleSheet("""
-            QDialog {
-                background: #f7f9fc;
-            }
-            QLabel {
-                color: #111827;
-                font-size: 15px;
-                font-weight: 800;
-                background: transparent;
-            }
-            QLineEdit {
-                background: #ffffff;
-                color: #111827;
-                border: 1px solid #cfd8e3;
-                border-radius: 10px;
-                padding: 10px 12px;
-                font-size: 15px;
-                min-height: 22px;
-            }
-            QPushButton {
-                background: #e9eef8;
-                color: #111827;
-                border: 1px solid #cfd8e3;
-                border-radius: 10px;
-                padding: 10px 16px;
-                font-size: 15px;
-                font-weight: 800;
-                min-height: 24px;
-            }
-            QPushButton:hover {
-                background: #dbe7ff;
-            }
-            QTableWidget {
-                background: #ffffff;
-                color: #111827;
-                gridline-color: #d9e1ec;
-                font-size: 15px;
-                selection-background-color: #dbe7ff;
-                selection-color: #111827;
-                border: 1px solid #d9e1ec;
-                border-radius: 10px;
-            }
-            QTableWidget::item {
-                padding: 8px;
-                background: #ffffff;
-                color: #111827;
-            }
-            QHeaderView::section {
-                background: #e9eef8;
-                color: #111827;
-                padding: 10px;
-                font-size: 15px;
-                font-weight: 900;
-                border: none;
-                border-right: 1px solid #d9e1ec;
-                border-bottom: 1px solid #d9e1ec;
-            }
-        """)
+        self.setStyleSheet(ANALOG_DIALOG_QSS)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 18)
-        layout.setSpacing(14)
+        layout.setContentsMargins(20, self.TITLE_HEIGHT + 10, 20, 18)
+        layout.setSpacing(12)
+
+        heading = QLabel("THƯ VIỆN BÀI HÁT")
+        heading.setObjectName("DialogTitle")
+        layout.addWidget(heading)
+
+        caption = QLabel("Chọn một bài để hát, hoặc quản lý thông tin tone và thời điểm chuyển tone.")
+        caption.setObjectName("DialogCaption")
+        layout.addWidget(caption)
 
         top_row = QHBoxLayout()
         self.edt_search = QLineEdit()
@@ -317,6 +251,7 @@ class SongManagerDialog(QDialog):
         self.btn_add = QPushButton("Thêm mới")
         self.btn_edit = QPushButton("Sửa")
         self.btn_delete = QPushButton("Xóa")
+        self.btn_delete.setProperty("destructive", True)
 
         self.btn_search.clicked.connect(self.on_search)
         self.btn_add.clicked.connect(self.on_add)
@@ -352,10 +287,10 @@ class SongManagerDialog(QDialog):
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setWordWrap(True)
-        self.table.verticalHeader().setDefaultSectionSize(70)
+        self.table.verticalHeader().setDefaultSectionSize(72)
 
         header = self.table.horizontalHeader()
-        header.setStretchLastSection(False)
+        header.setStretchLastSection(True)
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
 
         layout.addWidget(self.table)
@@ -368,15 +303,11 @@ class SongManagerDialog(QDialog):
         layout.addLayout(bottom_row)
 
     def _apply_column_widths(self):
-        self.table.setColumnWidth(0, 330)
-        self.table.setColumnWidth(1, 250)
-        self.table.setColumnWidth(2, 110)
-        self.table.setColumnWidth(3, 80)
-        self.table.setColumnWidth(4, 90)
-        self.table.setColumnWidth(5, 150)
-        self.table.setColumnWidth(6, 95)
-        self.table.setColumnWidth(7, 100)
-        self.table.setColumnWidth(8, 140)
+        # Keep the full record visible inside the dialog; the final column
+        # absorbs residual width instead of creating a horizontal scrollbar.
+        for index, width in enumerate((300, 220, 92, 70, 82, 130, 86, 92)):
+            self.table.setColumnWidth(index, width)
+        self.table.setColumnWidth(8, 120)
 
     def _make_item(self, text: str, center: bool = False):
         item = QTableWidgetItem(str(text))

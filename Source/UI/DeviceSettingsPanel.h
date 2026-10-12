@@ -24,6 +24,7 @@ private:
     void startLiveCheck();
     void updateLiveCheck();
     void refreshMidiOutputDevices();
+    void refreshStreamOutputDevices();
     juce::String makeInputRoutingKey() const;
 
     AudioEngine& audioEngine;
@@ -36,10 +37,22 @@ private:
     juce::Label autoKeyStatus;
     juce::TabbedComponent settingsTabs { juce::TabbedButtonBar::TabsAtTop };
     juce::Component devicePage;
+    juce::Component monitoringPage;
     juce::Component routingPage;
     juce::AudioDeviceSelectorComponent selector;
     juce::Label midiOutputLabel { {}, "MIDI OUTPUT" };
     juce::ComboBox midiOutputSelector;
+    juce::Label streamOutputLabel { {}, "STREAM OUTPUT" };
+    juce::ComboBox streamOutputSelector;
+    juce::Label streamOutputStatus;
+    juce::Label monitoringHeading { {}, "MONITORING & LATENCY" };
+    juce::Label monitoringHint;
+    juce::ToggleButton softwareMonitoring { "Software monitoring" };
+    juce::ToggleButton focusedInputMonitoring { "Monitor only the focused input track" };
+    juce::ToggleButton lowLatencyMonitoring { "Low Latency Monitoring" };
+    juce::ComboBox pluginDelayCompensation;
+    juce::Label pdcLabel { {}, "Plug-in Delay Compensation" };
+    juce::Label pdcHint;
     juce::Label routingHeading { {}, "TRACK INPUT ROUTING" };
     juce::Label routingHint;
     juce::Viewport routingViewport;
@@ -51,6 +64,9 @@ private:
     juce::String lastSummary;
     juce::String inputRoutingKey;
     juce::String midiOutputDevicesKey;
+    juce::String streamOutputDevicesKey;
+    juce::String audioDeviceListKey;
+    bool audioDeviceListInitialised = false;
     struct LiveCheckRun
     {
         bool active = false;

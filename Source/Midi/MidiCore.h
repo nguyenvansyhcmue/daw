@@ -23,7 +23,12 @@ struct MidiClipState
     MidiClipId id;
     TrackId trackId;
     double startSample = 0.0;
+    // Non-destructive left trim: note times remain in source coordinates.
+    double contentOffsetSamples = 0.0;
     std::vector<MidiNoteEvent> notes;
+    // Zero preserves legacy projects: their extent is derived from notes.
+    // A positive value is an explicit non-destructive right trim boundary.
+    double durationSamples = 0.0;
 };
 
 struct ImportedMidiTrack

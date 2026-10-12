@@ -1,6 +1,17 @@
 #include "StudioForgeLookAndFeel.h"
+#include "BinaryData.h"
 
 #include <cmath>
+
+namespace
+{
+const juce::Image& getAnalogPanKnobImage()
+{
+    static const auto image = juce::ImageFileFormat::loadFrom(BinaryData::analogpanknobv2_png,
+                                                               BinaryData::analogpanknobv2_pngSize);
+    return image;
+}
+}
 
 StudioForgeLookAndFeel::StudioForgeLookAndFeel()
 {
@@ -39,32 +50,33 @@ void StudioForgeLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, i
                                                float sliderPosition, float startAngle, float endAngle, juce::Slider& slider)
 {
     const auto bounds = juce::Rectangle<float>(static_cast<float>(x), static_cast<float>(y), static_cast<float>(width), static_cast<float>(height));
-    const auto radius = juce::jmax(4.0f, juce::jmin(bounds.getWidth(), bounds.getHeight()) * 0.5f - 4.0f);
+    const auto radius = juce::jmax(4.0f, juce::jmin(bounds.getWidth(), bounds.getHeight()) * 0.5f - 2.0f);
     const auto centre = bounds.getCentre();
     // Pan convention: centre is 12 o'clock; left and right move symmetrically
     // toward 10:30 and 1:30, respectively.
+    // A broad 240-degree travel makes the entire -1..+1 PAN range legible.
     const auto angle = -juce::MathConstants<float>::halfPi
-                     + (sliderPosition - 0.5f) * juce::MathConstants<float>::halfPi;
-    const auto socketRadius = radius + 2.0f;
-    g.setColour(StudioForgeTheme::recessedSurface); g.fillEllipse(centre.x - socketRadius, centre.y - socketRadius, socketRadius * 2.0f, socketRadius * 2.0f);
-    g.setColour(juce::Colours::black.withAlpha(0.70f)); g.drawEllipse(centre.x - socketRadius, centre.y - socketRadius, socketRadius * 2.0f, socketRadius * 2.0f, 1.0f);
-    juce::ColourGradient body(juce::Colour(0xff53575a), centre.x - radius * 0.5f, centre.y - radius * 0.7f,
-                              juce::Colour(0xff202326), centre.x + radius, centre.y + radius, true);
-    g.setGradientFill(body); g.fillEllipse(centre.x - radius, centre.y - radius, radius * 2.0f, radius * 2.0f);
-    g.setColour(juce::Colours::white.withAlpha(0.18f)); g.drawEllipse(centre.x - radius + 0.5f, centre.y - radius + 0.5f, radius * 2.0f - 1.0f, radius * 2.0f - 1.0f, 1.0f);
-    g.setColour(juce::Colours::black.withAlpha(0.55f)); g.drawEllipse(centre.x - radius - 0.5f, centre.y - radius - 0.5f, radius * 2.0f + 1.0f, radius * 2.0f + 1.0f, 1.0f);
-    if (slider.isColourSpecified(juce::Slider::rotarySliderFillColourId))
+                     + (sliderPosition - 0.5f) * (juce::MathConstants<float>::pi * 1.333f);
+    const auto& knobImage = getAnalogPanKnobImage();
+    const auto knobBounds = juce::Rectangle<float>(centre.x - radius, centre.y - radius, radius * 2.0f, radius * 2.0f);
+    if (knobImage.isValid())
+        g.drawImageWithin(knobImage, knobBounds.getX(), knobBounds.getY(), knobBounds.getWidth(), knobBounds.getHeight(),
+                          juce::RectanglePlacement::centred);
+    else
     {
-        const auto arcRadius = radius + 3.0f;
-        juce::Path progressArc;
-        progressArc.addCentredArc(centre.x, centre.y, arcRadius, arcRadius, 0.0f, startAngle,
-                                  startAngle + (endAngle - startAngle) * sliderPosition, true);
-        g.setColour(slider.findColour(juce::Slider::rotarySliderFillColourId));
-        g.strokePath(progressArc, juce::PathStrokeType(2.0f));
+        g.setColour(juce::Colour(0xff182126));
+        g.fillEllipse(knobBounds);
+        g.setColour(juce::Colour(0xff7b8b94).withAlpha(0.65f));
+        g.drawEllipse(knobBounds.reduced(1.0f), 1.0f);
     }
-    const auto notchEnd = juce::Point<float>(centre.x + std::cos(angle) * radius * 0.72f, centre.y + std::sin(angle) * radius * 0.72f);
-    g.setColour(StudioForgeTheme::primaryText.withAlpha(0.88f));
-    g.drawLine(centre.x, centre.y, notchEnd.x, notchEnd.y, 1.5f);
+
+    // The physical body is an asset; this small illuminated index remains dynamic.
+    const auto notchStart = juce::Point<float>(centre.x + std::cos(angle) * radius * 0.15f, centre.y + std::sin(angle) * radius * 0.15f);
+    const auto notchEnd = juce::Point<float>(centre.x + std::cos(angle) * radius * 0.62f, centre.y + std::sin(angle) * radius * 0.62f);
+    g.setColour(juce::Colour(0xffdffaff).withAlpha(0.96f));
+    g.drawLine(notchStart.x, notchStart.y, notchEnd.x, notchEnd.y, juce::jmax(1.25f, radius * 0.075f));
+    g.setColour(juce::Colours::black.withAlpha(0.7f));
+    g.fillEllipse(centre.x - radius * 0.09f, centre.y - radius * 0.09f, radius * 0.18f, radius * 0.18f);
 }
 
 void StudioForgeLookAndFeel::drawLinearSlider(juce::Graphics& g, int x, int y, int width, int height,
@@ -72,9 +84,9 @@ void StudioForgeLookAndFeel::drawLinearSlider(juce::Graphics& g, int x, int y, i
 {
     const auto area = juce::Rectangle<float>(static_cast<float>(x), static_cast<float>(y), static_cast<float>(width), static_cast<float>(height));
     const auto proportion = static_cast<float>(slider.valueToProportionOfLength(slider.getValue()));
-    g.setColour(StudioForgeTheme::recessedSurface); g.fillRoundedRectangle(area.reduced(1.0f), StudioForgeTheme::UIMetrics::cornerRadius);
     if (style == juce::Slider::LinearVertical || style == juce::Slider::LinearBarVertical)
     {
+        g.setColour(StudioForgeTheme::recessedSurface); g.fillRoundedRectangle(area.reduced(1.0f), StudioForgeTheme::UIMetrics::cornerRadius);
         const auto trackHeight = area.getHeight() - 18.0f;
         const auto trackY = area.getY() + 9.0f;
         const auto trackX = area.getCentreX() - 2.0f;
@@ -92,8 +104,11 @@ void StudioForgeLookAndFeel::drawLinearSlider(juce::Graphics& g, int x, int y, i
     }
     const auto trackWidth = area.getWidth() * 0.75f;
     const auto trackX = area.getX() + area.getWidth() * 0.125f;
-    g.setColour(juce::Colour(0xff53616d)); g.fillRect(trackX, area.getCentreY() - 1.0f, trackWidth, 2.0f);
+    g.setColour(juce::Colour(0xff10181c));
+    g.fillRoundedRectangle(trackX, area.getCentreY() - 1.5f, trackWidth, 3.0f, 1.5f);
     const auto knobX = juce::jlimit(trackX, trackX + trackWidth, trackX + trackWidth * proportion);
+    g.setColour(juce::Colour(0xff4f9abc));
+    g.fillRoundedRectangle(trackX, area.getCentreY() - 1.0f, juce::jmax(1.0f, knobX - trackX), 2.0f, 1.0f);
     g.setColour(juce::Colour(0xffc5cbd0)); g.fillEllipse(knobX - 5.0f, area.getCentreY() - 5.0f, 10.0f, 10.0f);
 }
 

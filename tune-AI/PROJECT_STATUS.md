@@ -77,13 +77,14 @@ THM_Vocal_Panel/  (root: C:\Users\truye\Documents\toolv2\)
 │   ├── song_manager_dialog.py
 │   └── theme.qss                # Stylesheet (font 9px tối thiểu)
 ├── core/
-│   ├── app_controller.py        # ~1100 dòng — Logic trung tâm
-│   ├── app_state.py
+│   ├── app_controller.py        # Facade điều phối UI → services
 │   ├── constants.py
 │   ├── models.py
 │   └── services/
 │       ├── tone_service.py             # V1 detect tone gốc + Krumhansl
+│       ├── tone_workflow_service.py    # Cache → detect/fix/confirm → MIDI
 │       ├── end_modulation_service.py   # ⭐ V7.15 detect lên tone cuối bài
+│       ├── end_modulation_workflow_service.py # Điều phối luồng lên tone cuối
 │       ├── tone_cache_service.py       # Cache tone + correction history
 │       ├── realtime_tone_service.py    # Mic input realtime
 │       ├── browser_launcher_service.py # ⭐ Launch Brave với CDP flags

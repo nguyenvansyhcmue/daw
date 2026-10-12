@@ -21,7 +21,7 @@ class TrackDataModel final : public juce::ChangeBroadcaster, private juce::Timer
 public:
     // Fixed upper bound keeps every render buffer preallocated before the audio
     // device starts while allowing the full Logic-style visible track list.
-    static constexpr size_t maxTracks = 14;
+    static constexpr size_t maxTracks = 24;
     static constexpr size_t maxBuses = 8;
     // Eight inserts cover a complete live vocal chain while preserving fixed,
     // preallocated realtime snapshots.
@@ -29,7 +29,7 @@ public:
     static constexpr size_t maxFxScenes = 4;
     static constexpr size_t maxSendsPerTrack = 8;
     static constexpr float maximumSendGain = AudioGainRange::maximumSendGain;
-    enum class EditTool { Pointer, Scissors, Eraser };
+    enum class EditTool { Pointer, Scissors, Eraser, Range, Stretch };
 
     struct FxRackSnapshot
     {
@@ -47,6 +47,19 @@ public:
     {
         double samplePosition = 0.0;
         double bpm = 120.0;
+    };
+
+    struct TimeSignatureEvent
+    {
+        double samplePosition = 0.0;
+        int numerator = 4;
+        int denominator = 4;
+    };
+
+    struct Marker
+    {
+        double samplePosition = 0.0;
+        juce::String name;
     };
 
     struct BarBeatInfo
@@ -70,10 +83,14 @@ public:
         std::atomic<bool> armed { false };
         std::atomic<bool> inputMonitoring { false };
         std::atomic<bool> autoInputMonitoring { false };
+        std::atomic<MonitorDestination> monitorDestination { MonitorDestination::off };
+        std::atomic<bool> monitorPermitted { false };
         std::atomic<int> inputChannel { 0 };
         std::atomic<int> inputChannelCount { 1 };
         // Zero accepts all MIDI channels; 1-16 selects one channel.
         std::atomic<int> midiInputChannel { 0 };
+        std::atomic<uint32_t> midiInputDeviceToken { 0 };
+        juce::String midiInputDeviceIdentifier;
         juce::String name;
         std::vector<FxScene> fxScenes;
         std::vector<AudioClipState> clips;
@@ -98,8 +115,10 @@ public:
               solo(other.solo.load()),
               soloSafe(other.soloSafe.load()),
               armed(other.armed.load()), inputMonitoring(other.inputMonitoring.load()),
-              autoInputMonitoring(other.autoInputMonitoring.load()), inputChannel(other.inputChannel.load()),
+              autoInputMonitoring(other.autoInputMonitoring.load()), monitorDestination(other.monitorDestination.load()),
+              monitorPermitted(other.monitorPermitted.load()), inputChannel(other.inputChannel.load()),
               inputChannelCount(other.inputChannelCount.load()), midiInputChannel(other.midiInputChannel.load()),
+              midiInputDeviceToken(other.midiInputDeviceToken.load()), midiInputDeviceIdentifier(other.midiInputDeviceIdentifier),
               name(other.name), fxScenes(other.fxScenes),
               clips(other.clips), outputBus(other.outputBus), sends(other.sends), activeSendCount(other.activeSendCount),
               volumeAutomation(other.volumeAutomation), panAutomation(other.panAutomation), sendAutomation(other.sendAutomation)
@@ -117,9 +136,13 @@ public:
             armed.store(other.armed.load());
             inputMonitoring.store(other.inputMonitoring.load());
             autoInputMonitoring.store(other.autoInputMonitoring.load());
+            monitorDestination.store(other.monitorDestination.load());
+            monitorPermitted.store(other.monitorPermitted.load());
             inputChannel.store(other.inputChannel.load());
             inputChannelCount.store(other.inputChannelCount.load());
             midiInputChannel.store(other.midiInputChannel.load());
+            midiInputDeviceToken.store(other.midiInputDeviceToken.load());
+            midiInputDeviceIdentifier = other.midiInputDeviceIdentifier;
             name = other.name;
             fxScenes = other.fxScenes;
             clips = other.clips;
@@ -151,9 +174,12 @@ public:
         bool armed = false;
         bool inputMonitoring = false;
         bool autoInputMonitoring = false;
+        MonitorDestination monitorDestination = MonitorDestination::off;
+        bool monitorPermitted = false;
         int inputChannel = 0;
         int inputChannelCount = 1;
         int midiInputChannel = 0;
+        uint32_t midiInputDeviceToken = 0;
         const FxRackSnapshot* fxRack = nullptr;
         BusId outputBus;
         std::array<SendRouteSnapshot, maxSendsPerTrack> sends {};
@@ -203,8 +229,14 @@ public:
     double getBpm() const noexcept;
     void setTimeSignatureNumerator(int numerator) noexcept;
     int getTimeSignatureNumerator() const noexcept;
+    void setTimeSignatureDenominator(int denominator) noexcept;
+    int getTimeSignatureDenominator() const noexcept;
+    void setTimeSignatureAtSample(double samplePosition, int numerator, int denominator);
+    TimeSignatureEvent getTimeSignatureAtSample(double samplePosition) const noexcept;
+    const std::vector<TimeSignatureEvent>& getTimeSignatureMap() const noexcept { return timeSignatureMap; }
     void addTempoEvent(double samplePosition, double bpm);
     void clearTempoMap();
+    const std::vector<TempoEvent>& getTempoMap() const noexcept { return tempoMap; }
 
     double getSampleRate() const noexcept
     {
@@ -265,13 +297,28 @@ public:
     void cycleTrackInputMonitoring(size_t index) noexcept;
     void setTrackInputConfiguration(size_t index, bool monitorWhenArmed, bool monitorAlways,
                                     int inputChannel, int inputChannelCount) noexcept;
+    void setTrackMonitorDestination(size_t index, MonitorDestination destination) noexcept;
+    MonitorDestination getTrackMonitorDestination(size_t index) const noexcept;
+    void setTrackMonitorPermission(size_t index, bool permitted) noexcept;
+    void clearTrackMonitorPermissions() noexcept;
+    // Applies a workspace preset to tracks which are already configured for
+    // input monitoring. It deliberately does not turn monitoring on for a
+    // track that was off in the project.
+    void activateConfiguredMonitorRoutes(MonitorDestination destination) noexcept;
     void setTrackMidiInputChannel(size_t index, int midiChannel) noexcept;
     int getTrackMidiInputChannel(size_t index) const noexcept;
+    void setTrackMidiInputDevice(size_t index, const juce::String& identifier);
+    juce::String getTrackMidiInputDevice(size_t index) const;
     bool isTrackInputMonitoring(size_t index) const noexcept;
     int getFirstArmedTrackIndex() const noexcept;
     MidiClipId addMidiClip(TrackId track, double startSample);
     MidiEventId addMidiNote(MidiClipId clip, int pitch, float velocity, double startSample, double durationSamples, int channel);
     MidiClipId addMidiRecording(TrackId track, double startSample, std::vector<MidiNoteEvent> notes);
+    bool moveMidiClip(MidiClipId clip, TrackId destinationTrack, double startSample);
+    MidiClipId duplicateMidiClip(MidiClipId clip, TrackId destinationTrack, double startSample);
+    bool setMidiClipDuration(MidiClipId clip, double durationSamples);
+    bool trimMidiClip(MidiClipId clip, double startSample, double durationSamples);
+    bool deleteMidiClip(MidiClipId clip);
     juce::Result importMidiTracks(const std::vector<ImportedMidiTrack>& tracks, double startSample);
     bool deleteMidiNote(MidiClipId clip, MidiEventId note);
     bool moveMidiNote(MidiClipId clip, MidiEventId note, int pitch, double startSample);
@@ -283,6 +330,9 @@ public:
 
     ClipId addClipToTrack(int trackIndex, const juce::File& file, double startSample,
                           std::shared_ptr<juce::AudioBuffer<float>> loadedBuffer);
+    // Creates a visible, non-playable region while media is decoded off-thread.
+    ClipId addUnloadedClipToTrack(int trackIndex, const juce::File& file, double startSample,
+                                  double durationSamples);
     RealtimeSnapshotRead acquireRealtimeSnapshot() const noexcept;
     const FxRackSnapshot* getFxRackSnapshot(size_t trackIndex) const noexcept;
     void setFxProcessor(size_t trackIndex, size_t slot,
@@ -307,6 +357,8 @@ public:
     double getPunchOutSample() const noexcept;
     void setPunchRange(double inSample, double outSample) noexcept;
     void clearPunchRange() noexcept;
+    void addMarker(double samplePosition, const juce::String& name = {});
+    const std::vector<Marker>& getMarkers() const noexcept { return markers; }
     void splitAudioClip(size_t trackIndex, size_t clipIndex, double splitSample);
     void trimAudioClip(size_t trackIndex, size_t clipIndex, double startSample, double durationSamples);
     void deleteAudioClip(size_t trackIndex, size_t clipIndex);
@@ -314,8 +366,10 @@ public:
     ClipId duplicateAudioClip(ClipId clipId, TrackId destinationTrack, double startSample);
     bool trimAudioClip(ClipId clipId, double startSample, double durationSamples);
     bool deleteAudioClip(ClipId clipId);
+    bool deleteAudioRange(double startSample, double endSample, int firstTrack, int lastTrack);
     bool setClipGain(ClipId clipId, float gain);
     bool setClipFades(ClipId clipId, double fadeInSamples, double fadeOutSamples);
+    bool setClipLoopEnabled(ClipId clipId, bool enabled);
     bool createCrossfadesForTrack(TrackId trackId);
     bool setClipMediaResource(ClipId clipId, const juce::File& sourceFile,
                               std::shared_ptr<juce::AudioBuffer<float>> decodedBuffer);
@@ -332,6 +386,10 @@ public:
     void restoreProjectRevision(uint64_t revision) noexcept { projectRevision.store(revision, std::memory_order_relaxed); }
     ProjectState createProjectState() const;
     juce::Result applyProjectState(const ProjectState& state);
+    const ControlRoutingProfile& getControlRoutingProfile() const noexcept { return controlRoutingProfile; }
+    juce::Result setControlRoutingProfile(ControlRoutingProfile profile);
+    void setLiveKeyReferenceTrack(TrackId track) noexcept;
+    TrackId getLiveKeyReferenceTrack() const noexcept { return liveKeyReferenceTrack; }
     void reclaimRetiredRealtimeSnapshots();
     size_t getRetiredRealtimeSnapshotCount() const noexcept;
 
@@ -342,10 +400,13 @@ private:
         std::vector<BusState> buses;
         std::vector<MidiClipState> midiClips;
         std::vector<TempoEvent> tempo;
+        std::vector<TimeSignatureEvent> timeSignatures;
+        std::vector<Marker> markers;
         std::array<FxRackSnapshot, maxTracks> fxRacks;
         std::array<TrackId, maxTracks> fxRackTrackIds {};
         double bpm = 120.0;
         int timeSignatureNumerator = 4;
+        int timeSignatureDenominator = 4;
         bool cycleActive = false;
         double cycleStartSample = 0.0;
         double cycleEndSample = 0.0;
@@ -363,7 +424,14 @@ private:
     std::atomic<uint64_t> projectRevision { 0 };
     std::atomic<double> bpm { 120.0 };
     std::atomic<int> timeSignatureNumerator { 4 };
+    std::atomic<int> timeSignatureDenominator { 4 };
     std::vector<TempoEvent> tempoMap;
+    std::vector<TimeSignatureEvent> timeSignatureMap;
+    std::vector<Marker> markers;
+    ControlRoutingProfile controlRoutingProfile;
+    TrackId liveKeyReferenceTrack;
+    double quarterNotesAtSample(double samplePosition) const noexcept;
+    double sampleAtQuarterNotes(double quarterNotes) const noexcept;
     void publishAudioClipSnapshot();
     void publishMidiClipSnapshot();
     void publishFxRackSnapshot(size_t trackIndex, std::unique_ptr<const FxRackSnapshot> snapshot);

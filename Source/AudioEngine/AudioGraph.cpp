@@ -1,4 +1,5 @@
 #include "AudioGraph.h"
+#include "../Core/AudioGainRange.h"
 
 #include <cmath>
 
@@ -32,7 +33,7 @@ void AudioGraph::clear() noexcept
 
 void AudioGraph::setMasterGain(float value) noexcept
 {
-    masterGain.store(juce::jlimit(0.0f, 2.0f, value));
+    masterGain.store(juce::jlimit(0.0f, AudioGainRange::maximumChannelGain, value));
 }
 
 float AudioGraph::getMasterGain() const noexcept

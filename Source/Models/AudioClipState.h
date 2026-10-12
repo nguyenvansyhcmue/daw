@@ -22,6 +22,10 @@ struct AudioClipState
     double startSample { 0.0 };
     double durationSamples { 0.0 };
     double sourceOffsetSamples { 0.0 };
+    // A looped region repeats this source window while its timeline length is
+    // extended. Zero means "derive from available source" for old sessions.
+    bool loopEnabled { false };
+    double loopLengthSamples { 0.0 };
     float gain { 1.0f };
     double fadeInSamples { 0.0 };
     double fadeOutSamples { 0.0 };

@@ -18,6 +18,9 @@
 #include "../Plugins/PluginHostService.h"
 #include "../Project/ProjectTemplates.h"
 #include "../Services/TuneAiAnalysisService.h"
+#include "../Control/StudioForgeControlBridge.h"
+#include "../Control/PitchCorrectionIntegrationService.h"
+#include "../Core/WorkspaceModeController.h"
 
 class MainComponent final : public juce::Component, private juce::Timer
 {
@@ -51,6 +54,10 @@ public:
     void requestProjectBounce();
     void requestTuneAiUrlAnalysis();
     void setWorkspaceTrackHeight(int height);
+    // Deterministic support entry point. It is deliberately invoked only by
+    // the explicit command-line switch, never by ordinary launch.
+    void startAutomatedVibeTrace();
+
     bool isInspectorPanelVisible() const noexcept { return inspectorPane.isVisible(); }
     bool isBrowserPanelVisible() const noexcept { return assetBrowser.isVisible(); }
     bool isMixerPanelVisible() const noexcept { return mixerPane.isVisible(); }
@@ -66,9 +73,11 @@ public:
 
 private:
     void selectTrack(int trackIndex);
+    void applyWorkspaceMode(const WorkspaceProfile& profile);
     int getSelectedTrackIndex() const noexcept;
     void configureTrackCreationDialog();
     void enableAvailablePerformanceInputs();
+    void repairAudioTrackInputAssignments();
     void selectAudioInputChannel(int oneBasedChannel);
     void selectAudioOutputChannel(int oneBasedChannel);
     void handleSpaceTransport();
@@ -78,14 +87,21 @@ private:
     void startAudioRecordingsNow(const std::vector<AudioEngine::AudioRecordingTarget>& targets,
                                  double timelineStartSample = -1.0);
     void showRecordingFailure(const juce::Result& result) const;
-    void startTuneAiUrlAnalysis(const juce::String& url);
+    juce::String applyTuneAiKey(const MusicalKey&, bool mic1, bool mic2);
+    void consumeTuneAiKeyBridge();
+    void beginBeatKeyLearning(int trackIndex);
+    void requestWorkspaceMode(WorkspaceMode mode);
+    void setWorkspacePanelsVisible(bool inspector, bool browser, bool mixer, bool pianoRoll);
+    void setPianoRollPanelVisible(bool visible);
     void timerCallback() override;
     juce::File createRecordingDestination() const;
 
     StudioForgeLookAndFeel lookAndFeel;
     TrackDataModel trackDataModel;
     AudioEngine audioEngine { &trackDataModel };
+    StudioForgeControlBridge controlBridge { trackDataModel };
     PluginHostService pluginHost;
+    PitchCorrectionIntegrationService pitchCorrection { trackDataModel, pluginHost, controlBridge };
     TuneAiAnalysisService tuneAiAnalysis;
     ControlBar controlBar { &trackDataModel, &audioEngine };
     ArrangeWindow arrangeWindow { &trackDataModel, &audioEngine };
@@ -100,6 +116,9 @@ private:
     bool countInEnabled = false;
     int countInBars = 1;
     bool recordingCountdownActive = false;
+    // A startup choice is a track-source preference, never an instruction to
+    // disable the remaining physical inputs of the Core Audio device.
+    int preferredStartupInputChannel = 0;
     int pendingRecordingTrack = -1;
     double pendingRecordingStartSample = 0.0;
     juce::File pendingRecordingDestination;
@@ -107,5 +126,20 @@ private:
     double recordingPunchStopSample = -1.0;
     TrackId selectedTrackId;
     bool spaceStopPendingReturn = false;
+    enum class AutoKeyState : uint8_t { idle, learning, locked };
+    AutoKeyState autoKeyState = AutoKeyState::idle;
     uint64_t appliedLiveKeyRevision = 0;
+    double consumedTuneAiKeyPublishedAt = 0.0;
+    PitchCorrectionIntegrationService::Status pitchCorrectionStatus;
+    int pitchCorrectionSetupTicks = 0;
+    int midiDeviceRefreshTicks = 0;
+    WorkspaceMode workspaceMode = WorkspaceMode::studio;
+    std::unique_ptr<WorkspaceModeController> workspaceModeController;
+    bool studioInspectorVisible = true;
+    bool studioMixerVisible = false;
+    bool studioBrowserVisible = false;
+    bool studioPianoRollVisible = false;
+    bool suppressWorkspaceModeCallback = false;
+    bool automatedVibeTraceStarted = false;
+    int studioTrackHeight = 72;
 };

@@ -18,6 +18,17 @@ from core.app_controller import AppController
 from ui.main_window import MainWindow
 
 
+def _studioforge_host_frame(arguments: list[str]) -> tuple[int, int, int, int] | None:
+    if "--studioforge-hosted" not in arguments:
+        return None
+    try:
+        value = arguments[arguments.index("--host-frame") + 1]
+        x, y, width, height = (int(part) for part in value.split(","))
+        return x, y, max(1, width), max(1, height)
+    except (IndexError, ValueError):
+        return None
+
+
 def main():
     # Giúp Windows nhận diện đúng icon app trên taskbar, Alt-Tab và shortcut.
     # Dòng này nên chạy TRƯỚC khi tạo QApplication.
@@ -43,6 +54,9 @@ def main():
 
     controller = AppController()
     window = MainWindow(controller)
+    host_frame = _studioforge_host_frame(sys.argv)
+    if host_frame is not None:
+        window.present_over_studioforge(host_frame)
 
     if icon_path.exists():
         window.setWindowIcon(QIcon(str(icon_path)))

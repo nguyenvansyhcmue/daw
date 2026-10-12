@@ -1,17 +1,17 @@
 {
   "nhac_tre": {
-    "reverb_short": 82,
-    "reverb_long": 0,
-    "echo": 0,
+    "reverb_short": 100,
+    "reverb_long": 100,
+    "echo": 100,
     "mic_vol": 0,
-    "music_vol": 63,
-    "tune": 41
+    "music_vol": 100,
+    "tune": 50
   },
   "bolero": {
-    "reverb_short": 37,
-    "reverb_long": 31,
-    "echo": 26,
-    "mic_vol": 81,
+    "reverb_short": 0,
+    "reverb_long": 100,
+    "echo": 0,
+    "mic_vol": 34,
     "music_vol": 80,
     "tune": 83
   },
@@ -19,7 +19,7 @@
     "reverb_short": 100,
     "reverb_long": 100,
     "echo": 100,
-    "mic_vol": 100,
+    "mic_vol": 1,
     "music_vol": 100,
     "tune": 100
   }

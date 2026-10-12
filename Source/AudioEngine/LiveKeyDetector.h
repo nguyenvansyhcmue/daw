@@ -22,6 +22,9 @@ public:
     // Realtime-safe: only copies a mono mix to a fixed-size FIFO.
     void push(const juce::AudioBuffer<float>& source, int numSamples, double sampleRate) noexcept;
     Result getLatestResult() const noexcept;
+    // Starts a fresh rehearsal pass. The worker owns its history; callers only
+    // publish a generation change and never touch analysis memory.
+    void reset() noexcept;
 
 private:
     void run() override;
@@ -32,4 +35,5 @@ private:
     std::array<float, fifoCapacity> fifoSamples {};
     std::atomic<double> sourceSampleRate { 0.0 };
     std::atomic<uint64_t> packedResult { 0 };
+    std::atomic<uint64_t> resetGeneration { 0 };
 };

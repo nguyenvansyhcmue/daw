@@ -71,6 +71,12 @@ LiveKeyDetector::Result LiveKeyDetector::getLatestResult() const noexcept
              static_cast<float>((packed >> 5u) & 0xffu) / 255.0f, packed >> 13u };
 }
 
+void LiveKeyDetector::reset() noexcept
+{
+    packedResult.store(0, std::memory_order_release);
+    resetGeneration.fetch_add(1, std::memory_order_acq_rel);
+}
+
 void LiveKeyDetector::run()
 {
     std::vector<float> history;
@@ -81,9 +87,26 @@ void LiveKeyDetector::run()
     int candidateHits = 0;
     int confirmedRoot = -1;
     bool confirmedMinor = false;
+    auto observedResetGeneration = resetGeneration.load(std::memory_order_acquire);
     auto lastAnalysis = juce::Time::getMillisecondCounterHiRes();
     while (! threadShouldExit())
     {
+        const auto requestedReset = resetGeneration.load(std::memory_order_acquire);
+        if (requestedReset != observedResetGeneration)
+        {
+            observedResetGeneration = requestedReset;
+            history.clear();
+            candidateRoot = -1;
+            candidateMinor = false;
+            candidateHits = 0;
+            confirmedRoot = -1;
+            confirmedMinor = false;
+            int discardStart1 = 0, discardSize1 = 0, discardStart2 = 0, discardSize2 = 0;
+            fifo.prepareToRead(fifo.getNumReady(), discardStart1, discardSize1,
+                               discardStart2, discardSize2);
+            fifo.finishedRead(discardSize1 + discardSize2);
+            lastAnalysis = juce::Time::getMillisecondCounterHiRes();
+        }
         const auto rate = sourceSampleRate.load(std::memory_order_relaxed);
         if (rate != historyRate)
         {
@@ -106,7 +129,7 @@ void LiveKeyDetector::run()
         {
             lastAnalysis = now;
             const auto result = analyse(history, historyRate, revision);
-            if (result.confidence < 0.45f)
+            if (result.confidence < 0.60f)
             {
                 candidateRoot = -1;
                 candidateHits = 0;

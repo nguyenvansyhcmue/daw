@@ -39,8 +39,12 @@ void MidiScheduler::scheduleBlock(const std::vector<MidiClipState>& clips, doubl
     for (const auto& clip : clips)
         for (const auto& note : clip.notes)
         {
-            const auto on = clip.startSample + note.startSample;
-            const auto off = on + note.durationSamples;
+            const auto on = clip.startSample + note.startSample - clip.contentOffsetSamples;
+            const auto explicitEnd = clip.durationSamples > 0.0
+                ? clip.startSample + clip.durationSamples : std::numeric_limits<double>::max();
+            if (on >= explicitEnd)
+                continue;
+            const auto off = juce::jmin(on + note.durationSamples, explicitEnd);
             if (on >= blockStart && on < blockEnd)
                 destination.add({ clip.trackId, static_cast<int>(on - blockStart), note.pitch, note.velocity, note.channel, true });
             if (off >= blockStart && off < blockEnd)

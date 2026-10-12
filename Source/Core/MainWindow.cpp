@@ -104,7 +104,7 @@ private:
     WindowControlButton close;
 };
 
-MainWindow::MainWindow(const juce::String& name)
+MainWindow::MainWindow(const juce::String& name, bool startAutomatedVibeTrace)
     : juce::DocumentWindow(name,
           juce::Colour(0xff1d1f21),
           juce::DocumentWindow::allButtons)
@@ -146,6 +146,23 @@ MainWindow::MainWindow(const juce::String& name)
     centreWithSize(1600, 920);
     setVisible(true);
     startTimerHz(30);
+    if (startAutomatedVibeTrace && mainComponent != nullptr)
+    {
+        const juce::Component::SafePointer<MainComponent> component(mainComponent);
+        // Wait for AudioEngine::initialise() to open the Core Audio device.
+        // The component then retries native Vibe setup on its normal UI timer
+        // while the packaged plug-in registry completes its asynchronous scan.
+        // A USB/Core Audio device may appear after the app itself has opened.
+        // Retry without mutating the session more than once: MainComponent
+        // owns the idempotence latch and returns until a device and input are
+        // actually ready.
+        for (auto attempt = 0; attempt < 10; ++attempt)
+            juce::Timer::callAfterDelay(800 + attempt * 1000, [component]
+            {
+                if (component != nullptr)
+                    component->startAutomatedVibeTrace();
+            });
+    }
 
 }
 
@@ -235,6 +252,12 @@ bool MainWindow::keyPressed(const juce::KeyPress& key)
         if (key.getKeyCode() == 'i' || key.getKeyCode() == 'I')
         {
             chooseAudioToImport();
+            return true;
+        }
+        if (key.getKeyCode() == 'b' || key.getKeyCode() == 'B')
+        {
+            if (mainComponent != nullptr)
+                mainComponent->setBrowserPanelVisible(! mainComponent->isBrowserPanelVisible());
             return true;
         }
     }
@@ -767,7 +790,10 @@ void MainWindow::showDeviceSettings()
     // The Device tab contains a compact selector form. Keep the utility
     // window close to that content; Track Inputs scrolls independently when
     // a session has many recorded audio channels.
-    options.content->setSize(640, 480);
+    // The JUCE device selector contains its own input/output rows and can
+    // grow beyond the compact utility height. Keep enough room for the final
+    // MIDI-device row instead of clipping its label at the dialog edge.
+    options.content->setSize(640, 620);
     options.launchAsync();
 }
 

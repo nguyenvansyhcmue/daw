@@ -45,6 +45,14 @@ AssetBrowserPane::AssetBrowserPane()
     searchEditor.onTextChange = [this] { refreshSearchResults(); };
     addAndMakeVisible(searchEditor);
 
+    addToTrackButton.onClick = [this]
+    {
+        const auto selectedFile = browser.getHighlightedFile();
+        if (selectedFile.existsAsFile() && onAudioFileActivated != nullptr)
+            onAudioFileActivated(selectedFile);
+    };
+    addAndMakeVisible(addToTrackButton);
+
     for (auto* label : { &previewDetails, &fileDetails })
     {
         label->setColour(juce::Label::textColourId, StudioForgeTheme::secondaryText);
@@ -81,10 +89,18 @@ void AssetBrowserPane::resized()
     presetsTab.setBounds(tabs.removeFromLeft(76).reduced(2));
     goUpButton.setBounds(tabs.removeFromRight(34).reduced(0, 2));
     searchEditor.setBounds(area.removeFromTop(31).reduced(0, 3));
-    auto previewArea = area.removeFromBottom(58);
+    auto previewArea = area.removeFromBottom(82);
+    addToTrackButton.setBounds(previewArea.removeFromBottom(24).reduced(0, 2));
     previewDetails.setBounds(previewArea.removeFromTop(22));
     fileDetails.setBounds(previewArea.removeFromTop(20));
     browser.setBounds(area.reduced(0, 2));
+}
+
+void AssetBrowserPane::focusSearch()
+{
+    grabKeyboardFocus();
+    searchEditor.grabKeyboardFocus();
+    searchEditor.selectAll();
 }
 
 void AssetBrowserPane::fileDoubleClicked(const juce::File& file)

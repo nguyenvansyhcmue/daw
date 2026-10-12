@@ -4,6 +4,7 @@
 PluginBrowserPanel::PluginBrowserPanel(PluginHostService& host, SelectionCallback onSelection)
     : pluginHost(host), onPluginSelected(std::move(onSelection))
 {
+    setSize(preferredWidth, preferredHeight);
     searchBox.setTextToShowWhenEmpty("Search plug-ins", juce::Colours::white.withAlpha(0.38f));
     searchBox.onTextChange = [this] { updateResults(); };
     searchBox.setSelectAllWhenFocused(true);
@@ -29,15 +30,36 @@ PluginBrowserPanel::PluginBrowserPanel(PluginHostService& host, SelectionCallbac
     insertButton.setEnabled(false);
     insertButton.onClick = [this]
     {
+        // A plug-in instantiation can create an audio processor and a native
+        // editor window. Never do that while this modal window is handling its
+        // mouse click: AppKit may otherwise send the tail of the click to a
+        // window that JUCE is in the process of destroying.
         const auto selected = results.getSelectedRow();
-        if (selected >= 0 && selected < plugins.size() && onPluginSelected != nullptr)
-            onPluginSelected(plugins.getReference(selected));
+        const auto description = selected >= 0 && selected < plugins.size()
+            ? plugins.getReference(selected) : juce::PluginDescription {};
+        const auto selectionCallback = onPluginSelected;
         closeWindow();
+
+        if (description.name.isNotEmpty() && selectionCallback != nullptr)
+            juce::MessageManager::callAsync([selectionCallback, description]
+            {
+                selectionCallback(description);
+            });
     };
     cancelButton.onClick = [this] { closeWindow(); };
     addAndMakeVisible(insertButton);
     addAndMakeVisible(cancelButton);
     updateResults();
+
+    // The startup scan may still be running when a user opens an FX slot.
+    // Refresh this view when discovery has caught up; no manual folder browse
+    // is required for normally installed VST3 bundles.
+    const juce::Component::SafePointer<PluginBrowserPanel> safeThis(this);
+    pluginHost.scanDefaultVst3LocationsAsync([safeThis] (juce::Result)
+    {
+        if (safeThis != nullptr)
+            safeThis->updateResults();
+    });
 }
 
 void PluginBrowserPanel::resized()

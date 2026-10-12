@@ -3,11 +3,15 @@
 #include <juce_core/juce_core.h>
 
 #include "../Models/ProjectIdentifiers.h"
+#include "../Control/ControlRoutingProfile.h"
 
 #include <vector>
 #include <array>
 
 enum class TrackType : uint8_t { audio, instrument, externalMidi };
+// Persisted intent only. Runtime permission deliberately belongs to the live
+// model and is never restored from a project file.
+enum class MonitorDestination : uint8_t { off, cue, streamOnly, master };
 
 struct PersistedClipState
 {
@@ -18,6 +22,8 @@ struct PersistedClipState
     double startSample = 0.0;
     double durationSamples = 0.0;
     double sourceOffsetSamples = 0.0;
+    bool loopEnabled = false;
+    double loopLengthSamples = 0.0;
     float gain = 1.0f;
     double fadeInSamples = 0.0;
     double fadeOutSamples = 0.0;
@@ -59,9 +65,12 @@ struct PersistedTrackState
     bool soloSafe = false;
     bool inputMonitoring = false;
     bool autoInputMonitoring = false;
+    MonitorDestination monitorDestination = MonitorDestination::off;
     int inputChannel = 0;
     int inputChannelCount = 1;
     int midiInputChannel = 0;
+    // Empty means All MIDI Inputs. A non-empty value is JUCE's stable device identifier.
+    juce::String midiInputDeviceIdentifier;
     BusId outputBus;
     std::array<SendRoute, maxSends> sends {};
     uint8_t activeSendCount = 0;
@@ -84,6 +93,19 @@ struct PersistedTempoEvent
     double bpm = 120.0;
 };
 
+struct PersistedTimeSignatureEvent
+{
+    double samplePosition = 0.0;
+    int numerator = 4;
+    int denominator = 4;
+};
+
+struct PersistedMarkerState
+{
+    double samplePosition = 0.0;
+    juce::String name;
+};
+
 struct PersistedMidiNoteState
 {
     MidiEventId id;
@@ -99,15 +121,18 @@ struct PersistedMidiClipState
     MidiClipId id;
     TrackId trackId;
     double startSample = 0.0;
+    double contentOffsetSamples = 0.0;
+    double durationSamples = 0.0;
     std::vector<PersistedMidiNoteState> notes;
 };
 
 struct ProjectState
 {
-    static constexpr int formatVersion = 17;
+    static constexpr int formatVersion = 27;
 
     double bpm = 120.0;
     int timeSignatureNumerator = 4;
+    int timeSignatureDenominator = 4;
     bool cycleActive = false;
     double cycleStartSample = 0.0;
     double cycleEndSample = 0.0;
@@ -115,7 +140,11 @@ struct ProjectState
     double punchInSample = 0.0;
     double punchOutSample = 0.0;
     std::vector<PersistedTempoEvent> tempoMap;
+    std::vector<PersistedTimeSignatureEvent> timeSignatureMap;
+    std::vector<PersistedMarkerState> markers;
     std::vector<PersistedBusState> buses;
     std::vector<PersistedTrackState> tracks;
     std::vector<PersistedMidiClipState> midiClips;
+    ControlRoutingProfile controlRoutingProfile;
+    TrackId liveKeyReferenceTrack;
 };

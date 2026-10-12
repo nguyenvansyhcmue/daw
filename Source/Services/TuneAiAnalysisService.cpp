@@ -2,18 +2,33 @@
 
 namespace
 {
-int rootFromName(juce::String name)
+juce::File findPackagedTuneAiBundle()
 {
-    name = name.trim().toUpperCase();
-    static const std::pair<const char*, int> notes[] {
-        { "C", 0 }, { "C#", 1 }, { "DB", 1 }, { "D", 2 }, { "D#", 3 }, { "EB", 3 },
-        { "E", 4 }, { "F", 5 }, { "F#", 6 }, { "GB", 6 }, { "G", 7 }, { "G#", 8 },
-        { "AB", 8 }, { "A", 9 }, { "A#", 10 }, { "BB", 10 }, { "B", 11 }
-    };
-    for (const auto& [label, root] : notes)
-        if (name == label)
-            return root;
-    return -1;
+   #if JUCE_MAC
+    const auto executable = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+    const auto hostBundle = executable.getParentDirectory().getParentDirectory().getParentDirectory();
+    const auto sibling = hostBundle.getParentDirectory().getChildFile("Tune-AI.app");
+    if (sibling.isDirectory())
+        return sibling;
+   #endif
+
+   #if defined(STUDIOFORGE_TUNE_AI_SOURCE_DIR)
+    // Development builds keep the distributable app beside the Tune-AI source.
+    // Release builds use the sibling bundle above, so end users never need a
+    // Python interpreter or virtual environment to launch Auto Key.
+    const auto developmentBundle = juce::File { STUDIOFORGE_TUNE_AI_SOURCE_DIR }
+        .getChildFile("dist")
+        .getChildFile("THM Vocal Panel.app");
+    if (developmentBundle.isDirectory())
+        return developmentBundle;
+   #endif
+
+    return {};
+}
+
+juce::File packagedTuneAiRoot()
+{
+    return findPackagedTuneAiBundle().getChildFile("Contents/Resources/tune-AI");
 }
 
 TuneAiAnalysisService::Result parseResult(const juce::String& output, int exitCode)
@@ -27,11 +42,13 @@ TuneAiAnalysisService::Result parseResult(const juce::String& output, int exitCo
         result.fromCache = object->getProperty("status").toString() == "cached";
         result.title = object->getProperty("title").toString();
         result.confidence = static_cast<float>(object->getProperty("confidence"));
-        result.minor = object->getProperty("scale").toString().containsIgnoreCase("minor");
-        result.rootNote = rootFromName(object->getProperty("key").toString());
+        const auto key = MusicalKey::parse(object->getProperty("key").toString(), object->getProperty("scale").toString());
         result.error = object->getProperty("error").toString();
-        if (result.succeeded && result.rootNote >= 0)
+        if (result.succeeded && key.has_value())
+        {
+            result.key = *key;
             return result;
+        }
         if (result.error.isEmpty()) result.error = "Tune-AI returned an invalid key result.";
         result.succeeded = false;
         return result;
@@ -97,6 +114,9 @@ juce::File TuneAiAnalysisService::findBridgeScript() const
     const auto fromWorkingDirectory = juce::File::getCurrentWorkingDirectory().getChildFile("tune-AI/daw_bridge.py");
     if (fromWorkingDirectory.existsAsFile()) return fromWorkingDirectory;
 
+    const auto fromPackagedApp = packagedTuneAiRoot().getChildFile("daw_bridge.py");
+    if (fromPackagedApp.existsAsFile()) return fromPackagedApp;
+
    #if defined(STUDIOFORGE_TUNE_AI_SOURCE_DIR)
     const auto fromBuildSource = juce::File(STUDIOFORGE_TUNE_AI_SOURCE_DIR).getChildFile("daw_bridge.py");
     if (fromBuildSource.existsAsFile()) return fromBuildSource;
@@ -106,13 +126,66 @@ juce::File TuneAiAnalysisService::findBridgeScript() const
     return sourceRoot.getChildFile("tune-AI/daw_bridge.py");
 }
 
+juce::File TuneAiAnalysisService::findStandaloneAppScript() const
+{
+    const auto bridge = findBridgeScript();
+    return bridge.existsAsFile() ? bridge.getParentDirectory().getChildFile("main.py") : juce::File {};
+}
+
+juce::Result TuneAiAnalysisService::launchStandaloneApp(juce::Rectangle<int> hostBounds) const
+{
+    const auto bundle = findPackagedTuneAiBundle();
+    if (bundle.isDirectory())
+    {
+       #if JUCE_MAC
+        if (! hostBounds.isEmpty())
+        {
+            juce::ChildProcess opener;
+            const auto frame = juce::String(hostBounds.getX()) + "," + juce::String(hostBounds.getY()) + ","
+                             + juce::String(hostBounds.getWidth()) + "," + juce::String(hostBounds.getHeight());
+            if (! opener.start({ "/usr/bin/open", "-a", bundle.getFullPathName(), "--args",
+                                 "--studioforge-hosted", "--host-frame", frame }))
+                return juce::Result::fail("macOS could not start the packaged Tune-AI app.");
+            return juce::Result::ok();
+        }
+       #endif
+        return juce::Process::openDocument(bundle.getFullPathName(), {})
+                   ? juce::Result::ok()
+                   : juce::Result::fail("macOS could not open the packaged Tune-AI app.");
+    }
+
+    const auto app = findStandaloneAppScript();
+    if (! app.existsAsFile())
+        return juce::Result::fail("Tune-AI app was not found beside the StudioForge source.");
+
+    const auto folder = app.getParentDirectory();
+   #if JUCE_WINDOWS
+    const auto venvPython = folder.getChildFile(".venv").getChildFile("Scripts").getChildFile("python.exe");
+   #else
+    const auto venvPython = folder.getChildFile(".venv").getChildFile("bin").getChildFile("python3");
+   #endif
+    const auto interpreter = venvPython.existsAsFile() ? venvPython.getFullPathName() : juce::String("python3");
+    juce::ChildProcess process;
+    auto arguments = juce::StringArray { interpreter, app.getFullPathName() };
+    if (! hostBounds.isEmpty())
+    {
+        arguments.add("--studioforge-hosted");
+        arguments.add("--host-frame");
+        arguments.add(juce::String(hostBounds.getX()) + "," + juce::String(hostBounds.getY()) + ","
+                      + juce::String(hostBounds.getWidth()) + "," + juce::String(hostBounds.getHeight()));
+    }
+    if (! process.start(arguments))
+        return juce::Result::fail("Could not open Tune-AI. Install its Python dependencies first.");
+    return juce::Result::ok();
+}
+
 void TuneAiAnalysisService::analyseYouTubeUrlAsync(juce::String url, Completion completion)
 {
     const auto script = findBridgeScript();
     if (! script.existsAsFile())
     {
         if (completion != nullptr)
-            completion({ false, false, 0, false, 0.0f, {}, "Tune-AI bridge was not found beside this DAW source." });
+            completion({ false, false, {}, 0.0f, {}, "Tune-AI bridge was not found beside this DAW source." });
         return;
     }
     workers.addJob(new TuneAiJob(script, std::move(url), std::move(completion)), true);

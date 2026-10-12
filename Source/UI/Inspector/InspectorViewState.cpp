@@ -24,10 +24,8 @@ juce::String trackInputName(const TrackDataModel::TrackState& track)
         case TrackType::audio:
         {
             const auto format = track.inputChannelCount.load() == 2 ? "Stereo" : "Mono";
-            const auto monitoring = track.inputMonitoring.load() ? "In"
-                : track.autoInputMonitoring.load() ? "Auto" : "Off";
-            return "Input " + juce::String(track.inputChannel.load() + 1) + " (" + format
-                + ")  •  Monitor: " + monitoring;
+            return "Source: Input " + juce::String(track.inputChannel.load() + 1)
+                + " (" + format + ")";
         }
         case TrackType::instrument:   return "Software Instrument";
         case TrackType::externalMidi: return "External MIDI";

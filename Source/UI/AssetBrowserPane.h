@@ -22,6 +22,11 @@ public:
 
     std::function<void(const juce::File&)> onAudioFileActivated;
 
+    // The Browser is a primary creation surface.  Opening it from a shortcut
+    // should put the producer straight into search rather than requiring a
+    // second click on a small text field.
+    void focusSearch();
+
     void paint(juce::Graphics& g) override;
     void resized() override;
 
@@ -47,6 +52,7 @@ private:
     juce::TextButton presetsTab { "PRESETS" };
     juce::TextButton goUpButton { "UP" };
     juce::TextEditor searchEditor;
+    juce::TextButton addToTrackButton { "ADD TO TRACK" };
     juce::Label previewDetails { {}, "No preview selected" };
     juce::Label fileDetails { {}, "file:" };
     juce::String activeCategory { "Loops" };

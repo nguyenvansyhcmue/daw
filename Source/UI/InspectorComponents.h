@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -38,7 +39,7 @@ private:
 class TrackInspectorComponent final : public juce::Component, private juce::Timer
 {
 public:
-    explicit TrackInspectorComponent(TrackDataModel& model);
+    TrackInspectorComponent(TrackDataModel& model, AudioEngine& engine);
     void setSelectedTrack(int trackIndex);
     void paint(juce::Graphics&) override;
     void resized() override;
@@ -49,12 +50,30 @@ private:
     void applyViewState(const InspectorTrackViewState&);
 
     TrackDataModel& trackModel;
+    AudioEngine& audioEngine;
     int selectedTrack = -1;
     juce::Label heading { {}, "TRACK" };
     juce::Label trackName;
     juce::Label inputDetails;
     juce::Label outputDetails;
     juce::ToggleButton recordEnable { "R" }, inputMonitoring { "I" }, mute { "M" }, solo { "S" }, soloSafe { "SAFE" };
+    juce::Label monitorStatus;
+};
+
+class AudioFxSlotButton final : public juce::TextButton
+{
+public:
+    std::function<void()> onContextMenu;
+
+    void mouseUp(const juce::MouseEvent& event) override
+    {
+        if (event.mods.isPopupMenu())
+        {
+            if (onContextMenu != nullptr) onContextMenu();
+            return;
+        }
+        juce::TextButton::mouseUp(event);
+    }
 };
 
 enum class ChannelRole { selectedTrack, stereoOutput };
@@ -74,9 +93,13 @@ private:
     void refreshAudioFx();
     void refreshFxScenes();
     void refreshRouting();
+    const TrackDataModel::FxRackSnapshot* activeFxRack() const noexcept;
+    bool insertAudioFx(size_t slot, std::shared_ptr<AudioEffectProcessor> processor,
+                       int targetTrack = -1);
     void showAudioFxMenu(size_t slot);
     void showPluginBrowser(size_t slot);
     void showPluginEditor(size_t slot);
+    void openPluginEditor(size_t slot);
     BusId busForMenuItem(int itemId) const noexcept;
     void setSendRoute(size_t slot);
     void clearSendRoute(size_t slot);
@@ -96,7 +119,7 @@ private:
     juce::Rectangle<int> sceneBounds;
     juce::Rectangle<int> sendsBounds;
     juce::Rectangle<int> routingBounds;
-    std::array<juce::TextButton, TrackDataModel::maxFxSlots> audioFxSlots;
+    std::array<AudioFxSlotButton, TrackDataModel::maxFxSlots> audioFxSlots;
     juce::Label heading;
     juce::Label fxHeading { {}, "AUDIO FX" };
     juce::TextButton addAudioFx { "+ Add Audio FX" };

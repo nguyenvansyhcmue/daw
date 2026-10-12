@@ -12,6 +12,7 @@ class SettingsService:
 
         self.settings = {
             "ytdlp_cookies_file": "",
+            "audio_onboarding_seen": False,
         }
 
     def load(self):

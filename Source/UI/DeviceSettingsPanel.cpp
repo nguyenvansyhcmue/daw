@@ -3,6 +3,7 @@
 #include "../AudioEngine/AudioEngine.h"
 #include "../AudioEngine/LivePerformanceAssessment.h"
 #include "AudioDeviceErrorLocalizer.h"
+#include "StudioForgeDialog.h"
 #include "Theme/StudioForgeLookAndFeel.h"
 
 namespace
@@ -34,12 +35,12 @@ juce::String liveLatencyText(const AudioEngine::RealtimeDiagnostics& diagnostics
     const auto prefix = diagnostics.callbackLoad >= 0.80f ? "LIVE: engine overload"
         : milliseconds <= 12.0 ? "LIVE READY" : milliseconds <= 20.0 ? "LIVE OK"
         : milliseconds <= 35.0 ? "LIVE: noticeable delay" : "LIVE: delay too high";
-    return juce::String(prefix) + " — round-trip " + juce::String(milliseconds, 1) + " ms"
+    return juce::String(prefix) + " - round-trip " + juce::String(milliseconds, 1) + " ms"
         + " (device " + juce::String(diagnostics.inputLatencySamples + diagnostics.outputLatencySamples)
         + ", plugins " + juce::String(diagnostics.pluginLatencySamples) + " samples; engine "
         + juce::String(callbackPercent) + "%)"
         + (diagnostics.protectedPluginCount > 0
-               ? " — LIVE bypassed " + juce::String(diagnostics.protectedPluginCount) + " high-latency FX"
+               ? " - LIVE bypassed " + juce::String(diagnostics.protectedPluginCount) + " high-latency FX"
                : "");
 }
 }
@@ -73,6 +74,7 @@ DeviceSettingsPanel::DeviceSettingsPanel(AudioEngine& engine, TrackDataModel& mo
 
     settingsTabs.setTabBarDepth(tabBarHeight);
     settingsTabs.addTab("Device", juce::Colour(0xff2a2d31), &devicePage, false);
+    settingsTabs.addTab("Monitoring", juce::Colour(0xff2a2d31), &monitoringPage, false);
     settingsTabs.addTab("Track Inputs", juce::Colour(0xff2a2d31), &routingPage, false);
     addAndMakeVisible(settingsTabs);
     devicePage.addAndMakeVisible(selector);
@@ -93,6 +95,74 @@ DeviceSettingsPanel::DeviceSettingsPanel(AudioEngine& engine, TrackDataModel& mo
         midiOutputDevicesKey.clear();
     };
     devicePage.addAndMakeVisible(midiOutputSelector);
+    streamOutputLabel.setColour(juce::Label::textColourId, StudioForgeTheme::primaryText);
+    streamOutputLabel.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
+    streamOutputLabel.setJustificationType(juce::Justification::centredLeft);
+    streamOutputStatus.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::plain)));
+    streamOutputStatus.setJustificationType(juce::Justification::centredRight);
+    streamOutputSelector.setTooltip("Dedicated virtual output for OBS, TikTok, or streaming software");
+    streamOutputSelector.onChange = [this]
+    {
+        const auto id = streamOutputSelector.getSelectedId();
+        const auto devices = audioEngine.getAvailableAudioOutputDevices();
+        const auto selected = id <= 1 ? juce::String {} : devices[id - 2];
+        if (const auto result = audioEngine.selectStreamOutputDevice(selected); result.failed())
+            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon,
+                                                   "Stream Output", result.getErrorMessage());
+        streamOutputDevicesKey.clear();
+    };
+    devicePage.addAndMakeVisible(streamOutputLabel);
+    devicePage.addAndMakeVisible(streamOutputSelector);
+    devicePage.addAndMakeVisible(streamOutputStatus);
+
+    monitoringHeading.setColour(juce::Label::textColourId, StudioForgeTheme::accentCyan);
+    monitoringHeading.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
+    monitoringHeading.setJustificationType(juce::Justification::centredLeft);
+    monitoringPage.addAndMakeVisible(monitoringHeading);
+    monitoringHint.setText("Track In/Auto states still decide which microphone routes are audible.", juce::dontSendNotification);
+    monitoringHint.setColour(juce::Label::textColourId, StudioForgeTheme::secondaryText);
+    monitoringHint.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::plain)));
+    monitoringHint.setJustificationType(juce::Justification::centredLeft);
+    monitoringPage.addAndMakeVisible(monitoringHint);
+    softwareMonitoring.setTooltip("Global safety gate for all software-monitored microphone routes. Recording and input meters remain available.");
+    softwareMonitoring.onClick = [this]
+    {
+        audioEngine.setSoftwareMonitoringEnabled(softwareMonitoring.getToggleState());
+        audioEngine.saveAudioDeviceState();
+    };
+    monitoringPage.addAndMakeVisible(softwareMonitoring);
+    focusedInputMonitoring.setTooltip("When enabled, only the selected audio track can monitor. Prevents accidental duplicate monitor paths.");
+    focusedInputMonitoring.onClick = [this]
+    {
+        audioEngine.setFocusedInputMonitoringEnabled(focusedInputMonitoring.getToggleState());
+        audioEngine.saveAudioDeviceState();
+    };
+    monitoringPage.addAndMakeVisible(focusedInputMonitoring);
+    lowLatencyMonitoring.setTooltip("LIVE only: protects the monitor path from non-essential plug-ins above its latency budget. Live-essential processors stay active.");
+    lowLatencyMonitoring.onClick = [this]
+    {
+        audioEngine.setLiveLowLatencyProtectionEnabled(lowLatencyMonitoring.getToggleState());
+        audioEngine.saveAudioDeviceState();
+    };
+    monitoringPage.addAndMakeVisible(lowLatencyMonitoring);
+    pdcLabel.setColour(juce::Label::textColourId, StudioForgeTheme::primaryText);
+    pdcLabel.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
+    pdcLabel.setJustificationType(juce::Justification::centredLeft);
+    monitoringPage.addAndMakeVisible(pdcLabel);
+    pluginDelayCompensation.addItem("All paths (Studio)", 1);
+    pluginDelayCompensation.addItem("Off (diagnostic only)", 2);
+    pluginDelayCompensation.setTooltip("Studio PDC aligns direct tracks and active AUX returns. Keep All paths selected for normal mixing.");
+    pluginDelayCompensation.onChange = [this]
+    {
+        audioEngine.setStudioPluginDelayCompensationEnabled(pluginDelayCompensation.getSelectedId() != 2);
+        audioEngine.saveAudioDeviceState();
+    };
+    monitoringPage.addAndMakeVisible(pluginDelayCompensation);
+    pdcHint.setText("LIVE avoids unrelated PDC delay; use Stage/Stream plus Low Latency Monitoring for performance.", juce::dontSendNotification);
+    pdcHint.setColour(juce::Label::textColourId, StudioForgeTheme::secondaryText);
+    pdcHint.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::plain)));
+    pdcHint.setJustificationType(juce::Justification::centredLeft);
+    monitoringPage.addAndMakeVisible(pdcHint);
 
     routingHeading.setText("AUDIO TRACK INPUTS", juce::dontSendNotification);
     routingHeading.setColour(juce::Label::textColourId, StudioForgeTheme::accentCyan);
@@ -164,7 +234,24 @@ void DeviceSettingsPanel::resized()
     auto midiOutputArea = deviceArea.removeFromTop(30);
     midiOutputLabel.setBounds(midiOutputArea.removeFromLeft(105));
     midiOutputSelector.setBounds(midiOutputArea.reduced(0, 2));
+    auto streamOutputArea = deviceArea.removeFromTop(30);
+    streamOutputLabel.setBounds(streamOutputArea.removeFromLeft(105));
+    streamOutputStatus.setBounds(streamOutputArea.removeFromRight(92));
+    streamOutputSelector.setBounds(streamOutputArea.reduced(0, 2));
     selector.setBounds(deviceArea);
+
+    auto monitoringArea = monitoringPage.getLocalBounds().reduced(16);
+    monitoringHeading.setBounds(monitoringArea.removeFromTop(24));
+    monitoringHint.setBounds(monitoringArea.removeFromTop(28));
+    monitoringArea.removeFromTop(8);
+    softwareMonitoring.setBounds(monitoringArea.removeFromTop(28));
+    focusedInputMonitoring.setBounds(monitoringArea.removeFromTop(28));
+    lowLatencyMonitoring.setBounds(monitoringArea.removeFromTop(28));
+    monitoringArea.removeFromTop(12);
+    auto pdcRow = monitoringArea.removeFromTop(32);
+    pdcLabel.setBounds(pdcRow.removeFromLeft(220));
+    pluginDelayCompensation.setBounds(pdcRow.reduced(0, 2));
+    pdcHint.setBounds(monitoringArea.removeFromTop(34));
 
     auto routingArea = routingPage.getLocalBounds().reduced(12);
     routingHeading.setBounds(routingArea.removeFromTop(22));
@@ -205,8 +292,29 @@ void DeviceSettingsPanel::timerCallback()
 {
     localizeAudioDeviceErrors();
     refreshMidiOutputDevices();
+    refreshStreamOutputDevices();
+    juce::String nextAudioDeviceListKey;
+    for (const auto& device : audioEngine.getAvailableAudioOutputDevices())
+        nextAudioDeviceListKey << device << ";";
+    if (audioDeviceListInitialised && nextAudioDeviceListKey != audioDeviceListKey)
+    {
+        // Discovery never changes the active device automatically: a producer
+        // may be recording or performing. JUCE's selector immediately exposes
+        // the new interface for an explicit switch.
+        StudioForgeDialog::showWarning("Audio devices changed",
+                                       "A soundcard was connected or removed. Choose the active interface in Device Settings; monitor routes remain safely off after a device change.");
+    }
+    audioDeviceListKey = std::move(nextAudioDeviceListKey);
+    audioDeviceListInitialised = true;
 
     const auto diagnostics = audioEngine.getRealtimeDiagnostics();
+    softwareMonitoring.setToggleState(audioEngine.isSoftwareMonitoringEnabled(), juce::dontSendNotification);
+    focusedInputMonitoring.setToggleState(audioEngine.isFocusedInputMonitoringEnabled(), juce::dontSendNotification);
+    lowLatencyMonitoring.setToggleState(audioEngine.isLiveLowLatencyProtectionEnabled(), juce::dontSendNotification);
+    lowLatencyMonitoring.setEnabled(audioEngine.isLivePerformanceEnabled());
+    pluginDelayCompensation.setSelectedId(audioEngine.isStudioPluginDelayCompensationEnabled() ? 1 : 2,
+                                          juce::dontSendNotification);
+    pluginDelayCompensation.setEnabled(! audioEngine.isLivePerformanceEnabled());
     const auto currentSummary = "Active: " + juce::String(juce::roundToInt(diagnostics.sampleRate)) + " Hz, "
                               + juce::String(diagnostics.bufferSize) + " samples, "
                               + "input latency " + juce::String(diagnostics.inputLatencySamples) + " samples, "
@@ -232,11 +340,11 @@ void DeviceSettingsPanel::timerCallback()
     if (! audioEngine.isLivePerformanceEnabled())
         autoKeyStatus.setText("AUTO KEY: turn on LIVE to listen to Stereo Out and set VibeAutotune automatically.", juce::dontSendNotification);
     else if (detectedKey.revision == 0)
-        autoKeyStatus.setText("AUTO KEY: listening to Stereo Out; waiting for a stable key…", juce::dontSendNotification);
+        autoKeyStatus.setText("AUTO KEY: listening to Stereo Out; waiting for a stable key...", juce::dontSendNotification);
     else
     {
         autoKeyStatus.setText("AUTO KEY: " + keyName(detectedKey.root, detectedKey.minor)
-                                  + " detected — applied directly to VibeAutotune.",
+                                  + " detected - applied directly to VibeAutotune.",
                               juce::dontSendNotification);
         autoKeyStatus.setColour(juce::Label::textColourId, StudioForgeTheme::accentCyan);
     }
@@ -274,6 +382,32 @@ void DeviceSettingsPanel::refreshMidiOutputDevices()
     midiOutputSelector.setSelectedId(selectedId, juce::dontSendNotification);
 }
 
+void DeviceSettingsPanel::refreshStreamOutputDevices()
+{
+    const auto devices = audioEngine.getAvailableAudioOutputDevices();
+    juce::String key;
+    for (const auto& device : devices) key << device << ";";
+    key << "|" << audioEngine.getStreamOutputDevice() << ":" << static_cast<int>(audioEngine.isStreamOutputConfigured());
+    if (key != streamOutputDevicesKey)
+    {
+        streamOutputDevicesKey = key;
+        streamOutputSelector.clear(juce::dontSendNotification);
+        streamOutputSelector.addItem("Not configured", 1);
+        auto selected = 1;
+        const auto current = audioEngine.getStreamOutputDevice();
+        for (int index = 0; index < devices.size(); ++index)
+        {
+            streamOutputSelector.addItem(devices[index], index + 2);
+            if (devices[index] == current) selected = index + 2;
+        }
+        streamOutputSelector.setSelectedId(selected, juce::dontSendNotification);
+    }
+    const auto connected = audioEngine.isStreamOutputConfigured();
+    streamOutputStatus.setText(connected ? "Connected" : "Not configured", juce::dontSendNotification);
+    streamOutputStatus.setColour(juce::Label::textColourId,
+                                 connected ? StudioForgeTheme::accentCyan : StudioForgeTheme::secondaryText);
+}
+
 void DeviceSettingsPanel::applyLiveOptimizedBuffer()
 {
     if (const auto result = audioEngine.optimiseDeviceForLivePerformance(); result.failed())
@@ -304,9 +438,9 @@ void DeviceSettingsPanel::startLiveCheck()
 
     liveCheck = { true, juce::Time::getMillisecondCounterHiRes(), diagnostics.overloadCount,
                   diagnostics.callbackLoad };
-    liveCheckResult.setText("Checking LIVE stability… keep your normal tracks and FX active.", juce::dontSendNotification);
+    liveCheckResult.setText("Checking LIVE stability... keep your normal tracks and FX active.", juce::dontSendNotification);
     liveCheckResult.setColour(juce::Label::textColourId, StudioForgeTheme::accentCyan);
-    liveCheckButton.setButtonText("CHECKING…");
+    liveCheckButton.setButtonText("CHECKING...");
     liveCheckButton.setEnabled(false);
 }
 
@@ -336,20 +470,20 @@ void DeviceSettingsPanel::updateLiveCheck()
     switch (assessment.rating)
     {
         case LivePerformanceRating::ready:
-            liveCheckResult.setText("PASS — " + juce::String(assessment.roundTripMilliseconds, 1)
+            liveCheckResult.setText("PASS - " + juce::String(assessment.roundTripMilliseconds, 1)
                                         + " ms, peak engine " + juce::String(loadPercent) + "%.",
                                     juce::dontSendNotification);
             liveCheckResult.setColour(juce::Label::textColourId, StudioForgeTheme::accentCyan);
             break;
         case LivePerformanceRating::caution:
-            liveCheckResult.setText("CAUTION — " + juce::String(assessment.roundTripMilliseconds, 1)
+            liveCheckResult.setText("CAUTION - " + juce::String(assessment.roundTripMilliseconds, 1)
                                         + " ms, peak engine " + juce::String(loadPercent)
                                         + "%. Use 128 samples or reduce LIVE FX.",
                                     juce::dontSendNotification);
             liveCheckResult.setColour(juce::Label::textColourId, juce::Colour(0xffe6be65));
             break;
         case LivePerformanceRating::notReady:
-            liveCheckResult.setText("FAIL — overload detected. Raise buffer or remove heavy LIVE FX before performing.",
+            liveCheckResult.setText("FAIL - overload detected. Raise buffer or remove heavy LIVE FX before performing.",
                                     juce::dontSendNotification);
             liveCheckResult.setColour(juce::Label::textColourId, juce::Colour(0xffef7777));
             break;
@@ -376,14 +510,7 @@ juce::String DeviceSettingsPanel::makeInputRoutingKey() const
 
 void DeviceSettingsPanel::refreshInputRouting()
 {
-    juce::Array<int> activeInputIndices;
-    if (const auto* device = audioEngine.getAudioDeviceManager().getCurrentAudioDevice(); device != nullptr)
-    {
-        const auto activeInputs = device->getActiveInputChannels();
-        for (int channel = 0; channel < activeInputs.getHighestBit() + 1; ++channel)
-            if (activeInputs[channel])
-                activeInputIndices.add(channel);
-    }
+    const auto activeInputIndices = audioEngine.getActiveAudioInputChannels();
 
     routingHint.setText(activeInputIndices.isEmpty()
                             ? "Enable interface inputs above, then assign them to each audio track."
@@ -405,15 +532,20 @@ void DeviceSettingsPanel::refreshInputRouting()
                                         juce::dontSendNotification);
         auto& selectorForTrack = trackInputSelectors[index];
         selectorForTrack.clear(juce::dontSendNotification);
-        for (int callbackChannel = 0; callbackChannel < activeInputIndices.size(); ++callbackChannel)
-            selectorForTrack.addItem("Input " + juce::String(activeInputIndices[callbackChannel] + 1), callbackChannel + 1);
+        // ComboBox IDs intentionally encode the physical device channel, not
+        // a compact list position. A device with only Inputs 3 and 4 enabled
+        // must still route to physical 3 and 4.
+        for (const auto physicalChannel : activeInputIndices)
+            selectorForTrack.addItem("Input " + juce::String(physicalChannel + 1), physicalChannel + 1);
 
         const auto selected = track.inputChannel.load(std::memory_order_relaxed) + 1;
-        selectorForTrack.setSelectedId(activeInputIndices.isEmpty() ? 0 : selected, juce::dontSendNotification);
+        selectorForTrack.setSelectedId(activeInputIndices.contains(selected - 1) ? selected : 0,
+                                       juce::dontSendNotification);
         selectorForTrack.setEnabled(! activeInputIndices.isEmpty());
         trackInputFormats[index].setSelectedId(track.inputChannelCount.load(std::memory_order_relaxed), juce::dontSendNotification);
         trackInputFormats[index].setEnabled(! activeInputIndices.isEmpty());
-        trackInputFormats[index].setItemEnabled(2, selected < activeInputIndices.size());
+        trackInputFormats[index].setItemEnabled(2, activeInputIndices.contains(selected - 1)
+                                                   && activeInputIndices.contains(selected));
         const auto monitorMode = track.inputMonitoring.load(std::memory_order_relaxed) ? 3
             : track.autoInputMonitoring.load(std::memory_order_relaxed) ? 2 : 1;
         trackMonitorModes[index].setSelectedId(monitorMode, juce::dontSendNotification);
@@ -429,16 +561,16 @@ void DeviceSettingsPanel::applyTrackInputConfiguration(size_t trackIndex)
     if (selectedInput <= 0)
         return;
     auto inputChannelCount = trackInputFormats[trackIndex].getSelectedId();
-    if (const auto* device = audioEngine.getAudioDeviceManager().getCurrentAudioDevice(); device != nullptr
-        && inputChannelCount == 2
-        && selectedInput >= device->getActiveInputChannels().countNumberOfSetBits())
+    const auto physicalInputChannel = selectedInput - 1;
+    const auto activeInputs = audioEngine.getActiveAudioInputChannels();
+    if (inputChannelCount == 2 && ! activeInputs.contains(physicalInputChannel + 1))
     {
         inputChannelCount = 1;
         trackInputFormats[trackIndex].setSelectedId(1, juce::dontSendNotification);
     }
     const auto monitorMode = trackMonitorModes[trackIndex].getSelectedId();
     trackModel.setTrackInputConfiguration(trackIndex, monitorMode == 2, monitorMode == 3,
-                                          selectedInput - 1, inputChannelCount);
+                                          physicalInputChannel, inputChannelCount);
     inputRoutingKey.clear();
 }
 

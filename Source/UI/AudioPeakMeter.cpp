@@ -78,7 +78,9 @@ void AudioPeakMeter::paint(juce::Graphics& g)
             auto segment = isHorizontal
                 ? juce::Rectangle<float>(lane.getX() + index * segmentExtent, lane.getY(), segmentExtent - 0.55f, lane.getHeight())
                 : juce::Rectangle<float>(lane.getX(), lane.getBottom() - (index + 1) * segmentExtent, lane.getWidth(), segmentExtent - 0.55f);
-            g.setColour(isActive ? meterColour(fraction) : juce::Colour(0xff172126));
+            // Keep the inactive LED wells visible: a dark meter should still
+            // read as hardware rather than disappearing into its enclosure.
+            g.setColour(isActive ? meterColour(fraction) : juce::Colour(0xff243438));
             g.fillRect(segment);
         }
     };

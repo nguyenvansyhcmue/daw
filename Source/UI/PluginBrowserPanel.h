@@ -10,6 +10,9 @@ class PluginBrowserPanel final : public juce::Component,
 public:
     using SelectionCallback = std::function<void(const juce::PluginDescription&)>;
 
+    static constexpr int preferredWidth = 780;
+    static constexpr int preferredHeight = 560;
+
     PluginBrowserPanel(PluginHostService& host, SelectionCallback onSelection);
 
     void resized() override;

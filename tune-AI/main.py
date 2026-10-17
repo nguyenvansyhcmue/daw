@@ -40,6 +40,11 @@ def main():
         pass
 
     app = QApplication(sys.argv)
+    # Tune-AI is a separate, user-facing application when it is opened from
+    # StudioForge.  Do not leave its event loop alive after its final window
+    # has been closed: on macOS that otherwise leaves a misleading Dock icon
+    # even though there is no usable UI on screen.
+    app.setQuitOnLastWindowClosed(True)
     app.setApplicationName("THM Vocal Panel")
     app.setOrganizationName("Truyen Huu Music")
     app.setApplicationDisplayName("THM Vocal Panel")
@@ -62,7 +67,12 @@ def main():
         window.setWindowIcon(QIcon(str(icon_path)))
 
     window.show()
-    sys.exit(app.exec())
+    exit_code = app.exec()
+
+    # ``MainWindow.closeEvent`` owns normal shutdown, but keep this finalizer
+    # as a safety net for Cmd+Q/application-menu quit paths.
+    window.shutdown_services()
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

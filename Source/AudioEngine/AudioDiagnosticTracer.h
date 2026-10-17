@@ -22,15 +22,17 @@ public:
         uint64_t outputMask;
         double sampleRate;
         float inputPeak, secondaryInputPeak, outputPeak, trackPostFxPeak, vibeWetMix, vibeTrackerConfidence, vibeTrackerF0Hz,
-              vibeTrackerInputCents, vibeCorrectionCents;
+              vibeTrackerInputCents, vibeCorrectionCents, pluginPreFxPeak, pluginPostFxPeak;
         uint64_t vibeProtectionCount, vibeOverloadCount;
         uint32_t callbackFrames;
         uint32_t deviceBufferSize;
         uint32_t deviceHash;
-        int input, mode, vibeTrackerDetectedMidiNote, vibeTrackerTargetMidiNote, vibeTrackerOutputMidiNote;
+        int input, mode, vibeTrackerDetectedMidiNote, vibeTrackerTargetMidiNote, vibeTrackerOutputMidiNote,
+            pluginSlot, pluginLatencySamples;
         uint8_t kind, inputChannels, outputChannels, panic, vibeState, vibeTrackerVoiced,
                 vibeRendererCollapsed, vibeRendererExcessive, vibeRendererInvalid,
-                vibeCallbackOverloaded, vibeHardDryRescue;
+                vibeCallbackOverloaded, vibeHardDryRescue, pluginPresent, pluginBypassed,
+                pluginProcessed, pluginSkippedForLatency;
     };
     AudioDiagnosticTracer(); ~AudioDiagnosticTracer() override;
     void start(); void stop(); void markIssue() noexcept { markRequested.store(true, std::memory_order_release); }

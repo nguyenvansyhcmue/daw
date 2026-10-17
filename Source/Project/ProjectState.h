@@ -3,6 +3,7 @@
 #include <juce_core/juce_core.h>
 
 #include "../Models/ProjectIdentifiers.h"
+#include "../Models/TakeFolderState.h"
 #include "../Control/ControlRoutingProfile.h"
 
 #include <vector>
@@ -27,6 +28,15 @@ struct PersistedClipState
     float gain = 1.0f;
     double fadeInSamples = 0.0;
     double fadeOutSamples = 0.0;
+    uint64_t takeGroupId = 0;
+    uint64_t takeId = 0;
+    bool takeActive = true;
+    bool recordedTake = false;
+};
+
+struct PersistedTakeFolderState
+{
+    TakeFolderState state;
 };
 
 struct PersistedAutomationPoint
@@ -46,7 +56,7 @@ struct PersistedAutomationLane
 
 struct PersistedTrackState
 {
-    struct SendRoute { BusId targetBus; float level = 1.0f; bool preFader = false; };
+    struct SendRoute { BusId targetBus; float level = 1.0f; bool preFader = false; bool postFaderBeforePan = false; };
     struct FxSlot
     {
         juce::String persistentIdentifier;
@@ -77,14 +87,17 @@ struct PersistedTrackState
     std::array<FxSlot, maxFxSlots> fxSlots {};
     std::vector<PersistedAutomationLane> automationLanes;
     std::vector<PersistedClipState> clips;
+    std::vector<PersistedTakeFolderState> takeFolders;
 };
 
 struct PersistedBusState
 {
     BusId id;
+    juce::String name;
     float gain = 1.0f;
     bool muted = false;
     std::array<PersistedTrackState::FxSlot, PersistedTrackState::maxFxSlots> fxSlots {};
+    float balance = 0.0f;
 };
 
 struct PersistedTempoEvent
@@ -126,9 +139,33 @@ struct PersistedMidiClipState
     std::vector<PersistedMidiNoteState> notes;
 };
 
+// Kept deliberately independent from a concrete plug-in object. A macro may
+// only be rebound when its exact bus, rack slot and plug-in instance identity
+// still resolve after the project has loaded.
+struct PersistedPerformanceMacroTarget
+{
+    juce::String parameterIdentifier;
+    juce::String displayName;
+    int semantic = 0;
+    float minimum = 0.0f;
+    float maximum = 1.0f;
+};
+
+struct PersistedPerformanceMacroState
+{
+    int macroIndex = -1;
+    int state = 0;
+    float value = 0.0f;
+    BusId bus;
+    int pluginSlot = -1;
+    juce::String displayName;
+    juce::String pluginIdentifier;
+    std::vector<PersistedPerformanceMacroTarget> targets;
+};
+
 struct ProjectState
 {
-    static constexpr int formatVersion = 27;
+    static constexpr int formatVersion = 34;
 
     double bpm = 120.0;
     int timeSignatureNumerator = 4;
@@ -147,4 +184,5 @@ struct ProjectState
     std::vector<PersistedMidiClipState> midiClips;
     ControlRoutingProfile controlRoutingProfile;
     TrackId liveKeyReferenceTrack;
+    std::vector<PersistedPerformanceMacroState> performanceMacros;
 };

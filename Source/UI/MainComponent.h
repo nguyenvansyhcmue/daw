@@ -19,6 +19,8 @@
 #include "../Project/ProjectTemplates.h"
 #include "../Services/TuneAiAnalysisService.h"
 #include "../Control/StudioForgeControlBridge.h"
+#include "../Control/PerformanceMacroService.h"
+#include "../Control/PerformanceSurfaceBridge.h"
 #include "../Control/PitchCorrectionIntegrationService.h"
 #include "../Core/WorkspaceModeController.h"
 
@@ -52,15 +54,20 @@ public:
     void importAudioFile(const juce::File& file);
     juce::Result importMidiFile(const juce::File& file);
     void requestProjectBounce();
+    void requestProjectExport();
+    void requestStemExport();
+    void requestSelectedTrackExport();
+    void requestMidiExport();
     void requestTuneAiUrlAnalysis();
     void setWorkspaceTrackHeight(int height);
     // Deterministic support entry point. It is deliberately invoked only by
     // the explicit command-line switch, never by ordinary launch.
     void startAutomatedVibeTrace();
 
-    bool isInspectorPanelVisible() const noexcept { return inspectorPane.isVisible(); }
-    bool isBrowserPanelVisible() const noexcept { return assetBrowser.isVisible(); }
-    bool isMixerPanelVisible() const noexcept { return mixerPane.isVisible(); }
+    bool isInspectorPanelVisible() const noexcept { return panelLayout.inspector; }
+    bool isBrowserPanelVisible() const noexcept { return panelLayout.browser; }
+    bool isMixerPanelVisible() const noexcept { return panelLayout.mixer; }
+    bool isStartupWorkflowVisible() const noexcept { return startupWorkflow.isVisible(); }
     void showWorkspace() noexcept { startupWorkflow.setVisible(false); }
     void showInitialTrackCreation();
     void setRecentProjects(juce::StringArray paths) { startupWorkflow.setRecentProjects(std::move(paths)); }
@@ -70,6 +77,7 @@ public:
 
     TrackDataModel& getTrackDataModel() noexcept { return trackDataModel; }
     AudioEngine& getAudioEngine() noexcept { return audioEngine; }
+    PerformanceMacroService& getPerformanceMacros() noexcept { return performanceMacros; }
 
 private:
     void selectTrack(int trackIndex);
@@ -91,15 +99,26 @@ private:
     void consumeTuneAiKeyBridge();
     void beginBeatKeyLearning(int trackIndex);
     void requestWorkspaceMode(WorkspaceMode mode);
+    struct PanelLayoutState
+    {
+        bool inspector = false;
+        bool browser = false;
+        bool mixer = false;
+        bool pianoRoll = false;
+    };
+    void applyPanelLayout(PanelLayoutState next, bool updateStudioSnapshot);
     void setWorkspacePanelsVisible(bool inspector, bool browser, bool mixer, bool pianoRoll);
     void setPianoRollPanelVisible(bool visible);
     void timerCallback() override;
     juce::File createRecordingDestination() const;
+    void requestOfflineRender(const juce::String& chooserTitle, const juce::String& errorTitle);
 
     StudioForgeLookAndFeel lookAndFeel;
     TrackDataModel trackDataModel;
     AudioEngine audioEngine { &trackDataModel };
     StudioForgeControlBridge controlBridge { trackDataModel };
+    PerformanceMacroService performanceMacros { trackDataModel };
+    PerformanceSurfaceBridge performanceSurfaceBridge { trackDataModel, performanceMacros };
     PluginHostService pluginHost;
     PitchCorrectionIntegrationService pitchCorrection { trackDataModel, pluginHost, controlBridge };
     TuneAiAnalysisService tuneAiAnalysis;
@@ -135,10 +154,11 @@ private:
     int midiDeviceRefreshTicks = 0;
     WorkspaceMode workspaceMode = WorkspaceMode::studio;
     std::unique_ptr<WorkspaceModeController> workspaceModeController;
-    bool studioInspectorVisible = true;
-    bool studioMixerVisible = false;
-    bool studioBrowserVisible = false;
-    bool studioPianoRollVisible = false;
+    // This is the single source of truth for dock visibility. Components are
+    // projections of this value; reading their incidental visible flags while
+    // workspace transitions are in progress caused stale View-menu ticks.
+    PanelLayoutState panelLayout { true, false, false, false };
+    PanelLayoutState studioPanelLayout { true, false, false, false };
     bool suppressWorkspaceModeCallback = false;
     bool automatedVibeTraceStarted = false;
     int studioTrackHeight = 72;

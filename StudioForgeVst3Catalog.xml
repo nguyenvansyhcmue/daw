@@ -3,7 +3,7 @@
 <KNOWNPLUGINS>
   <PLUGIN name="StudioForge VST3 Test Effect v2" format="VST3" category="Fx"
           manufacturer="StudioForge" version="1.0.0" file="/Users/hiimdrdey/code/daw/build-macos-tests/StudioForgeVst3TestEffect_artefacts/Debug/VST3/StudioForge VST3 Test Effect v2.vst3"
-          uniqueId="bdeffe7b" isInstrument="0" fileTime="1a11ba1ae2c" infoUpdateTime="1a12ac054da"
+          uniqueId="bdeffe7b" isInstrument="0" fileTime="1a11ba1ae2c" infoUpdateTime="1a146180d60"
           numInputs="0" numOutputs="0" isShell="0" hasARAExtension="0"
           uid="c4525dc9"/>
 </KNOWNPLUGINS>

@@ -4,6 +4,10 @@
 
 namespace
 {
+constexpr juce::int64 maximumMidiFileBytes = 64LL * 1024 * 1024;
+constexpr int maximumMidiTracks = 1024;
+constexpr size_t maximumImportedNotes = 250000;
+
 double timestampToSamples(double timestamp, short timeFormat, double sampleRate, double bpm) noexcept
 {
     if (timeFormat > 0)
@@ -25,6 +29,8 @@ juce::Result MidiFileImporter::read(const juce::File& file,
     destination.clear();
     if (! file.existsAsFile())
         return juce::Result::fail("The selected MIDI file does not exist.");
+    if (file.getSize() > maximumMidiFileBytes)
+        return juce::Result::fail("The selected MIDI file is too large to import safely.");
 
     auto stream = file.createInputStream();
     if (stream == nullptr)
@@ -33,10 +39,13 @@ juce::Result MidiFileImporter::read(const juce::File& file,
     juce::MidiFile midiFile;
     if (! midiFile.readFrom(*stream) || midiFile.getNumTracks() == 0)
         return juce::Result::fail("The selected file is not a readable Standard MIDI file.");
+    if (midiFile.getNumTracks() > maximumMidiTracks)
+        return juce::Result::fail("The MIDI file contains too many tracks to import safely.");
 
     const auto sampleRate = juce::jmax(1.0, targetSampleRate);
     const auto bpm = juce::jlimit(20.0, 400.0, targetBpm);
     const auto timeFormat = midiFile.getTimeFormat();
+    size_t importedNoteCount = 0;
 
     for (int trackIndex = 0; trackIndex < midiFile.getNumTracks(); ++trackIndex)
     {
@@ -69,6 +78,11 @@ juce::Result MidiFileImporter::read(const juce::File& file,
 
             const auto start = timestampToSamples(message.getTimeStamp(), timeFormat, sampleRate, bpm);
             const auto end = timestampToSamples(event->noteOffObject->message.getTimeStamp(), timeFormat, sampleRate, bpm);
+            if (++importedNoteCount > maximumImportedNotes)
+            {
+                destination.clear();
+                return juce::Result::fail("The MIDI file contains too many notes to import safely.");
+            }
             imported.notes.push_back({ {}, message.getNoteNumber(), message.getFloatVelocity(),
                                        juce::jmax(0.0, start), juce::jmax(1.0, end - start), message.getChannel() });
         }

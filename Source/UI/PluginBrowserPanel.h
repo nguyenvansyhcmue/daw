@@ -10,11 +10,14 @@ class PluginBrowserPanel final : public juce::Component,
 public:
     using SelectionCallback = std::function<void(const juce::PluginDescription&)>;
 
-    static constexpr int preferredWidth = 780;
-    static constexpr int preferredHeight = 560;
+    // Compact insert browser, sized like a DAW slot popover rather than a
+    // separate full-size utility window.
+    static constexpr int preferredWidth = 248;
+    static constexpr int preferredHeight = 380;
 
     PluginBrowserPanel(PluginHostService& host, SelectionCallback onSelection);
 
+    void paint(juce::Graphics& g) override;
     void resized() override;
 
 private:

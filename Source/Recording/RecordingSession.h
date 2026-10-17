@@ -38,6 +38,7 @@ private:
         std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> writer;
         juce::AudioBuffer<float> captureBuffer;
         juce::File destinationFile;
+        juce::File temporaryFile;
         size_t targetTrack = 0;
         double targetStartSample = 0.0;
         int sourceInputChannel = 0;

@@ -154,6 +154,7 @@ target_sources(StudioForgeDAW PRIVATE
     Source/Project/ProjectTemplates.cpp
     Source/Project/ProjectTemplateStore.cpp
     Source/Project/ProjectAlternativeStore.cpp
+    Source/Project/ProjectBackupStore.cpp
     Source/Project/RecentProjectsStore.cpp
     Source/Project/AutosaveService.cpp
     Source/Media/MediaReloadService.cpp
@@ -162,6 +163,10 @@ target_sources(StudioForgeDAW PRIVATE
     Source/Media/Waveform/WaveformCacheStore.cpp
     Source/Recording/RecordingSession.cpp
     Source/Control/ControlRoutingProfile.cpp
+    Source/Control/PluginSemanticMapper.cpp
+    Source/Control/PerformanceMacroService.cpp
+    Source/Control/PerformanceSurfaceProtocol.cpp
+    Source/Control/PerformanceSurfaceBridge.cpp
     Source/Control/StudioForgeControlBridge.cpp
     Source/Control/VibeAutotuneAdapter.cpp
     Source/Control/PitchCorrectionIntegrationService.cpp
@@ -358,6 +363,7 @@ if (BUILD_TESTING)
         Source/Project/ProjectTemplates.cpp
         Source/Project/ProjectTemplateStore.cpp
         Source/Project/ProjectAlternativeStore.cpp
+        Source/Project/ProjectBackupStore.cpp
         Source/Project/RecentProjectsStore.cpp
         Source/Project/AutosaveService.cpp
         Source/Media/MediaReloadService.cpp
@@ -366,6 +372,10 @@ if (BUILD_TESTING)
         Source/Media/Waveform/WaveformCacheStore.cpp
         Source/Recording/RecordingSession.cpp
         Source/Control/ControlRoutingProfile.cpp
+        Source/Control/PluginSemanticMapper.cpp
+        Source/Control/PerformanceMacroService.cpp
+        Source/Control/PerformanceSurfaceProtocol.cpp
+        Source/Control/PerformanceSurfaceBridge.cpp
         Source/Control/StudioForgeControlBridge.cpp
         Source/Control/VibeAutotuneAdapter.cpp
         Source/Control/PitchCorrectionIntegrationService.cpp
@@ -427,6 +437,7 @@ add_executable(StudioForgeCalibrationRunner
         Source/Project/ProjectTemplates.cpp
         Source/Project/ProjectTemplateStore.cpp
         Source/Project/ProjectAlternativeStore.cpp
+        Source/Project/ProjectBackupStore.cpp
         Source/Project/RecentProjectsStore.cpp
         Source/Project/AutosaveService.cpp
         Source/Media/MediaReloadService.cpp
@@ -435,6 +446,10 @@ add_executable(StudioForgeCalibrationRunner
         Source/Media/Waveform/WaveformCacheStore.cpp
         Source/Recording/RecordingSession.cpp
         Source/Control/ControlRoutingProfile.cpp
+        Source/Control/PluginSemanticMapper.cpp
+        Source/Control/PerformanceMacroService.cpp
+        Source/Control/PerformanceSurfaceProtocol.cpp
+        Source/Control/PerformanceSurfaceBridge.cpp
         Source/Control/StudioForgeControlBridge.cpp
         Source/Control/VibeAutotuneAdapter.cpp
         Source/Control/PitchCorrectionIntegrationService.cpp

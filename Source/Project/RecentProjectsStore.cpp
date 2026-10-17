@@ -31,12 +31,31 @@ void RecentProjectsStore::add(const juce::File& projectFile) const
     entries.removeString(projectFile.getFullPathName(), true);
     entries.insert(0, projectFile.getFullPathName());
     while (entries.size() > maximumEntries) entries.remove(entries.size() - 1);
-    storage.getParentDirectory().createDirectory();
-    storage.replaceWithText(entries.joinIntoString("\n"));
+    writeEntries(entries);
 }
 
 void RecentProjectsStore::clear() const
 {
-    storage.getParentDirectory().createDirectory();
-    storage.replaceWithText({});
+    writeEntries({});
+}
+
+bool RecentProjectsStore::writeEntries(const juce::StringArray& entries) const
+{
+    const auto directory = storage.getParentDirectory();
+    if (! directory.exists() && ! directory.createDirectory())
+        return false;
+
+    const auto temporary = storage.getSiblingFile(storage.getFileName() + ".tmp");
+    temporary.deleteFile();
+    if (! temporary.replaceWithText(entries.joinIntoString("\n")))
+    {
+        temporary.deleteFile();
+        return false;
+    }
+
+    const auto committed = storage.existsAsFile() ? temporary.replaceFileIn(storage)
+                                                  : temporary.moveFileTo(storage);
+    if (! committed)
+        temporary.deleteFile();
+    return committed;
 }

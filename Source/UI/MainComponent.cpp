@@ -1,8 +1,11 @@
 #include "MainComponent.h"
 #include "../Midi/MidiFileImporter.h"
+#include "../Midi/MidiCore.h"
 #include "../Project/ProjectSerializer.h"
 #include "../Project/ProjectState.h"
 #include "StudioForgeDialog.h"
+
+#include <algorithm>
 
 MainComponent::MainComponent()
 {
@@ -15,6 +18,10 @@ MainComponent::MainComponent()
     addChildComponent(mixerPane);
     addChildComponent(pianoRoll);
     addAndMakeVisible(startupWorkflow);
+    // The companion panel is optional. Starting its local-only bridge here
+    // never touches the audio thread and does not block DAW startup.
+    if (const auto result = performanceSurfaceBridge.start(); result.failed())
+        DBG("Performance surface unavailable: " + result.getErrorMessage());
 
     // Keep the selected channel's controls in view by default, matching the
     // arrangement-first workflow rather than starting with a blank left rail.
@@ -153,6 +160,10 @@ MainComponent::MainComponent()
         configureTrackCreationDialog();
         startupWorkflow.setVisible(true);
         startupWorkflow.showTrackCreation(true);
+    };
+    arrangeWindow.onLiveModeRequested = [this] (bool enabled)
+    {
+        requestWorkspaceMode(enabled ? WorkspaceMode::stream : WorkspaceMode::studio);
     };
     arrangeWindow.onAudioClipSelected = [this](ClipId) {};
     arrangeWindow.onAudioClipOpenRequested = [this](ClipId)
@@ -427,6 +438,7 @@ void MainComponent::selectAudioOutputChannel(int oneBasedChannel)
 MainComponent::~MainComponent()
 {
     stopTimer();
+    performanceSurfaceBridge.stop();
     if (&juce::LookAndFeel::getDefaultLookAndFeel() == &lookAndFeel)
         juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
     setLookAndFeel(nullptr);
@@ -443,43 +455,40 @@ void MainComponent::applyWorkspaceMode(const WorkspaceProfile& profile)
     // track's own explicit state.
     if (workspaceMode == WorkspaceMode::studio)
     {
-        studioInspectorVisible = inspectorPane.isVisible();
-        studioMixerVisible = mixerPane.isVisible();
-        studioBrowserVisible = assetBrowser.isVisible();
-        studioPianoRollVisible = pianoRoll.isVisible();
+        studioPanelLayout = panelLayout;
         studioTrackHeight = trackDataModel.getTrackHeight();
     }
 
+    workspaceMode = mode;
+    arrangeWindow.setLiveModeActive(mode == WorkspaceMode::stream);
     if (mode == WorkspaceMode::studio)
     {
-        setWorkspacePanelsVisible(studioInspectorVisible, studioBrowserVisible,
-                                  studioMixerVisible, studioPianoRollVisible);
         trackDataModel.setTrackHeight(studioTrackHeight);
+        applyPanelLayout(studioPanelLayout, false);
     }
     else if (mode == WorkspaceMode::stage)
     {
         // Stage prioritises large strips and meters; no project or mixer
         // values are reset and returning to Studio restores the snapshot.
-        setWorkspacePanelsVisible(false, false, true, false);
         // The reference Stage workspace shows five concise track headers
         // above the mixer. Larger rows starve the arrangement unnecessarily.
         trackDataModel.setTrackHeight(78);
+        applyPanelLayout({ false, false, true, false }, false);
     }
     else // stream
     {
-        // Stream keeps the focused vocal controls accessible while retaining
-        // the arrangement and shared engine/project state.
-        setWorkspacePanelsVisible(true, false, false, false);
-        trackDataModel.setTrackHeight(88);
+        // LIVE is surfaced inside Studio. Keep the user's Studio layout and
+        // track density intact while the engine applies the separate live-safe
+        // routing, monitoring and latency profile.
+        trackDataModel.setTrackHeight(studioTrackHeight);
+        applyPanelLayout(studioPanelLayout, false);
     }
 
-    workspaceMode = mode;
     // Both Stage and Stream are live-vocal workflows. Preparation is
     // control-thread work: it may replace a legacy hosted Vibe with the
     // StudioForge-native live processor, but can never run from audio I/O.
     if (mode == WorkspaceMode::stage || mode == WorkspaceMode::stream)
         pitchCorrectionStatus = pitchCorrection.ensureVibeAutotuneForVocalLive();
-    resized();
     arrangeWindow.repaint();
 }
 
@@ -559,7 +568,7 @@ void MainComponent::handleSpaceTransport()
 
 juce::Result MainComponent::saveProject(const juce::File& file)
 {
-    const auto result = ProjectSerializer::save(trackDataModel, file);
+    const auto result = ProjectSerializer::save(trackDataModel, file, &performanceMacros);
     if (result.wasOk())
         markProjectSaved();
     return result;
@@ -567,18 +576,19 @@ juce::Result MainComponent::saveProject(const juce::File& file)
 
 juce::Result MainComponent::saveProjectCopy(const juce::File& file) const
 {
-    return ProjectSerializer::save(trackDataModel, file);
+    return ProjectSerializer::save(trackDataModel, file, &performanceMacros);
 }
 
 juce::Result MainComponent::saveProjectTemplate(const juce::File& file) const
 {
-    return ProjectSerializer::save(trackDataModel, file);
+    return ProjectSerializer::save(trackDataModel, file, &performanceMacros);
 }
 
 juce::Result MainComponent::loadProject(const juce::File& file, juce::StringArray* missingMediaReferences)
 {
     audioEngine.setPlaybackState(false);
-    const auto result = ProjectSerializer::load(trackDataModel, pluginHost, file, missingMediaReferences);
+    const auto result = ProjectSerializer::load(trackDataModel, pluginHost, file, missingMediaReferences,
+                                                &performanceMacros);
     if (result.wasOk())
     {
         audioEngine.setLiveKeyReferenceTrack(trackDataModel.getLiveKeyReferenceTrack());
@@ -709,44 +719,54 @@ void MainComponent::requestRecordToggle()
 
 void MainComponent::setInspectorPanelVisible(bool visible)
 {
-    inspectorPane.setVisible(visible);
-    controlBar.setInspectorVisible(visible);
-    resized();
+    auto next = panelLayout;
+    next.inspector = visible;
+    applyPanelLayout(next, workspaceMode == WorkspaceMode::studio);
 }
 
 void MainComponent::setWorkspacePanelsVisible(bool inspector, bool browser, bool mixer, bool pianoRollVisible)
 {
-    inspectorPane.setVisible(inspector);
-    assetBrowser.setVisible(browser);
-    mixerPane.setVisible(mixer);
-    pianoRoll.setVisible(pianoRollVisible);
-    controlBar.setInspectorVisible(inspector);
-    controlBar.setBrowserVisible(browser);
-    controlBar.setMixerVisible(mixer);
-    controlBar.setPianoRollVisible(pianoRollVisible);
+    applyPanelLayout({ inspector, browser, mixer, pianoRollVisible }, workspaceMode == WorkspaceMode::studio);
+}
+
+void MainComponent::applyPanelLayout(PanelLayoutState next, bool updateStudioSnapshot)
+{
+    panelLayout = next;
+    if (updateStudioSnapshot)
+        studioPanelLayout = next;
+
+    inspectorPane.setVisible(next.inspector);
+    assetBrowser.setVisible(next.browser);
+    mixerPane.setVisible(next.mixer);
+    pianoRoll.setVisible(next.pianoRoll);
+    controlBar.setInspectorVisible(next.inspector);
+    controlBar.setBrowserVisible(next.browser);
+    controlBar.setMixerVisible(next.mixer);
+    controlBar.setPianoRollVisible(next.pianoRoll);
+    resized();
 }
 
 void MainComponent::setBrowserPanelVisible(bool visible)
 {
-    assetBrowser.setVisible(visible);
-    controlBar.setBrowserVisible(visible);
-    resized();
+    auto next = panelLayout;
+    next.browser = visible;
+    applyPanelLayout(next, workspaceMode == WorkspaceMode::studio);
     if (visible)
         assetBrowser.focusSearch();
 }
 
 void MainComponent::setMixerPanelVisible(bool visible)
 {
-    mixerPane.setVisible(visible);
-    controlBar.setMixerVisible(visible);
-    resized();
+    auto next = panelLayout;
+    next.mixer = visible;
+    applyPanelLayout(next, workspaceMode == WorkspaceMode::studio);
 }
 
 void MainComponent::setPianoRollPanelVisible(bool visible)
 {
-    pianoRoll.setVisible(visible);
-    controlBar.setPianoRollVisible(visible);
-    resized();
+    auto next = panelLayout;
+    next.pianoRoll = visible;
+    applyPanelLayout(next, workspaceMode == WorkspaceMode::studio);
 }
 
 bool MainComponent::addTrackFromCommand(TrackType type)
@@ -786,10 +806,15 @@ juce::Result MainComponent::importMidiFile(const juce::File& file)
 
 void MainComponent::requestProjectBounce()
 {
-    bounceFileChooser = std::make_unique<juce::FileChooser>("Bounce Project", juce::File {}, "*.wav;*.aif;*.aiff;*.flac");
+    requestOfflineRender("Bounce Project", StudioForgeDialog::fromUtf8("Xuất audio chưa hoàn tất"));
+}
+
+void MainComponent::requestOfflineRender(const juce::String& chooserTitle, const juce::String& errorTitle)
+{
+    bounceFileChooser = std::make_unique<juce::FileChooser>(chooserTitle, juce::File {}, "*.wav;*.aif;*.aiff;*.flac");
     bounceFileChooser->launchAsync(juce::FileBrowserComponent::saveMode
                                        | juce::FileBrowserComponent::canSelectFiles,
-        [safeOwner = juce::Component::SafePointer<MainComponent>(this)](const juce::FileChooser& chooser)
+        [safeOwner = juce::Component::SafePointer<MainComponent>(this), errorTitle](const juce::FileChooser& chooser)
         {
             if (safeOwner == nullptr)
                 return;
@@ -806,8 +831,165 @@ void MainComponent::requestProjectBounce()
             options.sampleRate = safeOwner->trackDataModel.getSampleRate();
             const auto result = safeOwner->audioEngine.renderOfflineAudio(output, options);
             if (result.failed())
-                StudioForgeDialog::showWarning(StudioForgeDialog::fromUtf8("Xu\u1EA5t audio ch\u01B0a ho\u00E0n t\u1EA5t"),
-                                               result.getErrorMessage());
+                StudioForgeDialog::showWarning(errorTitle, result.getErrorMessage());
+        });
+}
+
+void MainComponent::requestProjectExport()
+{
+    requestOfflineRender("Export Audio File", "Export audio chưa hoàn tất");
+}
+
+void MainComponent::requestStemExport()
+{
+    bounceFileChooser = std::make_unique<juce::FileChooser>("Export All Stems", juce::File {}, "");
+    bounceFileChooser->launchAsync(juce::FileBrowserComponent::saveMode
+                                       | juce::FileBrowserComponent::canSelectDirectories,
+        [safeOwner = juce::Component::SafePointer<MainComponent>(this)](const juce::FileChooser& chooser)
+        {
+            if (safeOwner == nullptr) return;
+            const auto directory = chooser.getResult();
+            safeOwner->bounceFileChooser.reset();
+            if (directory == juce::File {}) return;
+            AudioEngine::OfflineRenderOptions options;
+            options.sampleRate = safeOwner->trackDataModel.getSampleRate();
+            const auto result = safeOwner->audioEngine.renderOfflineStems(directory, options);
+            if (result.failed())
+                StudioForgeDialog::showWarning("Stem export chưa hoàn tất", result.getErrorMessage());
+        });
+}
+
+void MainComponent::requestSelectedTrackExport()
+{
+    const auto selected = getSelectedTrackIndex();
+    if (! juce::isPositiveAndBelow(selected, static_cast<int>(trackDataModel.getTrackCount())))
+    {
+        StudioForgeDialog::showWarning("Export Selected Track", "Hãy chọn một track trước khi export.");
+        return;
+    }
+    bounceFileChooser = std::make_unique<juce::FileChooser>("Export Selected Track", juce::File {}, "");
+    bounceFileChooser->launchAsync(juce::FileBrowserComponent::saveMode
+                                       | juce::FileBrowserComponent::canSelectDirectories,
+        [safeOwner = juce::Component::SafePointer<MainComponent>(this), selected](const juce::FileChooser& chooser)
+        {
+            if (safeOwner == nullptr) return;
+            const auto directory = chooser.getResult();
+            safeOwner->bounceFileChooser.reset();
+            if (directory == juce::File {}) return;
+            AudioEngine::OfflineRenderOptions options;
+            options.sampleRate = safeOwner->trackDataModel.getSampleRate();
+            options.trackExportFilter = [selected](size_t index) { return static_cast<int>(index) == selected; };
+            const auto result = safeOwner->audioEngine.renderOfflineStems(directory, options);
+            if (result.failed())
+                StudioForgeDialog::showWarning("Selected track export chưa hoàn tất", result.getErrorMessage());
+        });
+}
+
+void MainComponent::requestMidiExport()
+{
+    bounceFileChooser = std::make_unique<juce::FileChooser>("Export MIDI File", juce::File {}, "*.mid;*.midi");
+    bounceFileChooser->launchAsync(juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles,
+        [safeOwner = juce::Component::SafePointer<MainComponent>(this)](const juce::FileChooser& chooser)
+        {
+            if (safeOwner == nullptr) return;
+            auto output = chooser.getResult(); safeOwner->bounceFileChooser.reset();
+            if (output == juce::File {}) return;
+            if (output.getFileExtension().isEmpty()) output = output.withFileExtension(".mid");
+            const auto state = safeOwner->trackDataModel.createProjectState();
+            constexpr int ppq = 960;
+            const auto sampleRate = juce::jmax(1.0, safeOwner->trackDataModel.getSampleRate());
+            auto tempoMap = state.tempoMap;
+            if (tempoMap.empty() || tempoMap.front().samplePosition > 0.0)
+                tempoMap.insert(tempoMap.begin(), { 0.0, state.bpm });
+            std::sort(tempoMap.begin(), tempoMap.end(), [] (const auto& left, const auto& right)
+            {
+                return left.samplePosition < right.samplePosition;
+            });
+            const auto samplesToTicks = [&tempoMap, sampleRate, ppq] (double samplePosition)
+            {
+                auto remaining = juce::jmax(0.0, samplePosition);
+                auto cursor = 0.0;
+                auto bpm = tempoMap.front().bpm;
+                auto quarters = 0.0;
+                for (const auto& event : tempoMap)
+                {
+                    if (event.samplePosition <= cursor)
+                    {
+                        bpm = event.bpm;
+                        continue;
+                    }
+                    const auto segmentEnd = juce::jmin(remaining, event.samplePosition);
+                    quarters += (segmentEnd - cursor) * bpm / (sampleRate * 60.0);
+                    if (remaining <= event.samplePosition)
+                        return juce::roundToInt(quarters * ppq);
+                    cursor = event.samplePosition;
+                    bpm = event.bpm;
+                }
+                quarters += (remaining - cursor) * bpm / (sampleRate * 60.0);
+                return juce::roundToInt(quarters * ppq);
+            };
+
+            juce::MidiMessageSequence conductor;
+            for (const auto& event : tempoMap)
+            {
+                const auto microsecondsPerQuarter = juce::roundToInt(60000000.0 / juce::jmax(1.0, event.bpm));
+                conductor.addEvent(juce::MidiMessage::tempoMetaEvent(microsecondsPerQuarter), samplesToTicks(event.samplePosition));
+            }
+            auto signatures = state.timeSignatureMap;
+            if (signatures.empty() || signatures.front().samplePosition > 0.0)
+                signatures.insert(signatures.begin(), { 0.0, state.timeSignatureNumerator, state.timeSignatureDenominator });
+            std::sort(signatures.begin(), signatures.end(), [] (const auto& left, const auto& right)
+            {
+                return left.samplePosition < right.samplePosition;
+            });
+            for (const auto& event : signatures)
+                conductor.addEvent(juce::MidiMessage::timeSignatureMetaEvent(
+                    juce::jmax(1, event.numerator), juce::jmax(1, event.denominator)), samplesToTicks(event.samplePosition));
+            auto markers = state.markers;
+            std::sort(markers.begin(), markers.end(), [] (const auto& left, const auto& right)
+            {
+                return left.samplePosition < right.samplePosition;
+            });
+            for (const auto& marker : markers)
+                conductor.addEvent(juce::MidiMessage::textMetaEvent(0x06, marker.name), samplesToTicks(marker.samplePosition));
+
+            juce::MidiFile midi;
+            midi.setTicksPerQuarterNote(ppq);
+            midi.addTrack(conductor);
+
+            // Type-1 MIDI keeps each StudioForge track independent so it can be
+            // edited, routed, and named correctly after import into another DAW.
+            for (const auto& track : state.tracks)
+            {
+                juce::MidiMessageSequence sequence;
+                auto hasNotes = false;
+                for (const auto& clip : state.midiClips)
+                {
+                    if (clip.trackId != track.id)
+                        continue;
+
+                    for (const auto& note : clip.notes)
+                    {
+                        const auto start = samplesToTicks(clip.startSample + note.startSample);
+                        const auto end = samplesToTicks(clip.startSample + note.startSample + note.durationSamples);
+                        const auto channel = juce::jlimit(1, 16, note.channel);
+                        sequence.addEvent(juce::MidiMessage::noteOn(channel, note.pitch, note.velocity), start);
+                        sequence.addEvent(juce::MidiMessage::noteOff(channel, note.pitch), end);
+                        hasNotes = true;
+                    }
+                }
+
+                if (! hasNotes)
+                    continue;
+
+                // 0x03 is the Standard MIDI File Track Name meta event.
+                sequence.addEvent(juce::MidiMessage::textMetaEvent(0x03, track.name), 0.0);
+                sequence.updateMatchedPairs();
+                midi.addTrack(sequence);
+            }
+            auto stream = output.createOutputStream();
+            if (stream == nullptr || ! midi.writeTo(*stream))
+                StudioForgeDialog::showWarning("MIDI export chưa hoàn tất", "Không thể ghi file MIDI.");
         });
 }
 

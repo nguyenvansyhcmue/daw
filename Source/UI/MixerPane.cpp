@@ -345,7 +345,7 @@ MixerPane::MixerPane(TrackDataModel* model, AudioEngine* engine, PluginHostServi
     for (size_t slot = 0; slot < masterFxButtons.size(); ++slot)
     {
         auto& button = masterFxButtons[slot];
-        button.setButtonText("+"); button.setTooltip("Add or manage Master Insert plug-in");
+        button.setButtonText("+"); button.setTooltip("Add a Master plug-in. On an occupied slot, click centre to open or hover left to bypass.");
         button.onClick = [this, slot]
         {
             if (audioEngine != nullptr)
@@ -386,11 +386,23 @@ MixerPane::MixerPane(TrackDataModel* model, AudioEngine* engine, PluginHostServi
                     safeThis->refreshFromModel();
                 });
         };
+        button.onBypassClick = [this, slot]
+        {
+            if (audioEngine == nullptr)
+                return;
+            const auto* rack = audioEngine->getMasterFxRackSnapshot();
+            if (rack != nullptr && slot < rack->processors.size() && rack->processors[slot] != nullptr)
+                audioEngine->setMasterFxBypassed(slot, ! rack->bypass[slot]);
+            refreshFromModel();
+        };
         addAndMakeVisible(button);
     }
 
     for (int i = 0; i < static_cast<int>(TrackDataModel::maxTracks); ++i)
     {
+        // Start with a compact three-slot insert bay. The rack header expands
+        // the complete eight-slot chain and requests a taller mixer surface.
+        fxRacksExpanded[static_cast<size_t>(i)] = false;
         labels[i].setJustificationType(juce::Justification::centred);
         labels[i].setColour(juce::Label::textColourId, mixerText);
         labels[i].setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
@@ -417,18 +429,16 @@ MixerPane::MixerPane(TrackDataModel* model, AudioEngine* engine, PluginHostServi
         auto& rackButton = fxRackButtons[static_cast<size_t>(i)];
         rackButton.setLookAndFeel(&mixerConsoleLookAndFeel());
         styleToolbarButton(rackButton);
-        rackButton.setTooltip("Insert rack. Click to add the first plug-in or expand this channel's insert list.");
+        rackButton.setTooltip("Insert rack. Click an empty slot to add a plug-in; click the header to collapse or expand.");
         rackButton.onClick = [this, i]
         {
             if (trackModel == nullptr || static_cast<size_t>(i) >= trackModel->getTrackCount()) return;
-            if (activeFxCount(i) == 0)
-            {
-                const auto slot = firstVacantFxSlot(i);
-                if (slot < TrackDataModel::maxFxSlots) showPluginBrowser(i, slot);
-                return;
-            }
-            fxRacksExpanded[static_cast<size_t>(i)] = ! fxRacksExpanded[static_cast<size_t>(i)];
-            requestHeight(fxRacksExpanded[static_cast<size_t>(i)] ? 620 : preferredHeight);
+            const auto expandRack = ! fxRacksExpanded[static_cast<size_t>(i)];
+            // The mixer is a shared console surface: all strips use the same
+            // rack height, so one expanded channel cannot visually disagree
+            // with the others.
+            fxRacksExpanded.fill(expandRack);
+            requestHeight(expandRack ? 520 : preferredHeight);
             resized();
         };
         addAndMakeVisible(rackButton);
@@ -470,7 +480,7 @@ MixerPane::MixerPane(TrackDataModel* model, AudioEngine* engine, PluginHostServi
         for (size_t slot = 0; slot < TrackDataModel::maxFxSlots; ++slot)
         {
             auto& button = fxButtons[static_cast<size_t>(i)][slot];
-            button.setButtonText("+"); button.setTooltip("Add plug-in. Left-click an active slot to open its editor; right-click to bypass or remove it.");
+            button.setButtonText("+"); button.setTooltip("Add plug-in. On an occupied slot, click centre to open or hover left to bypass.");
             button.onClick = [this, i, slot]
             {
                 if (trackModel == nullptr || static_cast<size_t>(i) >= trackModel->getTrackCount()) return;
@@ -510,6 +520,16 @@ MixerPane::MixerPane(TrackDataModel* model, AudioEngine* engine, PluginHostServi
                     safeThis->refreshFromModel();
                     });
             };
+            button.onBypassClick = [this, i, slot]
+            {
+                if (audioEngine == nullptr || trackModel == nullptr
+                    || static_cast<size_t>(i) >= trackModel->getTrackCount())
+                    return;
+                const auto* rack = trackModel->getFxRackSnapshot(static_cast<size_t>(i));
+                if (rack != nullptr && slot < rack->processors.size() && rack->processors[slot] != nullptr)
+                    audioEngine->setFxBypassed(static_cast<size_t>(i), slot, ! rack->bypass[slot]);
+                refreshFromModel();
+            };
             addAndMakeVisible(button);
         }
         faders[i].setRange(faderMinimumDb, faderMaximumDb, 0.1);
@@ -537,33 +557,112 @@ MixerPane::MixerPane(TrackDataModel* model, AudioEngine* engine, PluginHostServi
             knob.setLookAndFeel(&mixerConsoleLookAndFeel());
             knob.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
             knob.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
-            knob.setDoubleClickReturnValue(true, 0.0);
-            knob.setTooltip("AUX " + juce::String::charToString(static_cast<juce::juce_wchar>('A' + static_cast<int>(slot)))
-                            + " send — drag to create/adjust the route. AUX returns are summed into Master Output.");
+            knob.setDoubleClickReturnValue(true, 1.0);
+            knob.setTooltip("Send level. Assign a bus before adjusting this control.");
             knob.onValueChange = [this, i, slot]
             {
                 if (trackModel == nullptr || static_cast<size_t>(i) >= trackModel->getTrackCount()) return;
                 const auto& track = trackModel->getTrack(static_cast<size_t>(i));
-                auto targetBus = track.sends[slot].targetBus;
-                // SEND A-D are real aux routes. On their first adjustment we
-                // provision the matching engine bus, then persist the route;
-                // the control must never look interactive while being inert.
-                if (! targetBus.isValid())
-                {
-                    while (trackModel->getBuses().size() <= slot)
-                    {
-                        if (! trackModel->addBus().isValid()) return;
-                    }
-                    targetBus = trackModel->getBuses()[slot].id;
-                }
+                const auto targetBus = track.sends[slot].targetBus;
+                if (! targetBus.isValid()) return;
                 trackModel->setTrackSendRoute(track.id, slot, targetBus,
                                               static_cast<float>(sendKnobs[i][slot].getValue()),
                                               track.sends[slot].preFader);
+                repaint();
             };
             addAndMakeVisible(knob);
             routeButton.setTooltip("Choose the real AUX bus destination for this send");
             routeButton.onClick = [this, i, slot] { showSendDestinationMenu(i, slot); };
             addAndMakeVisible(routeButton);
+        }
+    }
+
+    for (size_t busIndex = 0; busIndex < TrackDataModel::maxBuses; ++busIndex)
+    {
+        auto& label = busLabels[busIndex];
+        label.setJustificationType(juce::Justification::centred);
+        label.setColour(juce::Label::textColourId, mixerText);
+        label.setFont(juce::Font(juce::FontOptions(10.5f, juce::Font::bold)));
+        addAndMakeVisible(label);
+
+        auto& readout = busReadouts[busIndex];
+        readout.setJustificationType(juce::Justification::centred);
+        readout.setColour(juce::Label::backgroundColourId, channelRecess);
+        readout.setColour(juce::Label::textColourId, mixerText);
+        readout.setFont(juce::Font(juce::FontOptions(9.5f, juce::Font::bold)));
+        addAndMakeVisible(readout);
+
+        auto& fader = busFaders[busIndex];
+        fader.setRange(faderMinimumDb, faderMaximumDb, 0.1);
+        fader.setLookAndFeel(&mixerConsoleLookAndFeel());
+        fader.setSliderStyle(juce::Slider::LinearVertical);
+        fader.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+        fader.setDoubleClickReturnValue(true, 0.0);
+        fader.onValueChange = [this, busIndex]
+        {
+            if (trackModel == nullptr || busIndex >= trackModel->getBuses().size()) return;
+            trackModel->setBusGain(trackModel->getBuses()[busIndex].id, faderDbToGain(busFaders[busIndex].getValue()));
+        };
+        addAndMakeVisible(fader);
+        addAndMakeVisible(busMeters[busIndex]);
+
+        auto& mute = busMuteButtons[busIndex];
+        mute.setButtonText("M");
+        styleChannelButton(mute, mixerWarning);
+        mute.setLookAndFeel(&mixerConsoleLookAndFeel());
+        mute.setTooltip("Mute Aux Return");
+        mute.onClick = [this, busIndex]
+        {
+            if (trackModel != nullptr && busIndex < trackModel->getBuses().size())
+                trackModel->setBusMuted(trackModel->getBuses()[busIndex].id, busMuteButtons[busIndex].getToggleState());
+        };
+        addAndMakeVisible(mute);
+
+        for (size_t slot = 0; slot < TrackDataModel::maxFxSlots; ++slot)
+        {
+            auto& button = busFxButtons[busIndex][slot];
+            button.setButtonText("+");
+            button.setTooltip("Add an Aux Return plug-in. On an occupied slot, click to open it.");
+            button.onClick = [this, busIndex, slot]
+            {
+                if (trackModel == nullptr || busIndex >= trackModel->getBuses().size()) return;
+                const auto bus = trackModel->getBuses()[busIndex].id;
+                const auto* rack = trackModel->getBusFxRackSnapshot(bus);
+                const auto processor = rack != nullptr ? rack->processors[slot] : nullptr;
+                if (processor != nullptr && processor->hasEditor()) showBusPluginEditor(busIndex, slot);
+                else if (processor == nullptr) showBusPluginBrowser(busIndex, slot);
+            };
+            button.onRightClick = [this, busIndex, slot]
+            {
+                if (trackModel == nullptr || busIndex >= trackModel->getBuses().size()) return;
+                const auto bus = trackModel->getBuses()[busIndex].id;
+                const auto* rack = trackModel->getBusFxRackSnapshot(bus);
+                if (rack == nullptr || rack->processors[slot] == nullptr) return;
+                juce::PopupMenu menu;
+                menu.addItem(1, rack->bypass[slot] ? "Enable plug-in" : "Bypass plug-in");
+                menu.addItem(2, "Open Plug-in Editor", rack->processors[slot]->hasEditor());
+                menu.addItem(3, "Remove plug-in");
+                menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&busFxButtons[busIndex][slot]),
+                    [safeThis = juce::Component::SafePointer<MixerPane>(this), busIndex, slot] (int choice)
+                    {
+                        if (safeThis == nullptr || safeThis->trackModel == nullptr || busIndex >= safeThis->trackModel->getBuses().size()) return;
+                        const auto bus = safeThis->trackModel->getBuses()[busIndex].id;
+                        const auto* current = safeThis->trackModel->getBusFxRackSnapshot(bus);
+                        if (current == nullptr) return;
+                        if (choice == 1) safeThis->trackModel->setBusFxBypassed(bus, slot, ! current->bypass[slot]);
+                        else if (choice == 2) safeThis->showBusPluginEditor(busIndex, slot);
+                        else if (choice == 3) safeThis->trackModel->setBusFxProcessor(bus, slot, nullptr);
+                        safeThis->refreshFromModel();
+                    });
+            };
+            button.onBypassClick = [this, busIndex, slot]
+            {
+                if (trackModel == nullptr || busIndex >= trackModel->getBuses().size()) return;
+                const auto bus = trackModel->getBuses()[busIndex].id;
+                if (const auto* rack = trackModel->getBusFxRackSnapshot(bus); rack != nullptr && rack->processors[slot] != nullptr)
+                    trackModel->setBusFxBypassed(bus, slot, ! rack->bypass[slot]);
+            };
+            addAndMakeVisible(button);
         }
     }
 
@@ -595,9 +694,22 @@ void MixerPane::syncViewVisibility()
     {
         const auto visible = tracksVisible && static_cast<int>(i) < displayedTrackCount;
         labels[i].setVisible(visible); meters[i].setVisible(visible); faders[i].setVisible(visible); panSliders[i].setVisible(visible); gainReadouts[i].setVisible(visible); chainBypassButtons[i].setVisible(visible); armButtons[i].setVisible(visible); monitorButtons[i].setVisible(visible); muteButtons[i].setVisible(visible); soloButtons[i].setVisible(visible); fxRackButtons[i].setVisible(visible);
-        for (auto& button : fxButtons[i]) button.setVisible(visible && fxRacksExpanded[i] && ! button.getBounds().isEmpty());
+        for (size_t slot = 0; slot < fxButtons[i].size(); ++slot)
+            fxButtons[i][slot].setVisible(visible && (fxRacksExpanded[i] || slot < 3)
+                                           && ! fxButtons[i][slot].getBounds().isEmpty());
         for (auto& knob : sendKnobs[i]) knob.setVisible(visible);
         for (auto& button : sendRouteButtons[i]) button.setVisible(visible);
+    }
+    for (size_t i = 0; i < busLabels.size(); ++i)
+    {
+        const auto visible = tracksVisible && static_cast<int>(i) < displayedBusCount;
+        busLabels[i].setVisible(visible);
+        busMeters[i].setVisible(visible);
+        busFaders[i].setVisible(visible);
+        busReadouts[i].setVisible(visible);
+        busMuteButtons[i].setVisible(visible);
+        for (auto& button : busFxButtons[i])
+            button.setVisible(visible && ! button.getBounds().isEmpty());
     }
 }
 
@@ -624,8 +736,13 @@ void MixerPane::showPluginBrowser(int trackIndex, size_t slot)
         }
     });
     panel->setSize(PluginBrowserPanel::preferredWidth, PluginBrowserPanel::preferredHeight);
-    juce::DialogWindow::LaunchOptions options;
-    options.content.setOwned(panel); options.dialogTitle = "Plug-in Browser"; options.dialogBackgroundColour = channelFace; options.escapeKeyTriggersCloseButton = true; options.useNativeTitleBar = false; options.resizable = true; options.componentToCentreAround = this; options.launchAsync();
+    auto& anchor = fxButtons[static_cast<size_t>(trackIndex)][slot];
+    // This menu must be a child of the DAW peer. On macOS, a temporary
+    // desktop-level callout may dismiss on the same click that opened it.
+    auto* ownerWindow = getTopLevelComponent();
+    auto& callout = juce::CallOutBox::launchAsynchronously(std::unique_ptr<juce::Component>(panel),
+                                                            anchor.getScreenBounds(), ownerWindow);
+    callout.setDismissalMouseClicksAreAlwaysConsumed(true);
 }
 
 void MixerPane::showPluginEditor(int trackIndex, size_t slot)
@@ -652,6 +769,7 @@ void MixerPane::openPluginEditorNow(int trackIndex, size_t slot)
     // Opening an editor is the exact transition being investigated here. The
     // capture is rate-limited and lock-free on the audio callback.
     audioEngine->startAudioTrace();
+    audioEngine->selectPluginTraceTarget(static_cast<size_t>(trackIndex), slot);
     audioEngine->markAudioTraceIssue();
     auto editor = processor->createEditor();
     if (editor == nullptr)
@@ -683,13 +801,23 @@ void MixerPane::showMasterPluginBrowser(size_t slot)
         const auto sampleRate = device != nullptr ? device->getCurrentSampleRate() : 44100.0;
         const auto blockSize = device != nullptr ? device->getCurrentBufferSizeSamples() : 512;
         if (auto effect = safeThis->pluginHostService->createEffect(description, sampleRate, blockSize, error))
+        {
+            const auto shouldOpenEditor = effect->hasEditor();
             safeThis->audioEngine->setMasterFxProcessor(slot, std::move(effect));
+            if (shouldOpenEditor)
+                juce::MessageManager::callAsync([safeThis, slot]
+                {
+                    if (safeThis != nullptr)
+                        safeThis->showMasterPluginEditor(slot);
+                });
+        }
     });
     panel->setSize(PluginBrowserPanel::preferredWidth, PluginBrowserPanel::preferredHeight);
-    juce::DialogWindow::LaunchOptions options;
-    options.content.setOwned(panel); options.dialogTitle = "Master Insert Plug-in Browser";
-    options.dialogBackgroundColour = channelFace; options.escapeKeyTriggersCloseButton = true;
-    options.useNativeTitleBar = true; options.resizable = true; options.componentToCentreAround = this; options.launchAsync();
+    auto& anchor = masterFxButtons[slot];
+    auto* ownerWindow = getTopLevelComponent();
+    auto& callout = juce::CallOutBox::launchAsynchronously(std::unique_ptr<juce::Component>(panel),
+                                                            anchor.getScreenBounds(), ownerWindow);
+    callout.setDismissalMouseClicksAreAlwaysConsumed(true);
 }
 
 void MixerPane::showMasterPluginEditor(size_t slot)
@@ -727,33 +855,117 @@ void MixerPane::openMasterPluginEditorNow(size_t slot)
                                                                               std::move(closeWindow)));
 }
 
+void MixerPane::showBusPluginBrowser(size_t busIndex, size_t slot)
+{
+    if (pluginHostService == nullptr || trackModel == nullptr || busIndex >= trackModel->getBuses().size()) return;
+    const auto busId = trackModel->getBuses()[busIndex].id;
+    auto* panel = new PluginBrowserPanel(*pluginHostService,
+        [safeThis = juce::Component::SafePointer<MixerPane>(this), busId, slot] (const juce::PluginDescription& description)
+        {
+            if (safeThis == nullptr || safeThis->pluginHostService == nullptr || safeThis->trackModel == nullptr) return;
+            juce::String error;
+            auto* device = safeThis->audioEngine != nullptr ? safeThis->audioEngine->getAudioDeviceManager().getCurrentAudioDevice() : nullptr;
+            const auto sampleRate = device != nullptr ? device->getCurrentSampleRate() : safeThis->trackModel->getSampleRate();
+            const auto blockSize = device != nullptr ? device->getCurrentBufferSizeSamples() : 512;
+            if (auto effect = safeThis->pluginHostService->createEffect(description, sampleRate, blockSize, error))
+            {
+                const auto openEditor = effect->hasEditor();
+                safeThis->trackModel->setBusFxProcessor(busId, slot, std::move(effect));
+                if (openEditor)
+                    juce::MessageManager::callAsync([safeThis, busId, slot]
+                    {
+                        if (safeThis == nullptr || safeThis->trackModel == nullptr) return;
+                        const auto& buses = safeThis->trackModel->getBuses();
+                        const auto found = std::find_if(buses.begin(), buses.end(), [busId] (const auto& bus) { return bus.id == busId; });
+                        if (found != buses.end()) safeThis->showBusPluginEditor(static_cast<size_t>(std::distance(buses.begin(), found)), slot);
+                    });
+            }
+        });
+    panel->setSize(PluginBrowserPanel::preferredWidth, PluginBrowserPanel::preferredHeight);
+    auto& callout = juce::CallOutBox::launchAsynchronously(std::unique_ptr<juce::Component>(panel),
+                                                            busFxButtons[busIndex][slot].getScreenBounds(), getTopLevelComponent());
+    callout.setDismissalMouseClicksAreAlwaysConsumed(true);
+}
+
+void MixerPane::showBusPluginEditor(size_t busIndex, size_t slot)
+{
+    const juce::Component::SafePointer<MixerPane> safeThis(this);
+    juce::MessageManager::callAsync([safeThis, busIndex, slot]
+    {
+        if (safeThis != nullptr) safeThis->openBusPluginEditorNow(busIndex, slot);
+    });
+}
+
+void MixerPane::openBusPluginEditorNow(size_t busIndex, size_t slot)
+{
+    if (trackModel == nullptr || busIndex >= trackModel->getBuses().size()) return;
+    const auto bus = trackModel->getBuses()[busIndex].id;
+    const auto* rack = trackModel->getBusFxRackSnapshot(bus);
+    if (rack == nullptr || slot >= rack->processors.size() || rack->processors[slot] == nullptr) return;
+    const auto processor = rack->processors[slot];
+    if (! processor->hasEditor()) return;
+    auto editor = processor->createEditor();
+    if (editor == nullptr) return;
+    const auto bounds = editor->getBounds();
+    auto* host = new MixerPluginEditorHost(processor, std::move(editor));
+    host->setSize(juce::jmax(320, bounds.getWidth()), juce::jmax(220, bounds.getHeight()));
+    const juce::Component::SafePointer<MixerPane> safeOwner(this);
+    auto closeWindow = [safeOwner](juce::DocumentWindow* window)
+    {
+        if (safeOwner == nullptr) return;
+        auto& windows = safeOwner->pluginEditorWindows;
+        windows.erase(std::remove_if(windows.begin(), windows.end(), [window] (const auto& owned) { return owned.get() == window; }), windows.end());
+    };
+    pluginEditorWindows.push_back(std::make_unique<MixerPluginEditorWindow>(processor->getName(), host, this, std::move(closeWindow)));
+}
+
 void MixerPane::showSendDestinationMenu(int trackIndex, size_t slot)
 {
     if (trackModel == nullptr || trackIndex < 0 || static_cast<size_t>(trackIndex) >= trackModel->getTrackCount()
         || slot >= sendRouteButtons[static_cast<size_t>(trackIndex)].size()) return;
 
     const auto& track = trackModel->getTrack(static_cast<size_t>(trackIndex));
+    const auto trackId = track.id;
     const auto currentBus = track.sends[slot].targetBus;
     juce::PopupMenu menu;
     menu.addSectionHeader("SEND " + juce::String::charToString(static_cast<juce::juce_wchar>('A' + static_cast<int>(slot))) + " DESTINATION");
-    menu.addItem(1, "Create AUX " + juce::String(static_cast<int>(slot + 1)) + " → Master Output");
+    menu.addItem(1, "Create New Bus", trackModel->getBuses().size() < TrackDataModel::maxBuses);
     const auto& buses = trackModel->getBuses();
+    std::vector<BusId> menuBusIds;
     for (size_t busIndex = 0; busIndex < buses.size(); ++busIndex)
-        menu.addItem(static_cast<int>(10 + busIndex), "AUX " + juce::String(static_cast<int>(busIndex + 1)) + " → Master Output",
+    {
+        menuBusIds.push_back(buses[busIndex].id);
+        menu.addItem(static_cast<int>(10 + busIndex), "Bus " + juce::String(static_cast<int>(busIndex + 1))
+                     + " / " + trackModel->getBusDisplayName(buses[busIndex].id),
                      true, buses[busIndex].id == currentBus);
+    }
     if (currentBus.isValid())
     {
         menu.addSeparator();
+        juce::PopupMenu tapMenu;
+        tapMenu.addItem(3, "Pre Fader", true, track.sends[slot].preFader);
+        tapMenu.addItem(4, "Post Fader", true, track.sends[slot].postFaderBeforePan);
+        tapMenu.addItem(5, "Post Pan", true, ! track.sends[slot].preFader && ! track.sends[slot].postFaderBeforePan);
+        menu.addSubMenu("Send Position", tapMenu);
         menu.addItem(2, "Disconnect send");
     }
     menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&sendRouteButtons[static_cast<size_t>(trackIndex)][slot]),
-        [safeThis = juce::Component::SafePointer<MixerPane>(this), trackIndex, slot] (int result)
+        [safeThis = juce::Component::SafePointer<MixerPane>(this), trackId, slot, menuBusIds, currentBus] (int result)
     {
         if (safeThis == nullptr || safeThis->trackModel == nullptr || result == 0) return;
-        const auto count = safeThis->trackModel->getTrackCount();
-        if (trackIndex < 0 || static_cast<size_t>(trackIndex) >= count) return;
+        const auto trackIndex = safeThis->trackModel->getTrackIndex(trackId);
+        if (trackIndex < 0) return;
         const auto& selectedTrack = safeThis->trackModel->getTrack(static_cast<size_t>(trackIndex));
-        if (result == 2)
+        if (result >= 3 && result <= 5)
+        {
+            if (! currentBus.isValid() || selectedTrack.sends[slot].targetBus != currentBus) return;
+            if (result == 3)
+                safeThis->trackModel->setTrackSendRoute(trackId, slot, selectedTrack.sends[slot].targetBus,
+                                                       selectedTrack.sends[slot].level, true);
+            else
+                safeThis->trackModel->setTrackSendPostFaderBeforePan(trackId, slot, result == 4);
+        }
+        else if (result == 2)
         {
             safeThis->trackModel->clearTrackSendRoute(selectedTrack.id, slot);
         }
@@ -765,8 +977,7 @@ void MixerPane::showSendDestinationMenu(int trackIndex, size_t slot)
             else
             {
                 const auto busIndex = static_cast<size_t>(result - 10);
-                const auto& buses = safeThis->trackModel->getBuses();
-                if (busIndex < buses.size()) target = buses[busIndex].id;
+                if (busIndex < menuBusIds.size()) target = menuBusIds[busIndex];
             }
             if (target.isValid())
                 safeThis->trackModel->setTrackSendRoute(selectedTrack.id, slot, target,
@@ -780,8 +991,11 @@ void MixerPane::showSendDestinationMenu(int trackIndex, size_t slot)
 void MixerPane::refreshFromModel()
 {
     const auto count = trackModel != nullptr ? trackModel->getTrackCount() : 0;
-    const auto layoutChanged = displayedTrackCount != static_cast<int>(count);
+    const auto busCount = trackModel != nullptr ? trackModel->getBuses().size() : 0;
+    const auto layoutChanged = displayedTrackCount != static_cast<int>(count)
+                            || displayedBusCount != static_cast<int>(busCount);
     displayedTrackCount = static_cast<int>(count);
+    displayedBusCount = static_cast<int>(busCount);
     for (size_t index = 0; index < count; ++index)
     {
         const auto& track = trackModel->getTrack(index); const auto gain = track.volume.load(std::memory_order_relaxed);
@@ -796,17 +1010,18 @@ void MixerPane::refreshFromModel()
             const auto processor = rack != nullptr ? rack->processors[slot] : nullptr;
             const auto bypassed = processor != nullptr && rack->bypass[slot];
             fxButtons[index][slot].setButtonText(processor != nullptr
-                                                     ? (bypassed ? "OFF  " : "") + processor->getName().substring(0, 18)
+                                                     ? processor->getName().substring(0, 18)
                                                      : "+");
             fxButtons[index][slot].setTooltip(processor != nullptr
-                                                  ? (bypassed ? "Plug-in bypassed. Right-click to enable or remove it."
-                                                              : "Plug-in active. Right-click to bypass or remove it.")
+                                                  ? (bypassed ? "BYPASSED — click centre to open; hover left to enable."
+                                                              : "Click centre to open. Hover left to bypass; right-click to replace or remove.")
                                                   : "Add plug-in. Left-click to insert a plug-in.");
             fxButtons[index][slot].setActive(processor != nullptr && ! bypassed);
+            fxButtons[index][slot].setBypassControlState(processor != nullptr, bypassed);
             hasProcessor = hasProcessor || processor != nullptr;
         }
         const auto count = activeFxCount(static_cast<int>(index));
-        fxRackButtons[index].setButtonText(count == 0 ? "+ INSERT" : "FX " + juce::String(static_cast<int>(count))
+        fxRackButtons[index].setButtonText(count == 0 ? "+ INSERT FX" : "FX " + juce::String(static_cast<int>(count))
             + (fxRacksExpanded[index] ? "  \u25be" : "  \u25b8"));
         chainBypassButtons[index].setEnabled(hasProcessor);
         for (size_t slot = 0; slot < sendKnobs[index].size(); ++slot)
@@ -820,8 +1035,33 @@ void MixerPane::refreshFromModel()
                 if (found != buses.end()) busNumber = static_cast<int>(std::distance(buses.begin(), found)) + 1;
             }
             sendRouteButtons[index][slot].setButtonText(busNumber > 0 ? "AUX " + juce::String(busNumber) : "ASSIGN");
-            sendKnobs[index][slot].setEnabled(true);
+            sendRouteButtons[index][slot].setTooltip(busNumber > 0
+                ? "Bus " + juce::String(busNumber) + " / " + trackModel->getBusDisplayName(send.targetBus)
+                : "Assign this send to an Aux bus");
+            sendKnobs[index][slot].setEnabled(busNumber > 0);
             sendKnobs[index][slot].setValue(send.targetBus.isValid() ? send.level : 0.0f, juce::dontSendNotification);
+        }
+    }
+    if (trackModel != nullptr)
+    {
+        const auto& buses = trackModel->getBuses();
+        for (size_t index = 0; index < buses.size() && index < TrackDataModel::maxBuses; ++index)
+        {
+            const auto& bus = buses[index];
+            const auto gain = bus.gain;
+            busLabels[index].setText("AUX " + juce::String(static_cast<int>(index + 1)) + "  " + trackModel->getBusDisplayName(bus.id), juce::dontSendNotification);
+            busFaders[index].setValue(gainToFaderDb(gain), juce::dontSendNotification);
+            busReadouts[index].setText(gain <= 0.0001f ? "-∞" : juce::String(juce::Decibels::gainToDecibels(gain), 1), juce::dontSendNotification);
+            busMuteButtons[index].setToggleState(bus.muted, juce::dontSendNotification);
+            const auto* rack = trackModel->getBusFxRackSnapshot(bus.id);
+            for (size_t slot = 0; slot < busFxButtons[index].size(); ++slot)
+            {
+                const auto processor = rack != nullptr ? rack->processors[slot] : nullptr;
+                const auto bypassed = processor != nullptr && rack->bypass[slot];
+                busFxButtons[index][slot].setButtonText(processor != nullptr ? processor->getName().substring(0, 18) : "+ INSERT FX");
+                busFxButtons[index][slot].setActive(processor != nullptr && ! bypassed);
+                busFxButtons[index][slot].setBypassControlState(processor != nullptr, bypassed);
+            }
         }
     }
     if (audioEngine != nullptr)
@@ -836,13 +1076,14 @@ void MixerPane::refreshFromModel()
             const auto processor = rack != nullptr ? rack->processors[slot] : nullptr;
             const auto bypassed = processor != nullptr && rack->bypass[slot];
             masterFxButtons[slot].setButtonText(processor != nullptr
-                                                     ? (bypassed ? "OFF  " : "") + processor->getName().substring(0, 26)
+                                                     ? processor->getName().substring(0, 26)
                                                      : "+ Add plug-in");
             masterFxButtons[slot].setTooltip(processor != nullptr
-                                                  ? (bypassed ? "Master plug-in bypassed. Right-click to enable or remove it."
-                                                              : "Master plug-in active. Right-click to bypass or remove it.")
+                                                  ? (bypassed ? "BYPASSED — click centre to open; hover left to enable."
+                                                              : "Click centre to open. Hover left to bypass; right-click to replace or remove.")
                                                   : "Add a Master plug-in. Left-click to insert a plug-in.");
             masterFxButtons[slot].setActive(processor != nullptr && ! bypassed);
+            masterFxButtons[slot].setBypassControlState(processor != nullptr, bypassed);
             hasProcessor = hasProcessor || processor != nullptr;
         }
         masterChainBypass.setEnabled(hasProcessor);
@@ -865,6 +1106,7 @@ void MixerPane::timerCallback()
     if (audioEngine == nullptr) return;
     refreshFromModel();
     for (size_t i = 0; i < meters.size(); ++i) meters[i].updatePeak(audioEngine->getTrackPeak(i));
+    for (size_t i = 0; i < busMeters.size(); ++i) busMeters[i].updatePeak(audioEngine->getBusPeak(i));
     masterMeter.updatePeak(audioEngine->getMasterPeak());
 }
 
@@ -938,18 +1180,27 @@ void MixerPane::paint(juce::Graphics& g)
                 g.drawHorizontalLine(y, static_cast<float>(faderBounds.getRight() + 1), static_cast<float>(faderBounds.getRight() + 3));
             }
             drawScale("+12", 12.0f); drawScale("+6", 6.0f); drawScale("0", 0.0f); drawScale("-6", -6.0f); drawScale("-12", -12.0f);
-            const auto fxHeight = 84;
             const auto firstSlot = fxButtons[i][0].getBounds();
             // The painted rack must use the exact component width, otherwise
             // the final SEND pot can appear to touch the bay edge on a wide
             // display. It also creates a deliberate physical gutter before
             // the meter / fader module.
-            auto inserts = juce::Rectangle<int>(firstSlot.getX(), firstSlot.getY() - 16, firstSlot.getWidth(), fxHeight);
-            g.setColour(mixerSecondaryText); g.setFont(juce::Font(juce::FontOptions(9.0f, juce::Font::bold))); g.drawText("PLUG-INS", inserts.getX() + 4, inserts.getY() + 3, inserts.getWidth() - 8, 13, juce::Justification::centredLeft, false);
+            const auto lastSlot = fxButtons[i][fxRacksExpanded[i] ? fxButtons[i].size() - 1 : 2].getBounds();
+            // Derive the painted insert bay from the actual slot bounds. The
+            // old fixed 84px height was shorter than the eight visible rows,
+            // causing AUX SENDS to be painted over the lower insert slots.
+            auto inserts = juce::Rectangle<int>(firstSlot.getX(), firstSlot.getY() - 16,
+                                                firstSlot.getWidth(),
+                                                lastSlot.getBottom() - firstSlot.getY() + 16);
+            // The FX header button is the insert-bay title. Do not paint a
+            // second label above it: that label used to sit outside the rack
+            // bounds and was clipped into the first slot.
             if (! verticallyCompact)
             {
-                auto sends = inserts.withY(inserts.getBottom() + 10).withHeight(78);
-                g.drawText("AUX SENDS", sends.getX() + 2, sends.getY(), sends.getWidth(), 12, juce::Justification::centredLeft, false);
+                auto sends = inserts.withY(inserts.getBottom() + 10).withHeight(86);
+                g.setColour(mixerSecondaryText.withAlpha(0.92f));
+                g.setFont(juce::Font(juce::FontOptions(9.5f, juce::Font::bold)));
+                g.drawText("AUX SENDS", sends.getX() + 8, sends.getY(), sends.getWidth() - 16, 13, juce::Justification::centredLeft, false);
                 const auto sendPanel = sends.withTop(sends.getY() + 13).toFloat();
                 // Recessed, faceplate-coloured bay: the pots now feel mounted
                 // to the console rather than pasted into a black rectangle.
@@ -979,23 +1230,52 @@ void MixerPane::paint(juce::Graphics& g)
                     const auto knobBounds = sendKnobs[i][route].getBounds();
                     const auto& send = track.sends[route];
                     const auto amount = send.targetBus.isValid() ? send.level : 0.0f;
-                    const auto amountText = ! send.targetBus.isValid() ? "OFF"
-                        : amount <= 0.0001f ? "−∞"
-                        : juce::String(juce::Decibels::gainToDecibels(amount), 1);
+                    const auto amountText = ! send.targetBus.isValid() ? "--"
+                        : juce::String(juce::roundToInt(amount * 100.0f)) + "%";
                     // Values are engravings, not mini LCD buttons. This keeps
                     // the four sends readable at full-mixer scale.
                     g.setColour(send.targetBus.isValid() ? mixerText.withAlpha(0.92f) : mixerSecondaryText.withAlpha(0.62f));
-                    g.setFont(juce::Font(juce::FontOptions(8.0f, juce::Font::bold)));
-                    g.drawText(amountText, knobBounds.getCentreX() - 18, knobBounds.getBottom() + 10, 36, 10,
+                    g.setFont(juce::Font(juce::FontOptions(8.6f, juce::Font::bold)));
+                    // Keep the send value inside the recessed AUX faceplate;
+                    // the previous baseline was below the panel and made
+                    // OFF/level text visibly fall into the PAN area.
+                    g.drawText(amountText, knobBounds.getCentreX() - 18, knobBounds.getBottom() + 12, 36, 10,
                                juce::Justification::centred, false);
                 }
                 const auto panBounds = panSliders[i].getBounds();
-                const auto panTextY = panBounds.getY() - 14;
-                g.setColour(mixerSecondaryText); g.drawText("PAN", inserts.getX() + 2, panTextY, 34, 12, juce::Justification::centredLeft, false);
+                const auto panTextY = panBounds.getY() - 16;
+                g.setColour(mixerSecondaryText); g.drawText("PAN", panBounds.getCentreX() - 24, panTextY, 48, 12, juce::Justification::centred, false);
                 g.setFont(juce::Font(juce::FontOptions(8.0f, juce::Font::bold)));
                 g.drawText("L", panBounds.getCentreX() - 28, panBounds.getBottom() + 2, 10, 9, juce::Justification::centred, false);
                 g.drawText("C", panBounds.getCentreX() - 5, panBounds.getBottom() + 2, 10, 9, juce::Justification::centred, false);
                 g.drawText("R", panBounds.getCentreX() + 18, panBounds.getBottom() + 2, 10, 9, juce::Justification::centred, false);
+            }
+        }
+        for (size_t busIndex = 0; busIndex < busStripBounds.size() && static_cast<int>(busIndex) < displayedBusCount; ++busIndex)
+        {
+            const auto& bounds = busStripBounds[busIndex];
+            drawStrip(bounds, mixerAccent);
+            const auto nameplate = busLabels[busIndex].getBounds().toFloat();
+            drawSkin(g, nameplateSkin(), nameplate);
+            g.setGradientFill(juce::ColourGradient(juce::Colour(0xff1b3037), nameplate.getX(), nameplate.getY(),
+                                                    juce::Colour(0xff14262d), nameplate.getRight(), nameplate.getBottom(), false));
+            g.fillRoundedRectangle(nameplate.reduced(1.5f), 4.0f);
+            g.setColour(mixerAccent.withAlpha(0.74f));
+            g.drawRoundedRectangle(nameplate.reduced(1.0f), 4.0f, 1.0f);
+            for (const auto& button : busFxButtons[busIndex])
+                if (! button.getBounds().isEmpty()) drawSkin(g, insertSkin(), button.getBounds().toFloat());
+            drawSkin(g, meterOffSkin(), busMeters[busIndex].getBounds().toFloat(), 0.62f);
+            const auto faderBounds = busFaders[busIndex].getBounds();
+            g.setColour(mixerSecondaryText.withAlpha(0.78f));
+            g.setFont(juce::Font(juce::FontOptions(8.0f, juce::Font::bold)));
+            g.drawText("AUX RETURN", bounds.getX() + 12, bounds.getY() + 23, bounds.getWidth() - 24, 12, juce::Justification::centred, false);
+            g.drawText("MASTER OUT", bounds.getX() + 12, busMuteButtons[busIndex].getY() - 16, bounds.getWidth() - 24, 11, juce::Justification::centred, false);
+            for (const auto [label, db] : std::array<std::pair<const char*, float>, 3> { { { "+6", 6.0f }, { "0", 0.0f }, { "-6", -6.0f } } })
+            {
+                const auto proportion = static_cast<float>(busFaders[busIndex].valueToProportionOfLength(db));
+                const auto y = juce::roundToInt(faderBounds.getY() + (1.0f - proportion) * faderBounds.getHeight());
+                g.setColour(label[0] == '0' ? mixerText.withAlpha(0.9f) : mixerSecondaryText.withAlpha(0.58f));
+                g.drawText(label, faderBounds.getRight() + 4, y - 5, 16, 10, juce::Justification::centred, false);
             }
         }
     }
@@ -1114,6 +1394,7 @@ void MixerPane::resized()
     mixerTab.setBounds(toolbar.removeFromLeft(86).reduced(5, 7)); toolbar.removeFromLeft(6);
     masterTab.setBounds(toolbar.removeFromLeft(86).reduced(3, 7));
     trackStripBounds.fill({});
+    busStripBounds.fill({});
     const auto content = area.reduced(6, 7); const auto verticallyCompact = content.getHeight() < 334; const auto gap = 6;
     // Standard density always attempts to show the five primary tracks as a
     // complete console, as in the reference; horizontal scrolling starts only
@@ -1160,12 +1441,13 @@ void MixerPane::resized()
             // the remaining height so the lower half never becomes dead space.
             inner.removeFromTop(12);
             const auto expandedRack = fxRacksExpanded[static_cast<size_t>(i)] && ! verticallyCompact;
-            auto fxArea = inner.removeFromTop(expandedRack ? 164 : 38);
+            const auto visibleSlotCount = expandedRack ? static_cast<int>(TrackDataModel::maxFxSlots) : 3;
+            auto fxArea = inner.removeFromTop(expandedRack ? 164 : 82);
             fxRackButtons[static_cast<size_t>(i)].setBounds(fxArea.getX(), fxArea.getY(), fxArea.getWidth(), 22);
             const auto slotArea = fxArea.withTrimmedTop(26);
-            const auto rowHeight = expandedRack ? juce::jmax(16, slotArea.getHeight() / static_cast<int>(TrackDataModel::maxFxSlots)) : 0;
+            const auto rowHeight = juce::jmax(16, slotArea.getHeight() / visibleSlotCount);
             for (size_t slot = 0; slot < fxButtons[static_cast<size_t>(i)].size(); ++slot)
-                fxButtons[static_cast<size_t>(i)][slot].setBounds(expandedRack
+                fxButtons[static_cast<size_t>(i)][slot].setBounds((static_cast<int>(slot) < visibleSlotCount)
                     ? juce::Rectangle<int>(slotArea.getX(), slotArea.getY() + static_cast<int>(slot) * rowHeight,
                                              slotArea.getWidth(), rowHeight - 2)
                     : juce::Rectangle<int>());
@@ -1177,7 +1459,7 @@ void MixerPane::resized()
             }
             else
             {
-                auto sends = inner.removeFromTop(82); sends.removeFromTop(21);
+                auto sends = inner.removeFromTop(90); sends.removeFromTop(12);
                 // Match the four painted mounting cells exactly.  The old
                 // broad bounds put the last pot visually against the edge.
                 const auto knobArea = sends.reduced(8, 0);
@@ -1188,17 +1470,54 @@ void MixerPane::resized()
                     const auto cell = juce::Rectangle<int>(knobArea.getX() + static_cast<int>(slot) * cellWidth, knobArea.getY(), cellWidth, sends.getHeight());
                     sendKnobs[static_cast<size_t>(i)][slot].setBounds(cell.withSizeKeepingCentre(knobWidth, knobWidth));
                     const auto knobBounds = sendKnobs[static_cast<size_t>(i)][slot].getBounds();
-                    sendRouteButtons[static_cast<size_t>(i)][slot].setBounds(knobBounds.getCentreX() - 20, knobBounds.getBottom(), 40, 10);
+                    sendRouteButtons[static_cast<size_t>(i)][slot].setBounds(knobBounds.getCentreX() - 25, knobBounds.getBottom() - 1, 50, 12);
                 }
                 // The remaining rack height belongs to PAN, so the channel
                 // retains a deliberate vertical rhythm instead of a dead
                 // rectangle between the pan and its bottom action row.
                 auto panArea = inner.reduced(0, 4);
-                const auto panSize = 66;
+                const auto panSize = 62;
                 panSliders[i].setBounds(panArea.getCentreX() - panSize / 2,
-                                        panArea.getBottom() - panSize - 17,
+                                        // Keep PAN below the AUX bay.  The
+                                        // previous offset pulled it upward
+                                        // into the send knobs at compact strip
+                                        // widths, making the controls appear
+                                        // stacked on top of one another.
+                                        panArea.getBottom() - panSize - 18,
                                         panSize, panSize);
             }
+        }
+
+        // Aux returns follow source strips in the same horizontal rack. This
+        // makes the return fader and insert chain visible at the moment a
+        // musician creates a send, rather than hiding a second mixer model.
+        for (int busIndex = 0; busIndex < displayedBusCount; ++busIndex)
+        {
+            const auto strip = juce::Rectangle<int>(content.getX() + (displayedTrackCount + busIndex) * (stripWidth + gap) - horizontalScroll,
+                                                     content.getY(), stripWidth, content.getHeight());
+            busStripBounds[static_cast<size_t>(busIndex)] = strip;
+            auto inner = strip.reduced(12, 10);
+            busLabels[static_cast<size_t>(busIndex)].setBounds(inner.removeFromBottom(25));
+            auto controls = inner.removeFromBottom(39);
+            busMuteButtons[static_cast<size_t>(busIndex)].setBounds(controls.removeFromLeft(controls.getWidth() / 2).reduced(2, 4));
+            auto faderColumn = inner.removeFromRight(90);
+            inner.removeFromRight(10);
+            faderColumn.removeFromTop(32);
+            const auto readoutArea = faderColumn.removeFromBottom(21);
+            busMeters[static_cast<size_t>(busIndex)].setBounds(faderColumn.removeFromLeft(15).reduced(0, 3));
+            const auto faderArea = faderColumn.withTrimmedLeft(6).withTrimmedRight(41).reduced(0, 3);
+            busFaders[static_cast<size_t>(busIndex)].setBounds(faderArea);
+            busReadouts[static_cast<size_t>(busIndex)].setBounds(faderArea.getCentreX() - 23, readoutArea.getY() + 2, 46, 17);
+            inner.removeFromTop(12);
+            auto fxArea = inner.removeFromTop(96);
+            const auto slotArea = fxArea.withTrimmedTop(4);
+            constexpr int visibleSlots = 4;
+            const auto rowHeight = juce::jmax(16, slotArea.getHeight() / visibleSlots);
+            for (size_t slot = 0; slot < busFxButtons[static_cast<size_t>(busIndex)].size(); ++slot)
+                busFxButtons[static_cast<size_t>(busIndex)][slot].setBounds(slot < visibleSlots
+                    ? juce::Rectangle<int>(slotArea.getX(), slotArea.getY() + static_cast<int>(slot) * rowHeight,
+                                             slotArea.getWidth(), rowHeight - 2)
+                    : juce::Rectangle<int>());
         }
     }
     else
@@ -1263,7 +1582,7 @@ void MixerPane::mouseWheelMove(const juce::MouseEvent& event, const juce::MouseW
     if (event.position.y < toolbarHeight || activeView == View::master) return;
     const auto delta = wheel.deltaX != 0.0f ? wheel.deltaX : (event.mods.isShiftDown() ? wheel.deltaY : 0.0f); if (delta == 0.0f) return;
     const auto stripWidth = juce::jlimit(220, 314, (getWidth() - 12 - 6 * 4) / 5);
-    const auto maximum = juce::jmax(0, (stripWidth + 6) * displayedTrackCount - getWidth() + 12);
+    const auto maximum = juce::jmax(0, (stripWidth + 6) * (displayedTrackCount + displayedBusCount) - getWidth() + 12);
     horizontalScroll = juce::jlimit(0, maximum, horizontalScroll - juce::roundToInt(delta * 180.0f)); resized();
 }
 void MixerPane::requestHeight(int height)

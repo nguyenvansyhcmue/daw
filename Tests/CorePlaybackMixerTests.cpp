@@ -17,6 +17,7 @@ void operator delete(void* allocation) noexcept { std::free(allocation); }
 #endif
 
 #include "AudioEngine/AudioGraph.h"
+#include "AudioEngine/AuxRoutingPlan.h"
 #include "AudioEngine/AudioEngine.h"
 #include "AudioEngine/GainUtilityProcessor.h"
 #include "AudioEngine/LivePerformanceAssessment.h"
@@ -24,6 +25,9 @@ void operator delete(void* allocation) noexcept { std::free(allocation); }
 #include "AudioEngine/TransportUtils.h"
 #include "AudioEngine/GlobalScaleContext.h"
 #include "Control/StudioForgeControlBridge.h"
+#include "Control/PluginSemanticMapper.h"
+#include "Control/PerformanceMacroService.h"
+#include "Control/PerformanceSurfaceProtocol.h"
 #include "Control/MusicalKey.h"
 #include "Control/VibeAutotuneAdapter.h"
 #include "Media/WaveformThumbnailCache.h"
@@ -39,6 +43,7 @@ void operator delete(void* allocation) noexcept { std::free(allocation); }
 #include "Project/ProjectTemplates.h"
 #include "Project/ProjectTemplateStore.h"
 #include "Project/ProjectAlternativeStore.h"
+#include "Project/ProjectBackupStore.h"
 #include "UI/Inspector/InspectorViewState.h"
 #include "UI/AudioRegionInteraction.h"
 #include "UI/TimelineNavigation/TimelineViewportController.h"
@@ -85,9 +90,12 @@ bool testTimelineViewportNavigation()
     const auto sampleAtPivot = zoomed.viewStartSample + 240.0 / (80.0 * zoomed.horizontalZoom) * 48000.0;
     TimelineViewportController controller(initial);
     controller.setState(zoomed);
+    auto waveformZoomed = zoomed;
+    waveformZoomed.waveformZoom = 4.0f;
+    controller.setState(waveformZoomed);
     return expect(std::abs(sampleAtPivot - pivot) < 0.01, "timeline zoom keeps pointer pivot stable")
-        && expect(controller.back() && controller.state().approximatelyEquals(initial), "timeline navigation restores prior viewport")
-        && expect(controller.forward() && controller.state().approximatelyEquals(zoomed), "timeline navigation reapplies forward viewport");
+        && expect(controller.back() && controller.state().approximatelyEquals(zoomed), "timeline navigation restores prior viewport")
+        && expect(controller.forward() && controller.state().approximatelyEquals(waveformZoomed), "timeline navigation retains independent waveform amplitude zoom");
 }
 
 bool testGlobalScaleContext()
@@ -194,6 +202,119 @@ bool testStudioForgeControlBridge()
     if (! expect(! wrongPlugin.succeeded && wrongPlugin.error.contains("does not match"), "control bridge rejects a route targeting the wrong plug-in")) return false;
     const auto invalid = ControlCommand::keySignatureFor(ControlTarget::mic1, 12, false);
     return expect(! bridge.apply(invalid).succeeded, "control bridge rejects invalid key commands");
+}
+
+bool testPluginSemanticMapping()
+{
+    const std::vector<EffectParameterDescriptor> reverbParameters {
+        { "return_level", "Return Level" }, { "mix", "Dry / Wet" }, { "rt60", "Reverb Time" }
+    };
+    const auto reverb = PluginSemanticMapper::propose("Modern Hall Reverb", reverbParameters);
+    if (! expect(reverb.displayName == "Vocal Space" && reverb.targets.size() == 3
+                 && ! reverb.needsReview && reverb.confidence >= 0.9f,
+                 "semantic mapper produces a safe high-confidence reverb macro")) return false;
+
+    const std::vector<EffectParameterDescriptor> delayParameters {
+        { "output", "Output Level" }, { "feedback", "Feedback" }, { "tone", "Echo Tone" }
+    };
+    const auto delay = PluginSemanticMapper::propose("Studio Echo", delayParameters);
+    const auto feedback = std::find_if(delay.targets.begin(), delay.targets.end(), [] (const SmartMacroTarget& target)
+    {
+        return target.semantic == PluginParameterSemantic::delayFeedback;
+    });
+    if (! expect(delay.displayName == "Lead Delay" && feedback != delay.targets.end()
+                 && feedback->maximum <= 0.65f,
+                 "semantic mapper caps generic delay feedback below unsafe ranges")) return false;
+
+    const auto unknown = PluginSemanticMapper::propose("Opaque Processor", { { "Mode", "Mode" } });
+    return expect(unknown.targets.empty() && unknown.needsReview && unknown.displayName == "Unassigned",
+                  "semantic mapper leaves unknown plug-ins unassigned instead of guessing");
+}
+
+class PerformanceMacroTestEffect final : public AudioEffectProcessor
+{
+public:
+    void prepareToPlay(double, int, int) override {}
+    void processBlock(juce::AudioBuffer<float>&) override {}
+    void releaseResources() override {}
+    juce::String getName() const override { return "Studio Hall Reverb"; }
+    juce::String getPersistentIdentifier() const override { return "com.studioforge.test-hall"; }
+    bool setParameterValue(const juce::String& identifier, float value) override
+    {
+        if (identifier != "return" && identifier != "mix" && identifier != "decay") return false;
+        values.set(identifier, value);
+        return true;
+    }
+    float valueFor(const juce::String& identifier) const { return values[identifier]; }
+    juce::String getParameterText(const juce::String& identifier) const override
+    {
+        return juce::String(values[identifier], 2);
+    }
+    std::vector<EffectParameterDescriptor> getParameterDescriptors() const override
+    {
+        return { { "return", "Return Level" }, { "mix", "Mix" }, { "decay", "Decay" } };
+    }
+
+private:
+    juce::HashMap<juce::String, float> values;
+};
+
+bool testPerformanceMacroService()
+{
+    TrackDataModel model;
+    const auto bus = model.addBus();
+    auto effect = std::make_shared<PerformanceMacroTestEffect>();
+    model.setBusFxProcessor(bus, 0, effect);
+    PerformanceMacroService macros(model);
+
+    const auto preview = macros.preview(bus, 0);
+    if (! expect(preview.available && preview.proposal.displayName == "Vocal Space"
+                 && preview.proposal.targets.size() == 3,
+                 "performance macros preview the actual bus plug-in metadata")) return false;
+    const auto applied = macros.apply(0, bus, 0);
+    if (! expect(applied.succeeded && applied.snapshot.state == PerformanceMacroService::State::active,
+                 "performance macro applies a high-confidence smart mapping")) return false;
+    const auto changed = macros.setValue(0, 0.5f);
+    if (! expect(changed.succeeded && effect->valueFor("return") > 0.0f && effect->valueFor("mix") > 0.0f,
+                 "performance macro updates the selected plug-in through safe mapped targets")) return false;
+
+    model.setBusFxBypassed(bus, 0, true);
+    macros.refresh();
+    if (! expect(macros.getSnapshot(0).state == PerformanceMacroService::State::bypassed,
+                 "performance macro mirrors a bus plug-in bypass state")) return false;
+
+    model.setBusFxProcessor(bus, 0, std::make_shared<ControlBridgeTestEffect>());
+    macros.refresh();
+    return expect(macros.getSnapshot(0).state == PerformanceMacroService::State::unassigned,
+                  "performance macro never retargets a replacement plug-in by slot alone");
+}
+
+bool testPerformanceSurfaceProtocol()
+{
+    TrackDataModel model;
+    const auto bus = model.addBus();
+    auto effect = std::make_shared<PerformanceMacroTestEffect>();
+    model.setBusFxProcessor(bus, 0, effect);
+    PerformanceMacroService macros(model);
+    PerformanceSurfaceProtocol protocol(model, macros, "local-test-token");
+
+    const auto request = "{\"token\":\"local-test-token\",\"projectRevision\":\""
+        + juce::String(model.getProjectRevision())
+        + "\",\"command\":\"applyMacroMapping\",\"macroId\":0,\"busId\":\""
+        + juce::String(bus.value) + "\",\"pluginSlot\":0,\"pluginInstanceId\":\""
+        + effect->getPersistentIdentifier() + "\",\"confirmNeedsReview\":false}";
+    const auto reply = juce::JSON::parse(protocol.handleCommand(request));
+    const auto* object = reply.getDynamicObject();
+    if (! expect(object != nullptr && static_cast<bool>(object->getProperty("ok")),
+                 "performance surface accepts an authenticated semantic macro command")) return false;
+
+    const auto payload = protocol.makeStatePayload();
+    if (! expect(payload.contains("Vocal Space") && payload.contains("Return Level"),
+                 "performance surface publishes DAW-owned macro names and parameter readouts")) return false;
+
+    const auto unauthorised = protocol.handleCommand(request.replace("local-test-token", "wrong-token"));
+    return expect(unauthorised.contains("not authorised"),
+                  "performance surface rejects unauthorised control-surface commands");
 }
 
 bool testMusicalKeyNormalization()
@@ -332,13 +453,40 @@ bool testProjectAlternativeStore()
     const auto alternativeWritten = alternativeFile.getParentDirectory().createDirectory()
         && alternativeFile.replaceWithText("alternative");
     const auto alternatives = store.load(projectFile);
+    const auto secondAlternative = store.makeAlternativeFile(projectFile, "Vocal / Edit");
     const auto valid = rootWritten && alternativeWritten
         && alternativeFile.hasFileExtension("studioforge")
         && alternativeFile.getParentDirectory().getFileName() == "Mix Alternatives"
+        && secondAlternative != alternativeFile
         && alternatives.size() == 1
         && alternatives[0] == alternativeFile.getFullPathName();
     directory.deleteRecursively();
-    return expect(valid, "alternative store isolates and lists project alternatives");
+    return expect(valid, "alternative store isolates, avoids overwrites, and lists project alternatives");
+}
+
+bool testProjectBackupStore()
+{
+    const auto directory = juce::File::getCurrentWorkingDirectory()
+        .getNonexistentChildFile("StudioForgeBackupStore", {}, true);
+    const auto projectFile = directory.getChildFile("Mix.studioforge");
+    if (! directory.createDirectory() || ! projectFile.replaceWithText("revision 0"))
+        return expect(false, "project backup store prepares its project document");
+
+    ProjectBackupStore store;
+    auto capturedAllVersions = true;
+    for (int revision = 1; revision <= ProjectBackupStore::maximumBackups + 2; ++revision)
+    {
+        capturedAllVersions = capturedAllVersions && store.captureCurrentVersion(projectFile).wasOk();
+        capturedAllVersions = capturedAllVersions && projectFile.replaceWithText("revision " + juce::String(revision));
+    }
+    const auto backups = store.load(projectFile);
+    const auto backupDirectory = projectFile.getParentDirectory().getChildFile("Mix Backups");
+    const auto valid = capturedAllVersions
+        && backups.size() == ProjectBackupStore::maximumBackups
+        && backupDirectory.isDirectory()
+        && juce::File(backups[backups.size() - 1]).loadFileAsString().startsWith("revision");
+    directory.deleteRecursively();
+    return expect(valid, "project backup store keeps a rolling history of the last ten manual save versions");
 }
 
 class OfflineAudioDevice final : public juce::AudioIODevice
@@ -827,8 +975,11 @@ bool testProjectPersistence()
     source.setTrackSoloSafe(static_cast<size_t>(source.getTrackIndex(trackA)), true);
     source.setTrackInputMonitoring(static_cast<size_t>(source.getTrackIndex(trackA)), true, 1);
     const auto bus = source.addBus();
+    source.setBusName(bus, "Vocal Reverb");
+    source.setBusBalance(bus, -0.4f);
     source.setTrackOutputBus(trackA, bus);
     source.setTrackSend(trackB, bus, 0.35f);
+    source.setTrackSendPostFaderBeforePan(trackB, 0, true);
     source.setBpm(137.0);
     source.setTimeSignatureNumerator(7);
     source.setTimeSignatureDenominator(8);
@@ -889,9 +1040,11 @@ bool testProjectPersistence()
                  "automation lanes round-trip with project state")) return false;
     if (! expect(after.tracks[1].inputMonitoring && after.tracks[1].inputChannel == 1,
                  "track input-monitor routing round-trips")) return false;
-    if (! expect(after.buses.size() == 1 && after.buses[0].id == bus
+    if (! expect(after.buses.size() == 1 && after.buses[0].id == bus && after.buses[0].name == "Vocal Reverb"
+                 && approximatelyEqual(after.buses[0].balance, -0.4f)
                  && after.tracks[1].outputBus == bus && after.tracks[2].activeSendCount == 1
-                 && after.tracks[2].sends[0].targetBus == bus && approximatelyEqual(after.tracks[2].sends[0].level, 0.35f),
+                 && after.tracks[2].sends[0].targetBus == bus && after.tracks[2].sends[0].postFaderBeforePan
+                 && approximatelyEqual(after.tracks[2].sends[0].level, 0.35f),
                  "bus and send routing round-trips")) return false;
     if (! expect(loaded.clearTrackSend(trackB) && loaded.createProjectState().tracks[2].activeSendCount == 0,
                  "track send can be disabled without changing track ownership")) return false;
@@ -984,11 +1137,16 @@ bool testAutosaveRecovery()
     const auto recoveredFile = autosave.getRecoveryFile();
     const auto recoveredOk = ProjectSerializer::load(recovered, recoveredFile).wasOk()
         && recovered.getTrackCount() == 1;
+    const auto staleTemporary = recoveredFile.getSiblingFile(recoveredFile.getFileName() + ".tmp");
+    const auto staleWriterTemporary = staleTemporary.getSiblingFile(staleTemporary.getFileName() + ".write-tmp");
+    staleTemporary.replaceWithText("stale recovery temporary");
+    staleWriterTemporary.replaceWithText("stale writer temporary");
     autosave.markProjectSaved();
-    const auto clearedOk = ! autosave.hasRecoverySnapshot();
+    const auto clearedOk = ! autosave.hasRecoverySnapshot()
+        && ! staleTemporary.exists() && ! staleWriterTemporary.exists();
     temporaryRoot.deleteRecursively();
     return expect(recoveredOk, "recovery snapshot restores the project model")
-        && expect(clearedOk, "successful explicit save clears the recovery snapshot");
+        && expect(clearedOk, "successful explicit save clears recovery snapshots and stale temporary files");
 }
 
 bool testRecentProjectsStore()
@@ -1009,6 +1167,8 @@ bool testRecentProjectsStore()
     auto entries = store.load();
     if (! expect(entries.size() == 2 && entries[0] == first.getFullPathName() && entries[1] == second.getFullPathName(),
                  "recent projects are deduplicated and ordered by last open")) return false;
+    const auto temporaryFile = storage.getSiblingFile(storage.getFileName() + ".tmp");
+    if (! expect(! temporaryFile.exists(), "recent-project writes do not leave a temporary file")) return false;
     second.deleteFile();
     entries = store.load();
     if (! expect(entries.size() == 1 && entries[0] == first.getFullPathName(),
@@ -1098,6 +1258,28 @@ bool testMediaReloadAndRelink()
     portableMediaA.getParentDirectory().deleteRecursively();
     portableMediaB.getParentDirectory().deleteRecursively();
     return true;
+}
+
+bool testMediaReloadCachesFailedSourcesPerBatch()
+{
+    const auto invalidMedia = juce::File::getCurrentWorkingDirectory()
+        .getChildFile("studioforge-invalid-media-reload.wav");
+    invalidMedia.deleteFile();
+    if (! invalidMedia.replaceWithText("not a WAV file"))
+        return expect(false, "media reload test writes an invalid source once");
+
+    TrackDataModel model;
+    model.ensureTrackCount(1);
+    auto placeholder = std::make_shared<juce::AudioBuffer<float>>(1, 8);
+    const auto first = model.addClipToTrack(0, invalidMedia, 0.0, placeholder);
+    const auto second = model.addClipToTrack(0, invalidMedia, 16.0, placeholder);
+    const auto report = MediaReloadService::reloadProjectMedia(model);
+    const auto valid = first.isValid() && second.isValid()
+        && model.getClipMediaStatus(first) == AudioMediaStatus::DecodeFailed
+        && model.getClipMediaStatus(second) == AudioMediaStatus::DecodeFailed
+        && report.failedSourceCount == 1 && report.decodeFailures.size() == 1;
+    invalidMedia.deleteFile();
+    return expect(valid, "media reload tries a failed shared source once and marks every dependent clip safely");
 }
 
 bool testImmediateAudioImportPlaceholder()
@@ -1205,11 +1387,65 @@ bool testRecordingFoundation()
                  && approximatelyEqual(clips.front().cachedBuffer->getSample(1, 2), 0.2f),
                  "recorded data becomes a playable clip")) return false;
     const auto clipCount = clips.size();
+    if (! expect(recordingFile.replaceWithText("existing take is preserved until recording completes"),
+                 "recording test prepares an existing destination")) return false;
     if (! expect(engine.startRecording(0, recordingFile).wasOk()
-                 && engine.stopRecording().wasOk() && model.getTrack(0).clips.size() == clipCount,
-                 "empty recording finalizes without creating an invalid clip")) return false;
+                 && engine.stopRecording().wasOk() && model.getTrack(0).clips.size() == clipCount
+                 && recordingFile.loadFileAsString() == "existing take is preserved until recording completes",
+                 "empty recording leaves an existing take untouched")) return false;
+    if (! expect(engine.startRecording(0, recordingFile).wasOk(),
+                 "recording can begin before a benign device renegotiation")) return false;
+    engine.audioDeviceStopped();
+    engine.audioDeviceAboutToStart(&device);
+    if (! expect(! engine.consumeRecordingInterruptedByDeviceDisconnect() && engine.isRecording()
+                 && engine.stopRecording().wasOk(),
+                 "device stop/start renegotiation does not falsely abort a recording take")) return false;
     recordingFile.deleteFile();
     return true;
+}
+
+bool testRecordedTakeGroups()
+{
+    TrackDataModel model;
+    model.addTrack(TrackType::audio);
+    auto firstPass = std::make_shared<juce::AudioBuffer<float>>(2, 64);
+    auto secondPass = std::make_shared<juce::AudioBuffer<float>>(2, 64);
+    firstPass->clear();
+    secondPass->clear();
+
+    const auto firstTake = model.addRecordedClipToTrack(0, {}, 0.0, firstPass);
+    const auto secondTake = model.addRecordedClipToTrack(0, {}, 0.0, secondPass);
+    const auto& takes = model.getTrack(0).clips;
+    if (! expect(firstTake.isValid() && secondTake.isValid() && takes.size() == 2,
+                 "overdub recording preserves both passes")) return false;
+    if (! expect(takes[0].recordedTake && takes[1].recordedTake && takes[0].takeGroupId != 0
+                 && takes[0].takeGroupId == takes[1].takeGroupId && ! takes[0].takeActive && takes[1].takeActive,
+                 "latest overlapping recording becomes the active take")) return false;
+    if (! expect(model.selectActiveTake(firstTake) && takes[0].takeActive && ! takes[1].takeActive,
+                 "an earlier recorded take can be reselected without deleting alternatives")) return false;
+    model.splitAudioClip(0, 0, 32.0);
+    const auto& splitTakes = model.getTrack(0).clips;
+    if (! expect(splitTakes.size() == 3 && splitTakes[0].takeId == splitTakes[1].takeId
+                 && splitTakes[0].takeActive && splitTakes[1].takeActive,
+                 "splitting an active take keeps its fragments as one active pass")) return false;
+    const auto folderId = model.getTakeFolders(0).front().id;
+    if (! expect(model.selectTakeFolderRange(folderId, splitTakes[2].takeId, 0.0, 16.0),
+                 "quick swipe selection replaces a comp time range with another take")) return false;
+
+    TrackDataModel restored;
+    const auto savedState = model.createProjectState();
+    if (! expect(savedState.tracks[0].takeFolders.size() == 1
+                 && savedState.tracks[0].takeFolders[0].state.comps.size() == 1
+                 && savedState.tracks[0].takeFolders[0].state.comps[0].segments.size() == 2
+                 && savedState.tracks[0].takeFolders[0].state.comps[0].segments[0].sourceTakeId == splitTakes[2].takeId
+                 && savedState.tracks[0].takeFolders[0].state.activeCompId.isValid(),
+                 "overdub recordings form a persisted take folder with an active comp")) return false;
+    if (! expect(restored.applyProjectState(savedState).wasOk(),
+                 "take grouping survives the project model round-trip")) return false;
+    const auto& restoredTakes = restored.getTrack(0).clips;
+    return expect(restoredTakes.size() == 3 && restoredTakes[0].takeGroupId == splitTakes[0].takeGroupId
+                  && restoredTakes[0].takeActive && restoredTakes[1].takeActive && ! restoredTakes[2].takeActive,
+                  "active take selection survives project restore");
 }
 
 bool testMultiTrackRecording()
@@ -1698,6 +1934,10 @@ bool testOfflineBounce()
     const auto flacFile = outputFile.withFileExtension(".flac");
     outputFile.deleteFile();
     flacFile.deleteFile();
+    const auto temporaryWav = outputFile.getSiblingFile(
+        "." + outputFile.getFileNameWithoutExtension() + ".studioforge-render.tmp" + outputFile.getFileExtension());
+    temporaryWav.deleteFile();
+    if (! expect(outputFile.replaceWithText("previous bounce"), "offline bounce test prepares an existing destination")) return false;
     TrackDataModel model;
     model.ensureTrackCount(1);
     auto source = std::make_shared<juce::AudioBuffer<float>>(2, 4);
@@ -1709,8 +1949,9 @@ bool testOfflineBounce()
     const auto revisionBeforeBounce = model.getProjectRevision();
     AudioEngine engine(&model);
     engine.setMasterGain(0.5f);
-    if (! expect(engine.renderOfflineWav(outputFile, 44100.0, 2).wasOk() && outputFile.existsAsFile(),
-                 "offline bounce writes WAV without an audio device")) return false;
+    if (! expect(engine.renderOfflineWav(outputFile, 44100.0, 2).wasOk() && outputFile.existsAsFile()
+                 && ! temporaryWav.exists(),
+                 "offline bounce atomically replaces an existing WAV without an audio device")) return false;
     std::shared_ptr<juce::AudioBuffer<float>> rendered;
     if (! expect(MediaReloadService::decode(outputFile, rendered).wasOk()
                  && rendered->getNumSamples() == 4
@@ -1730,6 +1971,38 @@ bool testOfflineBounce()
     outputFile.deleteFile();
     flacFile.deleteFile();
     return true;
+}
+
+bool testOfflineStemExport()
+{
+    const auto directory = juce::File::getCurrentWorkingDirectory()
+        .getChildFile("StudioForgeStemExportTest");
+    directory.deleteRecursively();
+    if (! directory.createDirectory())
+        return expect(false, "offline stem export test creates its output directory");
+
+    TrackDataModel model;
+    model.ensureTrackCount(2);
+    auto source = std::make_shared<juce::AudioBuffer<float>>(2, 16);
+    source->clear();
+    source->setSample(0, 0, 0.5f);
+    source->setSample(1, 0, 0.5f);
+    model.addClipToTrack(0, {}, 0.0, source);
+    model.addClipToTrack(1, {}, 0.0, source);
+
+    AudioEngine engine(&model);
+    AudioEngine::OfflineRenderOptions options;
+    options.sampleRate = 44100.0;
+    options.blockSize = 8;
+    const auto result = engine.renderOfflineStems(directory, options);
+    juce::Array<juce::File> renderedFiles;
+    directory.findChildFiles(renderedFiles, juce::File::findFiles, false, "*.wav");
+    juce::Array<juce::File> temporaryFiles;
+    directory.findChildFiles(temporaryFiles, juce::File::findFiles, false, "*.studioforge-stem.tmp*");
+    const auto wasSuccessful = result.wasOk() && renderedFiles.size() == 2 && temporaryFiles.isEmpty();
+    directory.deleteRecursively();
+    return expect(wasSuccessful,
+                  "offline stem export promotes only completed files and removes staging files");
 }
 
 bool testMidiOnlyOfflineBounce()
@@ -1868,6 +2141,56 @@ bool testAudioMediaSourceOwnership()
                   "deleting one clip preserves the remaining source-backed playback clip");
 }
 
+bool testAudioClipNoOpEditsDoNotPolluteUndoHistory()
+{
+    TrackDataModel model;
+    const auto track = model.addTrack(TrackType::audio);
+    auto source = std::make_shared<juce::AudioBuffer<float>>(1, 32);
+    const auto clip = model.addClipToTrack(0, {}, 64.0, source);
+    model.clearUndoHistory();
+
+    const auto& initial = model.getTrack(0).clips.front();
+    const auto moveAccepted = model.moveAudioClip(clip, track, initial.startSample);
+    model.trimAudioClip(0, 0, initial.startSample, initial.durationSamples);
+    return expect(moveAccepted && ! model.canUndo(),
+                  "no-op audio clip move and trim do not create undo entries or render snapshots");
+}
+
+bool testAudioMediaPoolDoesNotRetainUnusedDecodes()
+{
+    AudioMediaPool pool;
+    const auto sourceFile = juce::File("C:/StudioForgeTests/expired-cache.wav");
+    auto decoded = std::make_shared<juce::AudioBuffer<float>>(2, 64);
+    std::weak_ptr<juce::AudioBuffer<float>> weakDecoded = decoded;
+
+    pool.registerDecodedSource(sourceFile, decoded);
+    if (! expect(pool.findPlaybackData(sourceFile) == decoded,
+                 "media pool exposes a live decoded source")) return false;
+
+    decoded.reset();
+    return expect(weakDecoded.expired() && pool.findPlaybackData(sourceFile) == nullptr
+                      && pool.size() == 1,
+                  "media pool keeps source metadata without retaining unused decoded audio");
+}
+
+bool testAuxRoutingPlan()
+{
+    using Plan = AuxRoutingPlan<4>;
+    std::array<Plan::Bus, 4> buses {{{ {1}, {3}, 100, true }, { {2}, {3}, 30, true },
+                                     { {3}, {}, 20, true }, { {4}, {}, 500, false } }};
+    Plan plan;
+    if (! expect(plan.build(buses, buses.size()) && plan.masterDirectDelay == 120
+                 && plan.directInputDelay[2] == 100 && plan.outputDelay[0] == 0
+                 && plan.outputDelay[1] == 70 && plan.outputDelay[2] == 0,
+                 "aux plan aligns parallel inputs and ignores unused buses")) return false;
+    buses[2].output = {1};
+    if (! expect(! plan.build(buses, buses.size()), "aux plan rejects routing cycles")) return false;
+    buses[2].output = {99};
+    if (! expect(! plan.build(buses, buses.size()), "aux plan rejects missing destinations")) return false;
+    buses[2].output = {3};
+    return expect(! plan.build(buses, buses.size()), "aux plan rejects self routing");
+}
+
 bool testBusAndSendRouting()
 {
     TrackDataModel model;
@@ -1893,6 +2216,11 @@ bool testBusAndSendRouting()
     engine.audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, 4, {});
     if (! expect(approximatelyEqual(left[0], 1.2374369f) && approximatelyEqual(engine.getBusPeak(0), 0.5303301f),
                  "bus gain changes the routed audio and bus meter")) return false;
+    model.setBusBalance(bus, -1.0f);
+    model.setPlayheadPosition(0.0);
+    engine.audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, 4, {});
+    if (! expect(approximatelyEqual(left[0], 1.2374369f) && approximatelyEqual(right[0], 0.7071068f),
+                 "aux balance changes only the routed stereo return")) return false;
     model.setBusMuted(bus, true);
     model.setPlayheadPosition(0.0);
     engine.audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, 4, {});
@@ -1924,6 +2252,65 @@ bool testPostPanSendRouting()
                       && approximatelyEqual(left[0], 2.0f)
                       && approximatelyEqual(right[0], 0.0f),
                   "post-fader sends receive the volume-and-pan processed stereo signal");
+}
+
+bool testPreFaderSendRouting()
+{
+    TrackDataModel model;
+    const auto track = model.addTrack(TrackType::audio);
+    const auto bus = model.addBus();
+    auto source = std::make_shared<juce::AudioBuffer<float>>(2, 4);
+    source->clear();
+    source->setSample(0, 0, 1.0f);
+    source->setSample(1, 0, 1.0f);
+    model.addClipToTrack(0, {}, 0.0, source);
+    model.setTrackSendRoute(track, 0, bus, 1.0f, true);
+    model.setTrackVolume(0, 0.25f);
+    model.setTrackPan(0, -1.0f);
+    OfflineAudioDevice device;
+    AudioEngine engine(&model);
+    engine.audioDeviceAboutToStart(&device);
+    model.setPlaying(true);
+    model.setPlayheadPosition(0.0);
+    float left[4] {}, right[4] {};
+    float* outputs[] { left, right };
+    engine.audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, 4, {});
+    return expect(approximatelyEqual(engine.getBusPeak(0), 1.0f)
+                      && approximatelyEqual(left[0], 1.25f)
+                      && approximatelyEqual(right[0], 1.0f),
+                  "pre-fader sends are unaffected by track volume and pan");
+}
+
+bool testPostFaderBeforePanSendRouting()
+{
+    TrackDataModel model;
+    const auto track = model.addTrack(TrackType::audio);
+    const auto bus = model.addBus();
+    auto source = std::make_shared<juce::AudioBuffer<float>>(2, 4);
+    source->clear();
+    source->setSample(0, 0, 1.0f);
+    source->setSample(1, 0, 1.0f);
+    model.addClipToTrack(0, {}, 0.0, source);
+    model.setTrackSendRoute(track, 0, bus, 1.0f, false);
+    if (! model.setTrackSendPostFaderBeforePan(track, 0, true)) return false;
+    if (! expect(model.setTrackSendRoute(track, 0, bus, 0.5f, false)
+                 && model.getTrack(0).sends[0].postFaderBeforePan,
+                 "adjusting a send preserves its post-fader tap")) return false;
+    model.setTrackSendRoute(track, 0, bus, 1.0f, false);
+    model.setTrackVolume(0, 0.25f);
+    model.setTrackPan(0, -1.0f);
+    OfflineAudioDevice device;
+    AudioEngine engine(&model);
+    engine.audioDeviceAboutToStart(&device);
+    model.setPlaying(true);
+    model.setPlayheadPosition(0.0);
+    float left[4] {}, right[4] {};
+    float* outputs[] { left, right };
+    engine.audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, 4, {});
+    return expect(approximatelyEqual(engine.getBusPeak(0), 0.25f)
+                      && approximatelyEqual(left[0], 0.5f)
+                      && approximatelyEqual(right[0], 0.25f),
+                  "post-fader send follows fader but not pan");
 }
 
 bool testSendAutomation()
@@ -2006,6 +2393,36 @@ bool testWaveformThumbnailCache()
     juce::MemoryInputStream corrupt("bad", 3, false);
     return expect(restoredRight.minimum < -0.89f && WaveformThumbnail::readPersistent(corrupt) == nullptr,
                   "waveform cache preserves peaks and rejects corrupt payloads");
+}
+
+bool testWaveformCacheInvalidatesChangedSourceFile()
+{
+    const auto directory = juce::File::getCurrentWorkingDirectory()
+        .getNonexistentChildFile("StudioForgeWaveformFingerprint", {}, true);
+    const auto sourceFile = directory.getChildFile("take.wav");
+    if (! directory.createDirectory() || ! sourceFile.replaceWithText("first take"))
+        return expect(false, "waveform cache test prepares a source file");
+
+    auto firstBuffer = std::make_shared<juce::AudioBuffer<float>>(1, 8);
+    firstBuffer->clear();
+    firstBuffer->setSample(0, 2, 0.25f);
+    WaveformThumbnailCache cache;
+    const auto first = cache.prepare(sourceFile, firstBuffer);
+
+    if (! sourceFile.replaceWithText("second take with a different file size"))
+    {
+        directory.deleteRecursively();
+        return expect(false, "waveform cache test modifies its source file");
+    }
+
+    auto replacementBuffer = std::make_shared<juce::AudioBuffer<float>>(1, 8);
+    replacementBuffer->clear();
+    replacementBuffer->setSample(0, 2, -0.80f);
+    const auto replacement = cache.prepare(sourceFile, replacementBuffer);
+    const auto valid = first != nullptr && replacement != nullptr && first != replacement
+        && replacement->peakForSourceRange(2.0, 3.0).minimum < -0.79f;
+    directory.deleteRecursively();
+    return expect(valid, "waveform cache invalidates its in-memory envelope when source media changes");
 }
 
 bool testMasterFxRouting()
@@ -2270,6 +2687,26 @@ bool testPluginHostFoundation()
         && expect(host.getKnownPlugins().isEmpty(), "failed scan does not publish a plugin type");
 }
 
+bool testCorruptPluginCatalogRecovery()
+{
+    const auto catalog = juce::File::getCurrentWorkingDirectory()
+        .getChildFile("StudioForgeCorruptPluginCatalog.xml");
+    catalog.deleteFile();
+    if (! expect(catalog.replaceWithText("<broken-catalog/>"),
+                 "plugin catalog recovery test creates malformed catalog")) return false;
+
+    PluginHostService host(catalog);
+    juce::Array<juce::File> preservedCopies;
+    catalog.getParentDirectory().findChildFiles(preservedCopies, juce::File::findFiles, false,
+                                                catalog.getFileName() + ".corrupt-*");
+    const auto recovered = host.getKnownPlugins().isEmpty() && ! preservedCopies.isEmpty();
+    catalog.deleteFile();
+    for (const auto& file : preservedCopies)
+        file.deleteFile();
+    return expect(recovered,
+                  "a malformed plug-in catalog is preserved and does not block fresh discovery");
+}
+
 bool testVst3EffectIntegration()
 {
     const juce::File pluginFile { STUDIOFORGE_TEST_VST3_PATH };
@@ -2502,11 +2939,15 @@ int main()
         && testLivePerformanceAssessment()
         && testProjectTemplates()
         && testStudioForgeControlBridge()
+        && testPluginSemanticMapping()
+        && testPerformanceMacroService()
+        && testPerformanceSurfaceProtocol()
         && testMusicalKeyNormalization()
         && testPerformanceSetupRouting()
         && testPerformanceSourceChoices()
         && testProjectTemplateStore()
         && testProjectAlternativeStore()
+        && testProjectBackupStore()
         && testMetronomeRendering()
         && testMidiFileImport()
         && runAutomationDomainTests()
@@ -2528,10 +2969,12 @@ int main()
         && testAutosaveRecovery()
         && testRecentProjectsStore()
         && testMediaReloadAndRelink()
+        && testMediaReloadCachesFailedSourcesPerBatch()
         && testImmediateAudioImportPlaceholder()
         && testUndoRedoHistory()
         && testAutomationWriteModes()
         && testRecordingFoundation()
+        && testRecordedTakeGroups()
         && testMultiTrackRecording()
         && testPunchRecordingCapture()
         && testMarqueeRangeDeletion()
@@ -2547,15 +2990,22 @@ int main()
         && testMidiInputRoutesToArmedInstrument()
         && testMidiRecordingFoundation()
         && testOfflineBounce()
+        && testOfflineStemExport()
         && testMidiOnlyOfflineBounce()
         && testClipGainAndFades()
         && testClipDuplicate()
         && testClipCrossfades()
         && testAudioMediaSourceOwnership()
+        && testAudioClipNoOpEditsDoNotPolluteUndoHistory()
+        && testAudioMediaPoolDoesNotRetainUnusedDecodes()
+        && testAuxRoutingPlan()
         && testBusAndSendRouting()
         && testPostPanSendRouting()
+        && testPreFaderSendRouting()
+        && testPostFaderBeforePanSendRouting()
         && testSendAutomation()
         && testWaveformThumbnailCache()
+        && testWaveformCacheInvalidatesChangedSourceFile()
         && testMasterFxRouting()
         && testMidiCoreScheduling()
         && testRealtimeMidiEvents()
@@ -2568,6 +3018,7 @@ int main()
         && testMidiFxChain()
         && testMidiFxPersistence()
         && testPluginHostFoundation()
+        && testCorruptPluginCatalogRecovery()
         && testVst3EffectIntegration()
         && testOfflineAudioEnginePath();
 #ifdef STUDIOFORGE_PERF_BENCHMARK

@@ -47,7 +47,10 @@ juce::String liveLatencyText(const AudioEngine::RealtimeDiagnostics& diagnostics
 
 DeviceSettingsPanel::DeviceSettingsPanel(AudioEngine& engine, TrackDataModel& model)
     : audioEngine(engine), trackModel(model),
-      selector(audioEngine.getAudioDeviceManager(), 0, 64, 2, 64, true, true, true, false)
+      // MIDI output is managed by our compact row above; hide JUCE's second
+      // copy inside AudioDeviceSelectorComponent to prevent duplicate,
+      // overlapping controls in the device page.
+      selector(audioEngine.getAudioDeviceManager(), 0, 64, 2, 64, true, false, true, false)
 {
     summary.setJustificationType(juce::Justification::centredLeft);
     summary.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.75f));
@@ -205,6 +208,14 @@ DeviceSettingsPanel::DeviceSettingsPanel(AudioEngine& engine, TrackDataModel& mo
         monitor.setTooltip("Off: no input monitoring. Auto: monitor when armed. In: always monitor.");
         monitor.onChange = [this, index] { applyTrackInputConfiguration(index); };
         routingContent.addChildComponent(monitor);
+
+        auto& destination = trackMonitorDestinations[index];
+        destination.addItem("Master 1/2", 1);
+        destination.addItem("Cue 3/4", 2);
+        destination.addItem("Stream only", 3);
+        destination.setTooltip("Destination for DAW software monitoring. Cue enables physical outputs 3/4; Stream only never reaches the main speakers.");
+        destination.onChange = [this, index] { applyTrackInputConfiguration(index); };
+        routingContent.addChildComponent(destination);
     }
 
     startTimerHz(4);
@@ -231,12 +242,12 @@ void DeviceSettingsPanel::resized()
     settingsTabs.setBounds(area);
 
     auto deviceArea = devicePage.getLocalBounds().reduced(10);
-    auto midiOutputArea = deviceArea.removeFromTop(30);
-    midiOutputLabel.setBounds(midiOutputArea.removeFromLeft(105));
+    auto midiOutputArea = deviceArea.removeFromTop(34);
+    midiOutputLabel.setBounds(midiOutputArea.removeFromLeft(124).reduced(0, 2));
     midiOutputSelector.setBounds(midiOutputArea.reduced(0, 2));
-    auto streamOutputArea = deviceArea.removeFromTop(30);
-    streamOutputLabel.setBounds(streamOutputArea.removeFromLeft(105));
-    streamOutputStatus.setBounds(streamOutputArea.removeFromRight(92));
+    auto streamOutputArea = deviceArea.removeFromTop(34);
+    streamOutputLabel.setBounds(streamOutputArea.removeFromLeft(124).reduced(0, 2));
+    streamOutputStatus.setBounds(streamOutputArea.removeFromRight(120).reduced(0, 2));
     streamOutputSelector.setBounds(streamOutputArea.reduced(0, 2));
     selector.setBounds(deviceArea);
 
@@ -278,13 +289,16 @@ void DeviceSettingsPanel::resized()
             trackInputSelectors[index].setBounds({});
             trackInputFormats[index].setBounds({});
             trackMonitorModes[index].setBounds({});
+            trackMonitorDestinations[index].setBounds({});
             continue;
         }
         auto row = rows.removeFromTop(routingRowHeight);
-        trackInputLabels[index].setBounds(row.removeFromLeft(row.getWidth() / 4).reduced(2, 2));
-        trackInputSelectors[index].setBounds(row.removeFromLeft(row.getWidth() / 2).reduced(2, 3));
-        trackInputFormats[index].setBounds(row.removeFromLeft(row.getWidth() / 2).reduced(2, 3));
-        trackMonitorModes[index].setBounds(row.reduced(2, 3));
+        const auto fieldWidth = row.getWidth() / 5;
+        trackInputLabels[index].setBounds(row.removeFromLeft(fieldWidth).reduced(2, 2));
+        trackInputSelectors[index].setBounds(row.removeFromLeft(fieldWidth).reduced(2, 3));
+        trackInputFormats[index].setBounds(row.removeFromLeft(fieldWidth).reduced(2, 3));
+        trackMonitorModes[index].setBounds(row.removeFromLeft(fieldWidth).reduced(2, 3));
+        trackMonitorDestinations[index].setBounds(row.reduced(2, 3));
     }
 }
 
@@ -315,11 +329,10 @@ void DeviceSettingsPanel::timerCallback()
     pluginDelayCompensation.setSelectedId(audioEngine.isStudioPluginDelayCompensationEnabled() ? 1 : 2,
                                           juce::dontSendNotification);
     pluginDelayCompensation.setEnabled(! audioEngine.isLivePerformanceEnabled());
-    const auto currentSummary = "Active: " + juce::String(juce::roundToInt(diagnostics.sampleRate)) + " Hz, "
-                              + juce::String(diagnostics.bufferSize) + " samples, "
-                              + "input latency " + juce::String(diagnostics.inputLatencySamples) + " samples, "
-                              + "output latency " + juce::String(diagnostics.outputLatencySamples) + " samples, "
-                              + "plugin latency " + juce::String(diagnostics.pluginLatencySamples) + " samples";
+    const auto currentSummary = "Audio: " + juce::String(juce::roundToInt(diagnostics.sampleRate)) + " Hz  •  "
+                              + juce::String(diagnostics.bufferSize) + " samples  •  I/O latency "
+                              + juce::String(diagnostics.inputLatencySamples + diagnostics.outputLatencySamples)
+                              + " samples  •  FX " + juce::String(diagnostics.pluginLatencySamples) + " samples";
     if (currentSummary != lastSummary)
     {
         lastSummary = currentSummary;
@@ -503,6 +516,7 @@ juce::String DeviceSettingsPanel::makeInputRoutingKey() const
             << ":" << track.inputChannelCount.load(std::memory_order_relaxed)
             << ":" << static_cast<int>(track.autoInputMonitoring.load(std::memory_order_relaxed))
             << ":" << static_cast<int>(track.inputMonitoring.load(std::memory_order_relaxed))
+            << ":" << static_cast<int>(track.monitorDestination.load(std::memory_order_relaxed))
             << ":" << static_cast<int>(track.type);
     }
     return key;
@@ -514,7 +528,7 @@ void DeviceSettingsPanel::refreshInputRouting()
 
     routingHint.setText(activeInputIndices.isEmpty()
                             ? "Enable interface inputs above, then assign them to each audio track."
-                            : "Audio tracks only. Arm multiple tracks to record their selected inputs together.",
+                            : "Audio tracks only. Assign input, monitor mode, then Master, Cue 3/4, or Stream-only destination.",
                         juce::dontSendNotification);
     for (size_t index = 0; index < trackInputSelectors.size(); ++index)
     {
@@ -524,6 +538,7 @@ void DeviceSettingsPanel::refreshInputRouting()
         trackInputSelectors[index].setVisible(activeTrack);
         trackInputFormats[index].setVisible(activeTrack);
         trackMonitorModes[index].setVisible(activeTrack);
+        trackMonitorDestinations[index].setVisible(activeTrack);
         if (! activeTrack)
             continue;
 
@@ -550,6 +565,11 @@ void DeviceSettingsPanel::refreshInputRouting()
             : track.autoInputMonitoring.load(std::memory_order_relaxed) ? 2 : 1;
         trackMonitorModes[index].setSelectedId(monitorMode, juce::dontSendNotification);
         trackMonitorModes[index].setEnabled(! activeInputIndices.isEmpty());
+        const auto destination = track.monitorDestination.load(std::memory_order_relaxed);
+        const auto destinationId = destination == MonitorDestination::cue ? 2
+            : destination == MonitorDestination::streamOnly ? 3 : 1;
+        trackMonitorDestinations[index].setSelectedId(destinationId, juce::dontSendNotification);
+        trackMonitorDestinations[index].setEnabled(! activeInputIndices.isEmpty());
     }
 }
 
@@ -571,6 +591,18 @@ void DeviceSettingsPanel::applyTrackInputConfiguration(size_t trackIndex)
     const auto monitorMode = trackMonitorModes[trackIndex].getSelectedId();
     trackModel.setTrackInputConfiguration(trackIndex, monitorMode == 2, monitorMode == 3,
                                           physicalInputChannel, inputChannelCount);
+    const auto destinationId = trackMonitorDestinations[trackIndex].getSelectedId();
+    const auto destination = destinationId == 2 ? MonitorDestination::cue
+        : destinationId == 3 ? MonitorDestination::streamOnly : MonitorDestination::master;
+    if (monitorMode == 1)
+    {
+        audioEngine.disableTrackMonitor(trackIndex);
+    }
+    else if (const auto result = audioEngine.enableTrackMonitor(trackIndex, destination); result.failed())
+    {
+        audioEngine.disableTrackMonitor(trackIndex);
+        StudioForgeDialog::showWarning("Monitor routing", result.getErrorMessage());
+    }
     inputRoutingKey.clear();
 }
 

@@ -39,6 +39,19 @@ juce::String sendLevelText(float gain)
     return juce::String(juce::Decibels::gainToDecibels(gain), 1) + " dB";
 }
 
+juce::String sendLevelPercent(float gain)
+{
+    return juce::String(juce::roundToInt(juce::jmax(0.0f, gain) * 100.0f)) + "%";
+}
+
+juce::String sendBusLabel(const TrackDataModel::BusState& bus, size_t busIndex)
+{
+    const auto ordinal = "Bus " + juce::String(static_cast<int>(busIndex + 1));
+    // Keep the technical destination visible, but lead with the name the
+    // musician assigned to the return (for example: "Vocal Verb").
+    return bus.name.isNotEmpty() ? ordinal + " / " + bus.name : ordinal;
+}
+
 class PluginEditorHost final : public juce::Component
 {
 public:
@@ -212,15 +225,24 @@ TrackInspectorComponent::TrackInspectorComponent(TrackDataModel& model, AudioEng
         if (selectedTrack < 0)
             return;
         const auto index = static_cast<size_t>(selectedTrack);
-        trackModel.cycleTrackInputMonitoring(index);
         const auto& track = trackModel.getTrack(index);
-        const auto isConfigured = track.inputMonitoring.load(std::memory_order_relaxed)
-            || track.autoInputMonitoring.load(std::memory_order_relaxed);
-        if (isConfigured)
+        const auto isDirectMonitor = track.inputMonitoring.load(std::memory_order_relaxed);
+        if (isDirectMonitor)
         {
-            // Routing remains an engine concern. One MIC control gives the
-            // user a working monitor path instead of exposing CUE/PA/stream
-            // topology on every track.
+            // The compact I switch is a performer-facing direct monitor
+            // control: it must never leave the user in an inaudible Auto
+            // state while transport is stopped. Auto remains available in
+            // Device Settings for users who explicitly want record-arm logic.
+            trackModel.setTrackInputConfiguration(index, false, false,
+                                                   track.inputChannel.load(std::memory_order_relaxed),
+                                                   track.inputChannelCount.load(std::memory_order_relaxed));
+            audioEngine.disableTrackMonitor(index);
+        }
+        else
+        {
+            trackModel.setTrackInputConfiguration(index, false, true,
+                                                   track.inputChannel.load(std::memory_order_relaxed),
+                                                   track.inputChannelCount.load(std::memory_order_relaxed));
             auto result = audioEngine.enableTrackMonitor(index, MonitorDestination::master);
             if (result.failed())
             {
@@ -229,8 +251,6 @@ TrackInspectorComponent::TrackInspectorComponent(TrackDataModel& model, AudioEng
                     "Microphone monitor blocked", result.getErrorMessage());
             }
         }
-        else
-            audioEngine.disableTrackMonitor(index);
         refresh();
     };
     monitorStatus.setJustificationType(juce::Justification::centredLeft);
@@ -273,12 +293,34 @@ void TrackInspectorComponent::refresh()
     recordEnable.setToggleState(track.armed.load(), juce::dontSendNotification);
     inputMonitoring.setToggleState(track.inputMonitoring.load() || track.autoInputMonitoring.load(), juce::dontSendNotification);
     inputMonitoring.setEnabled(state.supportsInputMonitoring);
-    const auto monitorTooltip = track.inputMonitoring.load() ? "Input monitoring: In. Click to turn it Off."
-        : track.autoInputMonitoring.load() ? "Input monitoring: Auto. Click to switch to In."
-        : "Input monitoring: Off. Click to switch to Auto.";
+    const auto monitorTooltip = track.inputMonitoring.load() ? "Input monitoring: In → Master. Click to turn it Off."
+        : track.autoInputMonitoring.load() ? "Input monitoring: Auto when armed. Click I for direct In → Master."
+        : "Input monitoring: Off. Click I for direct In → Master.";
     inputMonitoring.setTooltip(monitorTooltip);
-    const auto monitoringText = track.inputMonitoring.load() ? "MIC: ON"
-        : track.autoInputMonitoring.load() ? "MIC: AUTO (when armed)" : "MIC: OFF";
+    const auto directMonitorReady = track.inputMonitoring.load(std::memory_order_relaxed)
+        && track.monitorPermitted.load(std::memory_order_relaxed)
+        && track.monitorDestination.load(std::memory_order_relaxed) == MonitorDestination::master
+        && audioEngine.isSoftwareMonitoringEnabled();
+    auto anotherTrackIsSoloed = false;
+    for (size_t index = 0; index < trackModel.getTrackCount(); ++index)
+        if (static_cast<int>(index) != selectedTrack
+            && trackModel.getTrack(index).solo.load(std::memory_order_relaxed))
+        {
+            anotherTrackIsSoloed = true;
+            break;
+        }
+    const auto assignedInput = track.inputChannel.load(std::memory_order_relaxed);
+    const auto inputEnabled = audioEngine.getActiveAudioInputChannels().contains(assignedInput);
+    const auto hasInputSignal = audioEngine.getTrackInputPeak(static_cast<size_t>(selectedTrack)) > 0.0015f;
+    const auto monitoringText = ! directMonitorReady
+        ? (track.inputMonitoring.load() ? "MIC: IN (ROUTE BLOCKED)"
+           : track.autoInputMonitoring.load() ? "MIC: AUTO (WHEN ARMED)" : "MIC: OFF")
+        : ! inputEnabled ? juce::String("MIC: INPUT ") + juce::String(assignedInput + 1) + " DISABLED"
+        : track.muted.load(std::memory_order_relaxed) ? "MIC: IN (TRACK MUTED)"
+        : anotherTrackIsSoloed && ! track.solo.load(std::memory_order_relaxed) ? "MIC: IN (SOLO BLOCKED)"
+        : audioEngine.isMasterMuted() ? "MIC: IN (MASTER MUTED)"
+        : audioEngine.isPanicMuteEnabled() ? "MIC: IN (PANIC MUTE)"
+        : hasInputSignal ? "MIC: SIGNAL → MASTER" : "MIC: IN → MASTER (WAITING INPUT)";
     monitorStatus.setText(monitoringText, juce::dontSendNotification);
     mute.setToggleState(track.muted.load(), juce::dontSendNotification);
     solo.setToggleState(track.solo.load(), juce::dontSendNotification);
@@ -332,13 +374,27 @@ ChannelStripComponent::ChannelStripComponent(ChannelRole role, TrackDataModel& m
     configureSectionLabel(routingHeading);
     configureSectionLabel(panLabel);
     configureSectionLabel(levelLabel);
+    channelSelector.setColour(juce::ComboBox::backgroundColourId, juce::Colour(0xff202a30));
+    channelSelector.setColour(juce::ComboBox::textColourId, StudioForgeTheme::primaryText);
+    channelSelector.setTooltip("Choose Stereo Out or an Aux channel to inspect");
+    addAndMakeVisible(channelSelector);
+    channelSelector.setVisible(! isSelectedTrackStrip());
+    channelSelector.onChange = [this]
+    {
+        const auto item = channelSelector.getSelectedId();
+        const auto& buses = trackModel.getBuses();
+        const auto index = item - 2;
+        if (onRevealAuxBus != nullptr && item == 1) onRevealAuxBus({});
+        else if (onRevealAuxBus != nullptr && index >= 0 && index < static_cast<int>(buses.size()))
+            onRevealAuxBus(buses[static_cast<size_t>(index)].id);
+    };
     sendSummary.setTooltip("Manage aux sends for the selected track");
     sendSummary.onClick = [this] { showSendMenu(); };
     addAndMakeVisible(sendSummary);
     for (size_t slot = 0; slot < audioFxSlots.size(); ++slot)
     {
         auto& button = audioFxSlots[slot];
-        button.setTooltip("Click to add or manage an audio effect");
+        button.setTooltip("Click to insert a plug-in. On an occupied slot, click centre to open or hover left to bypass.");
         button.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff303b42));
         button.setColour(juce::TextButton::textColourOffId, StudioForgeTheme::primaryText.withAlpha(0.88f));
         button.onContextMenu = [this, slot]
@@ -349,6 +405,19 @@ ChannelStripComponent::ChannelStripComponent(ChannelRole role, TrackDataModel& m
             else
                 showPluginBrowser(slot);
         };
+        button.onBypassClick = [this, slot]
+        {
+            const auto rack = activeFxRack();
+            if (rack == nullptr || rack->processors[slot] == nullptr)
+                return;
+            if (isSelectedTrackStrip())
+                audioEngine.setFxBypassed(static_cast<size_t>(selectedTrack), slot, ! rack->bypass[slot]);
+            else if (isAuxBusStrip())
+                trackModel.setBusFxBypassed(selectedBus, slot, ! rack->bypass[slot]);
+            else
+                audioEngine.setMasterFxBypassed(slot, ! rack->bypass[slot]);
+            refresh();
+        };
         button.onClick = [this, slot]
         {
             const auto rack = activeFxRack();
@@ -358,11 +427,7 @@ ChannelStripComponent::ChannelStripComponent(ChannelRole role, TrackDataModel& m
                 showPluginBrowser(slot);
                 return;
             }
-            if (isSelectedTrackStrip())
-                audioEngine.setFxBypassed(static_cast<size_t>(selectedTrack), slot, ! rack->bypass[slot]);
-            else
-                audioEngine.setMasterFxBypassed(slot, ! rack->bypass[slot]);
-            refresh();
+            showPluginEditor(slot);
         };
         addAndMakeVisible(button);
     }
@@ -411,31 +476,77 @@ ChannelStripComponent::ChannelStripComponent(ChannelRole role, TrackDataModel& m
         auto& clear = clearSendButtons[slot];
         route.setColour(juce::ComboBox::backgroundColourId, juce::Colour(0xff20252c));
         route.setColour(juce::ComboBox::textColourId, juce::Colours::white.withAlpha(0.86f));
+        route.setTextWhenNothingSelected("No Send");
+        route.setTooltip("Click the name to view its Aux; click the arrow to change the destination.");
         route.onChange = [this, slot] { setSendRoute(slot); };
+        route.onReveal = [this, slot]
+        {
+            const auto bus = busForMenuItem(sendRoutes[slot].getSelectedId());
+            if (bus.isValid() && onRevealAuxBus != nullptr)
+                onRevealAuxBus(bus);
+        };
         level.setRange(0.0, TrackDataModel::maximumSendGain, 0.001);
         level.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
         level.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
         level.setDoubleClickReturnValue(true, 1.0);
+        level.setMouseDragSensitivity(220);
+        level.setSkewFactorFromMidPoint(1.0);
         level.setColour(juce::Slider::rotarySliderFillColourId, StudioForgeTheme::meterCyan);
         level.setTooltip("Send level: 0.0 dB (double-click resets)");
         level.onValueChange = [this, slot]
         {
             sendLevels[slot].setTooltip("Send level: " + sendLevelText(static_cast<float>(sendLevels[slot].getValue()))
                                         + " (double-click resets to 0.0 dB)");
+            sendLevelReadouts[slot].setText(sendLevelPercent(static_cast<float>(sendLevels[slot].getValue())),
+                                             juce::dontSendNotification);
             setSendRoute(slot);
         };
-        preFader.setButtonText("Pre");
-        preFader.setTooltip("Pre-Fader send. Disabled means Post-Pan: follows the track volume and stereo pan.");
-        preFader.onClick = [this, slot] { setSendRoute(slot); };
-        clear.setButtonText("×");
+        auto& readout = sendLevelReadouts[slot];
+        readout.setJustificationType(juce::Justification::centred);
+        readout.setFont(juce::Font(juce::FontOptions(9.0f, juce::Font::bold)));
+        readout.setColour(juce::Label::textColourId, StudioForgeTheme::meterCyan.withAlpha(0.92f));
+        readout.setTooltip("Send gain as a percentage: 100% = 0 dB");
+        preFader.setButtonText("POST");
+        preFader.setTooltip("Choose send position");
+        preFader.onClick = [this, slot]
+        {
+            if (selectedTrack < 0 || selectedTrack >= static_cast<int>(trackModel.getTrackCount())) return;
+            const auto trackId = trackModel.getTrackId(static_cast<size_t>(selectedTrack));
+            const auto& send = trackModel.getTrack(static_cast<size_t>(selectedTrack)).sends[slot];
+            const auto bus = send.targetBus;
+            if (! bus.isValid()) return;
+            juce::PopupMenu menu;
+            menu.addItem(1, "Pre Fader", true, send.preFader);
+            menu.addItem(2, "Post Fader", true, send.postFaderBeforePan);
+            menu.addItem(3, "Post Pan", true, ! send.preFader && ! send.postFaderBeforePan);
+            const auto safe = juce::Component::SafePointer<ChannelStripComponent>(this);
+            menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&sendPreFader[slot]),
+                [safe, trackId, bus, slot] (int choice)
+            {
+                if (safe == nullptr || choice < 1 || choice > 3) return;
+                auto& model = safe->trackModel;
+                const auto index = model.getTrackIndex(trackId);
+                if (index < 0) return;
+                const auto& current = model.getTrack(static_cast<size_t>(index)).sends[slot];
+                if (current.targetBus != bus) return;
+                if (choice == 1)
+                    model.setTrackSendRoute(trackId, slot, bus, current.level, true);
+                else
+                    model.setTrackSendPostFaderBeforePan(trackId, slot, choice == 2);
+                safe->refreshRouting();
+            });
+        };
+        clear.setButtonText("X");
         clear.setTooltip("Remove send");
         clear.onClick = [this, slot] { clearSendRoute(slot); };
         addAndMakeVisible(route);
         addAndMakeVisible(level);
+        addAndMakeVisible(readout);
         addAndMakeVisible(preFader);
         addAndMakeVisible(clear);
         route.setVisible(false);
         level.setVisible(false);
+        readout.setVisible(false);
         preFader.setVisible(false);
         clear.setVisible(false);
     }
@@ -476,11 +587,14 @@ ChannelStripComponent::ChannelStripComponent(ChannelRole role, TrackDataModel& m
     pan.onValueChange = [this]
     {
         panValue.setText(juce::String(pan.getValue(), 2), juce::dontSendNotification);
-        if (selectedTrack >= 0) trackModel.setTrackPan(static_cast<size_t>(selectedTrack), static_cast<float>(pan.getValue()));
+        if (isSelectedTrackStrip() && selectedTrack >= 0) trackModel.setTrackPan(static_cast<size_t>(selectedTrack), static_cast<float>(pan.getValue()));
+        else if (isAuxBusStrip()) trackModel.setBusBalance(selectedBus, static_cast<float>(pan.getValue()));
+        else if (! isSelectedTrackStrip()) audioEngine.setMasterPan(static_cast<float>(pan.getValue()));
     };
     fader.onValueChange = [this]
     {
         if (isSelectedTrackStrip() && selectedTrack >= 0) trackModel.setTrackVolume(static_cast<size_t>(selectedTrack), static_cast<float>(fader.getValue()));
+        else if (isAuxBusStrip()) trackModel.setBusGain(selectedBus, static_cast<float>(fader.getValue()));
         else audioEngine.setMasterGain(static_cast<float>(fader.getValue()));
     };
     for (auto* component : { static_cast<juce::Component*>(&heading), static_cast<juce::Component*>(&fxHeading), static_cast<juce::Component*>(&sendsHeading), static_cast<juce::Component*>(&routingHeading), static_cast<juce::Component*>(&panLabel), static_cast<juce::Component*>(&levelLabel), static_cast<juce::Component*>(&panValue), static_cast<juce::Component*>(&pan), static_cast<juce::Component*>(&fader), static_cast<juce::Component*>(&meter) }) addAndMakeVisible(*component);
@@ -489,8 +603,24 @@ ChannelStripComponent::ChannelStripComponent(ChannelRole role, TrackDataModel& m
 
 void ChannelStripComponent::setSelectedTrack(int trackIndex) { selectedTrack = trackIndex; refresh(); }
 
+void ChannelStripComponent::setAuxBus(BusId bus)
+{
+    selectedBus = bus;
+    channelRole = bus.isValid() ? ChannelRole::auxBus : ChannelRole::stereoOutput;
+    refresh();
+}
+
+void ChannelStripComponent::setViewedAux(BusId bus)
+{
+    viewedAux = bus;
+    if (isSelectedTrackStrip()) refreshRouting();
+}
+
 const TrackDataModel::FxRackSnapshot* ChannelStripComponent::activeFxRack() const noexcept
 {
+    if (isAuxBusStrip())
+        return trackModel.getBusFxRackSnapshot(selectedBus);
+
     if (! isSelectedTrackStrip())
         return audioEngine.getMasterFxRackSnapshot();
 
@@ -513,6 +643,12 @@ bool ChannelStripComponent::insertAudioFx(size_t slot, std::shared_ptr<AudioEffe
             return false;
         audioEngine.setFxProcessor(static_cast<size_t>(trackIndex), slot, std::move(processor));
     }
+    else if (isAuxBusStrip())
+    {
+        if (! selectedBus.isValid())
+            return false;
+        trackModel.setBusFxProcessor(selectedBus, slot, std::move(processor));
+    }
     else
     {
         audioEngine.setMasterFxProcessor(slot, std::move(processor));
@@ -521,13 +657,60 @@ bool ChannelStripComponent::insertAudioFx(size_t slot, std::shared_ptr<AudioEffe
     return true;
 }
 
+void ChannelStripComponent::refreshChannelSelector()
+{
+    if (isSelectedTrackStrip()) return;
+    const auto& buses = trackModel.getBuses();
+    auto changed = channelSelector.getNumItems() != static_cast<int>(buses.size() + 1);
+    for (size_t i = 0; ! changed && i < buses.size(); ++i)
+        changed = channelSelector.getItemText(static_cast<int>(i + 1))
+            != "Aux " + juce::String(static_cast<int>(i + 1)) + " / " + buses[i].name;
+    if (changed)
+    {
+        channelSelector.clear(juce::dontSendNotification);
+        channelSelector.addItem("Stereo Out", 1);
+        for (size_t i = 0; i < buses.size(); ++i)
+            channelSelector.addItem("Aux " + juce::String(static_cast<int>(i + 1)) + " / " + buses[i].name,
+                                    static_cast<int>(i + 2));
+    }
+    int selected = 1;
+    for (size_t i = 0; i < buses.size(); ++i)
+        if (buses[i].id == selectedBus) selected = static_cast<int>(i + 2);
+    channelSelector.setSelectedId(selected, juce::dontSendNotification);
+}
+
 void ChannelStripComponent::refresh()
 {
+    refreshChannelSelector();
+    if (isAuxBusStrip())
+    {
+        const auto& buses = trackModel.getBuses();
+        const auto found = std::find_if(buses.begin(), buses.end(), [this] (const auto& bus) { return bus.id == selectedBus; });
+        if (found == buses.end())
+        {
+            setAuxBus({});
+            return;
+        }
+        heading.setText(("AUX " + juce::String(static_cast<int>(std::distance(buses.begin(), found)) + 1)
+                         + " / " + found->name).toUpperCase(), juce::dontSendNotification);
+        // The legacy renderer currently sums an unassigned return into the
+        // master mix. Do not present that implementation detail as an output
+        // assignment: an Aux output must become a first-class routing choice.
+        fxHeading.setText("FX RETURN INSERTS", juce::dontSendNotification);
+        fader.setValue(found->gain, juce::dontSendNotification);
+        pan.setValue(found->balance, juce::dontSendNotification);
+        panValue.setText(juce::String(found->balance, 2), juce::dontSendNotification);
+        refreshAudioFx();
+        refreshFxScenes();
+        return;
+    }
     if (! isSelectedTrackStrip())
     {
         heading.setText("STEREO OUT", juce::dontSendNotification);
         fxHeading.setText("MASTER FX", juce::dontSendNotification);
         fader.setValue(audioEngine.getMasterGain(), juce::dontSendNotification);
+        pan.setValue(audioEngine.getMasterPan(), juce::dontSendNotification);
+        panValue.setText(juce::String(audioEngine.getMasterPan(), 2), juce::dontSendNotification);
         refreshAudioFx();
         refreshFxScenes();
         return;
@@ -553,6 +736,7 @@ void ChannelStripComponent::refresh()
     const auto trackName = track.name.isNotEmpty() ? track.name : "Track " + juce::String(selectedTrack + 1);
     heading.setText(trackName.toUpperCase(), juce::dontSendNotification);
     fxHeading.setText(trackName.toUpperCase() + " FX", juce::dontSendNotification);
+    sendsHeading.setText("FX SENDS", juce::dontSendNotification);
     fader.setValue(track.volume.load(), juce::dontSendNotification);
     pan.setValue(track.pan.load(), juce::dontSendNotification);
     refreshAudioFx();
@@ -592,10 +776,11 @@ void ChannelStripComponent::refreshAudioFx()
         const auto processor = rack != nullptr ? rack->processors[slot] : nullptr;
         auto& button = audioFxSlots[slot];
         const auto bypassed = processor != nullptr && rack->bypass[slot];
+        button.setBypassControlState(processor != nullptr, bypassed);
         button.setVisible(slot < visibleSlots);
         auto label = processor == nullptr ? juce::String {} : processor->getName();
         auto activeColour = juce::Colour(0xff276776);
-        auto activeTooltip = juce::String("ON — click to bypass; right-click for Replace, Remove or Editor");
+        auto activeTooltip = juce::String("Click centre to open. Hover the left edge to bypass; right-click for Replace or Remove.");
         if (processor != nullptr && processor->isStudioForgeNativeVibeAutotune() && ! bypassed)
         {
             const auto health = processor->getLiveProcessorHealth();
@@ -638,7 +823,7 @@ void ChannelStripComponent::refreshAudioFx()
                                               : bypassed ? StudioForgeTheme::primaryText.withAlpha(0.48f)
                                                          : juce::Colour(0xffeffcff));
         button.setTooltip(processor == nullptr ? "Click to insert a plug-in"
-            : bypassed ? "OFF — click to enable; right-click for Replace or Remove"
+            : bypassed ? "BYPASSED — click centre to open; hover the left edge to enable."
                        : activeTooltip);
     }
     addAudioFx.setVisible(visibleSlots < audioFxSlots.size());
@@ -661,32 +846,51 @@ void ChannelStripComponent::refreshRouting()
     {
         routeBusIds[index] = buses[index].id;
         const auto item = static_cast<int>(index + 2);
-        outputRoute.addItem("Bus " + juce::String(static_cast<int>(index + 1)), item);
+        outputRoute.addItem("AUX " + juce::String(static_cast<int>(index + 1)) + " / " + buses[index].name, item);
         for (auto& route : sendRoutes)
-            route.addItem("Bus " + juce::String(static_cast<int>(index + 1)), item);
+            route.addItem(sendBusLabel(buses[index], index), item);
     }
     const auto& track = trackModel.getTrack(static_cast<size_t>(selectedTrack));
     int output = 1;
     for (size_t index = 0; index < buses.size() && index < routeBusIds.size(); ++index)
     {
         if (track.outputBus == routeBusIds[index]) output = static_cast<int>(index + 2);
-        for (size_t slot = 0; slot < TrackDataModel::maxSendsPerTrack; ++slot)
-            if (track.sends[slot].targetBus == routeBusIds[index])
-                sendRoutes[slot].setSelectedId(static_cast<int>(index + 2), juce::dontSendNotification);
     }
     outputRoute.setSelectedId(output, juce::dontSendNotification);
     for (size_t slot = 0; slot < sendRoutes.size(); ++slot)
     {
         const auto active = track.sends[slot].targetBus.isValid();
-        if (! active)
-            sendRoutes[slot].setSelectedId(1, juce::dontSendNotification);
+        // Set a selection for every visible route, after the full bus list is
+        // built. Previously an active send could paint as an unlabelled arrow
+        // while its level and POST switch remained visible.
+        auto routeItem = 1;
+        if (active)
+            for (size_t busIndex = 0; busIndex < buses.size() && busIndex < routeBusIds.size(); ++busIndex)
+                if (track.sends[slot].targetBus == routeBusIds[busIndex])
+                {
+                    routeItem = static_cast<int>(busIndex + 2);
+                    break;
+                }
+        sendRoutes[slot].setSelectedId(routeItem, juce::dontSendNotification);
+        sendRoutes[slot].setColour(juce::ComboBox::backgroundColourId,
+            active && track.sends[slot].targetBus == viewedAux ? juce::Colour(0xff31555d) : juce::Colour(0xff20252c));
         sendLevels[slot].setValue(active ? track.sends[slot].level : 0.0f, juce::dontSendNotification);
         sendLevels[slot].setTooltip("Send level: " + sendLevelText(active ? track.sends[slot].level : 0.0f)
                                     + " (double-click resets to 0.0 dB)");
+        sendLevelReadouts[slot].setText(sendLevelPercent(active ? track.sends[slot].level : 0.0f),
+                                         juce::dontSendNotification);
         sendPreFader[slot].setToggleState(active && track.sends[slot].preFader, juce::dontSendNotification);
         sendRoutes[slot].setVisible(active);
         sendLevels[slot].setVisible(active);
-        sendPreFader[slot].setVisible(false);
+        sendLevelReadouts[slot].setVisible(active);
+        sendPreFader[slot].setButtonText(track.sends[slot].preFader ? "PRE" : track.sends[slot].postFaderBeforePan ? "FDR" : "PAN");
+        sendPreFader[slot].setTooltip((track.sends[slot].preFader ? juce::String("Pre Fader")
+            : track.sends[slot].postFaderBeforePan ? juce::String("Post Fader, before Pan") : juce::String("Post Pan")) + ". Click to change.");
+        sendRoutes[slot].setTooltip(active && routeItem >= 2
+            ? sendBusLabel(buses[static_cast<size_t>(routeItem - 2)], static_cast<size_t>(routeItem - 2))
+                + " (send destination)"
+            : "No send destination");
+        sendPreFader[slot].setVisible(active);
         clearSendButtons[slot].setVisible(active);
     }
     resized();
@@ -719,20 +923,20 @@ void ChannelStripComponent::refreshSendSummary()
 {
     if (! isSelectedTrackStrip() || selectedTrack < 0 || selectedTrack >= static_cast<int>(trackModel.getTrackCount()))
     {
-        sendSummary.setButtonText("No Sends  +");
+        sendSummary.setButtonText("+ Add FX Send");
         return;
     }
 
     const auto& track = trackModel.getTrack(static_cast<size_t>(selectedTrack));
     if (track.activeSendCount == 0)
     {
-        sendSummary.setButtonText("No Sends  +");
-        sendSummary.setTooltip("Add an aux send");
+        sendSummary.setButtonText("+ Add FX Send");
+        sendSummary.setTooltip("Create an FX Bus and send this track to it");
     }
     else
     {
-        sendSummary.setButtonText("+");
-        sendSummary.setTooltip("Add or manage aux sends");
+        sendSummary.setButtonText("+ Add FX Send");
+        sendSummary.setTooltip("Add another FX Send or manage existing sends");
     }
 }
 
@@ -744,16 +948,15 @@ void ChannelStripComponent::showSendMenu()
     const auto trackId = trackModel.getTrackId(static_cast<size_t>(selectedTrack));
     const auto& buses = trackModel.getBuses();
     juce::PopupMenu menu;
-    if (buses.empty())
-    {
-        menu.addItem(1, "Create Aux Bus");
-    }
-    else
+    const auto canAddSend = trackModel.getTrack(static_cast<size_t>(selectedTrack)).activeSendCount < TrackDataModel::maxSendsPerTrack;
+    menu.addItem(1, "New FX Bus...", canAddSend);
+    if (! buses.empty())
     {
         juce::PopupMenu addMenu;
         for (size_t bus = 0; bus < buses.size(); ++bus)
-            addMenu.addItem(static_cast<int>(100 + bus), "Send to Bus " + juce::String(static_cast<int>(bus + 1)));
-        menu.addSubMenu("Add Send", addMenu, trackModel.getTrack(static_cast<size_t>(selectedTrack)).activeSendCount < TrackDataModel::maxSendsPerTrack);
+            addMenu.addItem(static_cast<int>(100 + bus), sendBusLabel(buses[bus], bus));
+        menu.addSubMenu("Send to existing FX Bus", addMenu, canAddSend);
+        menu.addSeparator();
 
         const auto& track = trackModel.getTrack(static_cast<size_t>(selectedTrack));
         constexpr std::array<float, 5> levels { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f };
@@ -762,10 +965,13 @@ void ChannelStripComponent::showSendMenu()
             if (! track.sends[slot].targetBus.isValid())
                 continue;
             juce::PopupMenu slotMenu;
+            slotMenu.addItem(static_cast<int>(5000 + slot), "Open Aux / Add Plug-in");
+            slotMenu.addItem(static_cast<int>(6000 + slot), "Rename Bus...");
+            slotMenu.addSeparator();
             juce::PopupMenu destinationMenu;
             for (size_t bus = 0; bus < buses.size(); ++bus)
                 destinationMenu.addItem(static_cast<int>(1000 + slot * 100 + bus),
-                                        "Bus " + juce::String(static_cast<int>(bus + 1)),
+                                        sendBusLabel(buses[bus], bus),
                                         true, track.sends[slot].targetBus == buses[bus].id);
             slotMenu.addSubMenu("Destination", destinationMenu);
 
@@ -775,7 +981,11 @@ void ChannelStripComponent::showSendMenu()
                                   juce::String(juce::roundToInt(levels[level] * 100.0f)) + "%",
                                   true, std::abs(track.sends[slot].level - levels[level]) < 0.005f);
             slotMenu.addSubMenu("Level", levelMenu);
-            slotMenu.addItem(static_cast<int>(3000 + slot), track.sends[slot].preFader ? "Switch to Post-Pan" : "Switch to Pre-Fader");
+            juce::PopupMenu tapMenu;
+            tapMenu.addItem(static_cast<int>(3000 + slot), "Pre Fader", true, track.sends[slot].preFader);
+            tapMenu.addItem(static_cast<int>(7000 + slot), "Post Fader", true, track.sends[slot].postFaderBeforePan);
+            tapMenu.addItem(static_cast<int>(8000 + slot), "Post Pan", true, ! track.sends[slot].preFader && ! track.sends[slot].postFaderBeforePan);
+            slotMenu.addSubMenu("Send Position", tapMenu);
             slotMenu.addSeparator();
             slotMenu.addItem(static_cast<int>(4000 + slot), "Remove Send");
             menu.addSubMenu("Send " + juce::String(static_cast<int>(slot + 1)), slotMenu);
@@ -852,11 +1062,48 @@ void ChannelStripComponent::showSendMenu()
             {
                 const auto& track = model.getTrack(static_cast<size_t>(trackIndex));
                 if (slot < TrackDataModel::maxSendsPerTrack && track.sends[slot].targetBus.isValid())
-                    model.setTrackSendRoute(trackId, slot, track.sends[slot].targetBus, track.sends[slot].level, !track.sends[slot].preFader);
+                    model.setTrackSendRoute(trackId, slot, track.sends[slot].targetBus, track.sends[slot].level, true);
             }
         }
         else if (choice >= 4000 && choice < 5000)
             model.clearTrackSendRoute(trackId, static_cast<size_t>(choice - 4000));
+        else if (choice >= 7000 && choice < 9000)
+            model.setTrackSendPostFaderBeforePan(trackId, static_cast<size_t>(choice - (choice >= 8000 ? 8000 : 7000)), choice < 8000);
+        else if (choice >= 5000 && choice < 7000)
+        {
+            const auto rename = choice >= 6000;
+            const auto slot = static_cast<size_t>(choice - (rename ? 6000 : 5000));
+            const auto trackIndex = model.getTrackIndex(trackId);
+            if (trackIndex >= 0 && slot < TrackDataModel::maxSendsPerTrack)
+            {
+                const auto bus = model.getTrack(static_cast<size_t>(trackIndex)).sends[slot].targetBus;
+                const auto& buses = model.getBuses();
+                const auto found = std::find_if(buses.begin(), buses.end(), [bus] (const auto& item) { return item.id == bus; });
+                if (found != buses.end() && ! rename && safeOwner->onRevealAuxBus != nullptr)
+                    safeOwner->onRevealAuxBus(bus);
+                else if (found != buses.end() && rename)
+                {
+                    auto* dialog = new juce::AlertWindow("Rename Bus", "This name is shared by all sends to this bus.", juce::MessageBoxIconType::NoIcon);
+                    dialog->addTextEditor("name", found->name, "Bus name");
+                    dialog->addButton("Save", 1, juce::KeyPress(juce::KeyPress::returnKey));
+                    dialog->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+                    dialog->enterModalState(true, juce::ModalCallbackFunction::create([safeOwner, dialog, bus] (int result)
+                    {
+                        if (result == 1 && safeOwner != nullptr)
+                        {
+                            const auto name = dialog->getTextEditorContents("name").trim();
+                            if (name.isNotEmpty())
+                            {
+                                safeOwner->trackModel.setBusName(bus, name);
+                                safeOwner->refreshRouting();
+                                if (safeOwner->onRevealAuxBus != nullptr)
+                                    safeOwner->onRevealAuxBus(bus);
+                            }
+                        }
+                    }), true);
+                }
+            }
+        }
         safeOwner->refreshRouting();
         safeOwner->refreshSendSummary();
     });
@@ -885,6 +1132,7 @@ void ChannelStripComponent::showAudioFxMenu(size_t slot)
         if (choice == 1)
         {
             if (isSelectedTrackStrip()) audioEngine.setFxProcessor(static_cast<size_t>(selectedTrack), slot, nullptr);
+            else if (isAuxBusStrip()) trackModel.setBusFxProcessor(selectedBus, slot, nullptr);
             else audioEngine.setMasterFxProcessor(slot, nullptr);
         }
         else if (choice == 2)
@@ -897,6 +1145,7 @@ void ChannelStripComponent::showAudioFxMenu(size_t slot)
             if (rack != nullptr)
             {
                 if (isSelectedTrackStrip()) audioEngine.setFxBypassed(static_cast<size_t>(selectedTrack), slot, !rack->bypass[slot]);
+                else if (isAuxBusStrip()) trackModel.setBusFxBypassed(selectedBus, slot, !rack->bypass[slot]);
                 else audioEngine.setMasterFxBypassed(slot, !rack->bypass[slot]);
             }
         }
@@ -951,13 +1200,14 @@ void ChannelStripComponent::showPluginBrowser(size_t slot)
     // Selection is a view concern. Capture the destination TrackId now, so
     // changing selection while the browser is open can never move an FX to a
     // different channel.
-    const auto destinationIsMaster = ! isSelectedTrackStrip();
-    const auto destinationTrackId = ! destinationIsMaster && selectedTrack >= 0
+    const auto destinationIsMaster = channelRole == ChannelRole::stereoOutput;
+    const auto destinationBus = isAuxBusStrip() ? selectedBus : BusId {};
+    const auto destinationTrackId = isSelectedTrackStrip() && selectedTrack >= 0
         ? trackModel.getTrackId(static_cast<size_t>(selectedTrack)) : TrackId {};
-    if (! destinationIsMaster && ! destinationTrackId.isValid())
+    if (! destinationIsMaster && ! destinationBus.isValid() && ! destinationTrackId.isValid())
         return;
 
-    auto* panel = new PluginBrowserPanel(pluginHost, [safeThis = juce::Component::SafePointer<ChannelStripComponent>(this), slot, destinationIsMaster, destinationTrackId](const juce::PluginDescription& description)
+    auto* panel = new PluginBrowserPanel(pluginHost, [safeThis = juce::Component::SafePointer<ChannelStripComponent>(this), slot, destinationIsMaster, destinationBus, destinationTrackId](const juce::PluginDescription& description)
     {
         if (safeThis == nullptr)
             return;
@@ -972,6 +1222,8 @@ void ChannelStripComponent::showPluginBrowser(size_t slot)
             const auto shouldOpenEditor = effect->hasEditor();
             auto inserted = false;
             if (destinationIsMaster)
+                inserted = owner.insertAudioFx(slot, std::move(effect));
+            else if (destinationBus.isValid())
                 inserted = owner.insertAudioFx(slot, std::move(effect));
             else if (const auto destinationIndex = owner.trackModel.getTrackIndex(destinationTrackId); destinationIndex >= 0)
                 inserted = owner.insertAudioFx(slot, std::move(effect), destinationIndex);
@@ -994,23 +1246,14 @@ void ChannelStripComponent::showPluginBrowser(size_t slot)
     // derives its size from the unlaid-out content and produces a tiny dialog.
     panel->setSize(PluginBrowserLayout::width, PluginBrowserLayout::height);
 
-    juce::DialogWindow::LaunchOptions options;
-    options.content.setOwned(panel);
-    options.dialogTitle = "Plug-in Browser";
-    options.dialogBackgroundColour = juce::Colour(0xff25282d);
-    options.escapeKeyTriggersCloseButton = true;
-    // Avoid a second native AppKit titlebar while this transient browser is
-    // opening/closing. Its dark JUCE chrome also matches the DAW better.
-    options.useNativeTitleBar = false;
-    options.resizable = true;
-    options.componentToCentreAround = nullptr;
-    if (auto* dialog = options.launchAsync(); dialog != nullptr)
-    {
-        // This is a desktop utility window: use a stable, DAW-style placement
-        // instead of JUCE's context-sensitive automatic centring.
-        dialog->setBounds(PluginBrowserLayout::screenX, PluginBrowserLayout::screenY,
-                          PluginBrowserLayout::width, PluginBrowserLayout::height);
-    }
+    auto& anchor = audioFxSlots[slot];
+    // Keep the transient menu inside the DAW's native peer. A desktop-level
+    // callout (a null parent) can receive the tail of the originating macOS
+    // click as an outside-click and dismiss before it is ever painted.
+    auto* ownerWindow = getTopLevelComponent();
+    auto& callout = juce::CallOutBox::launchAsynchronously(std::unique_ptr<juce::Component>(panel),
+                                                            anchor.getScreenBounds(), ownerWindow);
+    callout.setDismissalMouseClicksAreAlwaysConsumed(true);
 }
 
 void ChannelStripComponent::showPluginEditor(size_t slot)
@@ -1030,7 +1273,8 @@ void ChannelStripComponent::openPluginEditor(size_t slot)
 {
     const auto* rack = isSelectedTrackStrip()
         ? (selectedTrack >= 0 ? trackModel.getFxRackSnapshot(static_cast<size_t>(selectedTrack)) : nullptr)
-        : audioEngine.getMasterFxRackSnapshot();
+        : isAuxBusStrip() ? trackModel.getBusFxRackSnapshot(selectedBus)
+                          : audioEngine.getMasterFxRackSnapshot();
     if (rack == nullptr || slot >= rack->processors.size())
         return;
 
@@ -1044,6 +1288,10 @@ void ChannelStripComponent::openPluginEditor(size_t slot)
     // Keep a short, low-overhead audio evidence trail around an editor open.
     // This lets support distinguish UI focus failures from a DSP/device fault.
     audioEngine.startAudioTrace();
+    if (isSelectedTrackStrip() && selectedTrack >= 0)
+        audioEngine.selectPluginTraceTarget(static_cast<size_t>(selectedTrack), slot);
+    else
+        audioEngine.clearPluginTraceTarget();
     audioEngine.markAudioTraceIssue();
     auto editor = processor->createEditor();
     if (editor == nullptr)
@@ -1084,6 +1332,7 @@ BusId ChannelStripComponent::busForMenuItem(int itemId) const noexcept
 
 void ChannelStripComponent::timerCallback()
 {
+    refreshChannelSelector();
     if (isSelectedTrackStrip() && selectedTrack >= 0
         && selectedTrack < static_cast<int>(trackModel.getTrackCount()))
     {
@@ -1096,6 +1345,12 @@ void ChannelStripComponent::timerCallback()
         meter.updatePeak(useInputMeter ? audioEngine.getTrackInputPeak(static_cast<size_t>(selectedTrack))
                                        : audioEngine.getTrackPeak(static_cast<size_t>(selectedTrack)));
     }
+    else if (isAuxBusStrip())
+    {
+        const auto& buses = trackModel.getBuses();
+        const auto found = std::find_if(buses.begin(), buses.end(), [this] (const auto& bus) { return bus.id == selectedBus; });
+        meter.updatePeak(found != buses.end() ? audioEngine.getBusPeak(static_cast<size_t>(std::distance(buses.begin(), found))) : 0.0f);
+    }
     else
         meter.updateStereoPeak(audioEngine.getMasterLeftPeak(), audioEngine.getMasterRightPeak());
     synchroniseControlsFromState();
@@ -1103,9 +1358,23 @@ void ChannelStripComponent::timerCallback()
 
 void ChannelStripComponent::synchroniseControlsFromState()
 {
+    if (isAuxBusStrip())
+    {
+        const auto& buses = trackModel.getBuses();
+        const auto found = std::find_if(buses.begin(), buses.end(), [this] (const auto& bus) { return bus.id == selectedBus; });
+        if (found != buses.end())
+        {
+            fader.setValue(found->gain, juce::dontSendNotification);
+            pan.setValue(found->balance, juce::dontSendNotification);
+            panValue.setText(juce::String(found->balance, 2), juce::dontSendNotification);
+        }
+        return;
+    }
     if (! isSelectedTrackStrip())
     {
         fader.setValue(audioEngine.getMasterGain(), juce::dontSendNotification);
+        pan.setValue(audioEngine.getMasterPan(), juce::dontSendNotification);
+        panValue.setText(juce::String(audioEngine.getMasterPan(), 2), juce::dontSendNotification);
         return;
     }
 
@@ -1120,6 +1389,8 @@ void ChannelStripComponent::synchroniseControlsFromState()
     {
         const auto active = track.sends[slot].targetBus.isValid();
         sendLevels[slot].setValue(active ? track.sends[slot].level : 0.0f, juce::dontSendNotification);
+        sendLevelReadouts[slot].setText(sendLevelPercent(active ? track.sends[slot].level : 0.0f),
+                                         juce::dontSendNotification);
         sendPreFader[slot].setToggleState(active && track.sends[slot].preFader, juce::dontSendNotification);
     }
 }
@@ -1187,22 +1458,38 @@ void ChannelStripComponent::resized()
             if (route.isVisible())
                 ++visibleSendRoutes;
 
+    // At a narrow inspector width a send's destination must never disappear.
+    // Give it a full first row, with amount/mode/remove on a second row.
+    const auto compactSendLayout = isSelectedTrackStrip() && getWidth() < 190;
+    const auto sendControlRows = visibleSendRoutes == 0 ? 1
+        : visibleSendRoutes * (compactSendLayout ? 2 : 1);
+
+    // Reserve the physical console before laying out inserts, scenes and
+    // sends.  These are two adjacent channel strips: one must never receive a
+    // shorter fader merely because it happens to have more visible send rows.
+    // Content above this boundary may become compact, but the PAN/meter/fader
+    // module always preserves the same proportions in both strips.
+    auto titleRow = bounds.removeFromTop(sectionHeaderHeight);
+    auto performance = bounds.removeFromBottom(consoleHeight).reduced(2, 2);
+
     // Full-screen performance layouts should make the rack easy to scan and
-    // hit with a mouse. Keep a compact minimum for smaller windows, then use
-    // available vertical space without starving the bottom console when a
-    // performer expands the rack or saves several scenes.
+    // hit with a mouse. Keep a compact minimum for smaller windows, using only
+    // the space above the fixed console module.
     const auto sectionHeaders = isSelectedTrackStrip() ? 4 : 2;
     const auto controlRows = visibleFxSlots + 1
-        + (isSelectedTrackStrip() ? 1 + visibleSceneSlots + juce::jmax(1, visibleSendRoutes) + 1 : 0);
+        + (isSelectedTrackStrip() ? 1 + visibleSceneSlots + sendControlRows + 1 : 0);
     const auto availableControlSpace = juce::jmax(0,
-        bounds.getHeight() - consoleHeight - sectionHeaders * sectionHeaderHeight);
-    const auto responsiveControlHeight = juce::jlimit(controlHeight, 28,
+        bounds.getHeight() - sectionHeaders * sectionHeaderHeight);
+    const auto responsiveControlHeight = juce::jlimit(18, 28,
         availableControlSpace / juce::jmax(1, controlRows));
     audioFxRackBounds = {};
     sceneBounds = {};
     sendsBounds = {};
     routingBounds = {};
-    heading.setBounds(bounds.removeFromTop(sectionHeaderHeight));
+    heading.setVisible(isSelectedTrackStrip());
+    channelSelector.setVisible(! isSelectedTrackStrip());
+    if (isSelectedTrackStrip()) heading.setBounds(titleRow);
+    else channelSelector.setBounds(titleRow);
     if (isSelectedTrackStrip())
     {
         const auto fxStart = bounds.getY();
@@ -1236,10 +1523,21 @@ void ChannelStripComponent::resized()
             {
                 if (! sendRoutes[slot].isVisible())
                     continue;
+                if (compactSendLayout)
+                {
+                    // Destination is the primary decision, so it owns the
+                    // first row. The compact second row retains amount,
+                    // tap-point and remove without stealing its text space.
+                    sendRoutes[slot].setBounds(bounds.removeFromTop(responsiveControlHeight).reduced(1, 1));
+                }
                 auto row = bounds.removeFromTop(responsiveControlHeight).reduced(1, 1);
-                clearSendButtons[slot].setBounds(row.removeFromRight(18));
-                sendLevels[slot].setBounds(row.removeFromRight(juce::jmin(30, row.getHeight())));
-                sendRoutes[slot].setBounds(row);
+                clearSendButtons[slot].setBounds(row.removeFromRight(22));
+                sendPreFader[slot].setBounds(row.removeFromRight(compactSendLayout ? 35 : 48));
+                sendLevels[slot].setBounds(row.removeFromLeft(juce::jmin(row.getHeight() + 2, 30)).reduced(1));
+                sendLevelReadouts[slot].setVisible(true);
+                sendLevelReadouts[slot].setBounds(row.removeFromLeft(juce::jmin(34, row.getWidth())));
+                if (! compactSendLayout)
+                    sendRoutes[slot].setBounds(row);
             }
         }
         sendsBounds = { bounds.getX(), sendsStart, bounds.getWidth(), bounds.getY() - sendsStart };
@@ -1266,13 +1564,17 @@ void ChannelStripComponent::resized()
         {
             sendRoutes[slot].setVisible(false);
             sendLevels[slot].setVisible(false);
+            sendLevelReadouts[slot].setVisible(false);
             sendPreFader[slot].setVisible(false);
             clearSendButtons[slot].setVisible(false);
         }
     }
-    // Both channel strips share the Inspector's bottom edge, keeping their
-    // PAN/LEVEL consoles aligned and flush with the mixer baseline.
-    auto performance = bounds.removeFromBottom(consoleHeight).reduced(2, 2);
+    // Both channel strips share the Inspector's reserved bottom console,
+    // keeping PAN/LEVEL and both faders aligned at every window size.
+    panLabel.setText(isSelectedTrackStrip() ? "PAN" : "BALANCE", juce::dontSendNotification);
+    panLabel.setVisible(true);
+    pan.setVisible(true);
+    panValue.setVisible(true);
     panLabel.setBounds(performance.removeFromTop(sectionHeaderHeight));
     auto panArea = performance.removeFromTop(70).withSizeKeepingCentre(58, 68);
     pan.setBounds(panArea.removeFromTop(46).withSizeKeepingCentre(46, 46));

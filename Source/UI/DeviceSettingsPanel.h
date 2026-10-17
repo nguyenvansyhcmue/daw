@@ -61,6 +61,7 @@ private:
     std::array<juce::ComboBox, TrackDataModel::maxTracks> trackInputSelectors;
     std::array<juce::ComboBox, TrackDataModel::maxTracks> trackInputFormats;
     std::array<juce::ComboBox, TrackDataModel::maxTracks> trackMonitorModes;
+    std::array<juce::ComboBox, TrackDataModel::maxTracks> trackMonitorDestinations;
     juce::String lastSummary;
     juce::String inputRoutingKey;
     juce::String midiOutputDevicesKey;

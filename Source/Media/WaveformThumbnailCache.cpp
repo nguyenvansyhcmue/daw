@@ -284,5 +284,13 @@ std::shared_ptr<const WaveformThumbnail> WaveformThumbnailCache::find(const juce
 
 juce::String WaveformThumbnailCache::sourceKey(const juce::File& sourceFile)
 {
-    return sourceFile.getFullPathName().toLowerCase();
+    const auto path = sourceFile.getFullPathName().toLowerCase();
+    if (path.isEmpty() || ! sourceFile.existsAsFile())
+        return path;
+
+    // A project may keep running while an external editor replaces the file.
+    // Include a cheap on-disk fingerprint so the in-memory envelope is never
+    // reused for changed media just because its pathname is unchanged.
+    return path + ":" + juce::String(sourceFile.getSize())
+        + ":" + juce::String(sourceFile.getLastModificationTime().toMilliseconds());
 }

@@ -262,8 +262,7 @@ private:
 PluginHostService::PluginHostService(juce::File catalogFile) : catalog(std::move(catalogFile))
 {
     formatManager.addDefaultFormats();
-    const auto hasSavedCatalog = catalog.existsAsFile();
-    loadCatalogFromDisk();
+    const auto hasSavedCatalog = loadCatalogFromDisk();
 
     // Scan every product shipped in the application bundle using the same
     // protected scanner and metadata path as a user-installed VST3.
@@ -292,7 +291,6 @@ juce::File PluginHostService::defaultCatalogFile()
 
 juce::Result PluginHostService::scanVst3(const juce::File& bundleOrModule)
 {
-    const juce::ScopedLock lock(catalogLock);
     if (! bundleOrModule.exists())
         return juce::Result::fail("VST3 file or bundle does not exist");
 
@@ -312,8 +310,11 @@ juce::Result PluginHostService::scanVst3(const juce::File& bundleOrModule)
     auto* vst3Format = findVst3Format();
     if (vst3Format == nullptr)
         return juce::Result::fail("VST3 hosting is not enabled in this build");
-    if (knownPlugins.isListingUpToDate(scanTarget.getFullPathName(), *vst3Format))
-        return juce::Result::ok();
+    {
+        const juce::ScopedLock lock(catalogLock);
+        if (knownPlugins.isListingUpToDate(scanTarget.getFullPathName(), *vst3Format))
+            return juce::Result::ok();
+    }
 
     const auto probe = vst3ProbeExecutable();
     if (! probe.existsAsFile())
@@ -332,16 +333,22 @@ juce::Result PluginHostService::scanVst3(const juce::File& bundleOrModule)
     {
         process.kill();
         resultFile.deleteFile();
-        knownPlugins.addToBlacklist(scanTarget.getFullPathName());
-        saveCatalogToDisk();
+        {
+            const juce::ScopedLock lock(catalogLock);
+            knownPlugins.addToBlacklist(scanTarget.getFullPathName());
+            saveCatalogToDisk();
+        }
         return juce::Result::fail("VST3 scan timed out and was quarantined: " + scanTarget.getFileName());
     }
     if (process.getExitCode() != 0 || ! resultFile.existsAsFile())
     {
         const auto exitCode = process.getExitCode();
         const auto hasResult = resultFile.existsAsFile();
-        knownPlugins.addToBlacklist(scanTarget.getFullPathName());
-        saveCatalogToDisk();
+        {
+            const juce::ScopedLock lock(catalogLock);
+            knownPlugins.addToBlacklist(scanTarget.getFullPathName());
+            saveCatalogToDisk();
+        }
         resultFile.deleteFile();
         return juce::Result::fail("VST3 scan failed safely and was quarantined: " + scanTarget.getFileName()
                                   + " (exit " + juce::String(static_cast<int>(exitCode))
@@ -353,18 +360,22 @@ juce::Result PluginHostService::scanVst3(const juce::File& bundleOrModule)
     if (document == nullptr || ! document->hasTagName("KNOWNPLUGINS"))
         return juce::Result::fail("VST3 scanner returned invalid plug-in metadata");
     auto found = false;
-    for (const auto* element : document->getChildIterator())
     {
-        juce::PluginDescription description;
-        if (description.loadFromXml(*element))
+        const juce::ScopedLock lock(catalogLock);
+        for (const auto* element : document->getChildIterator())
         {
-            knownPlugins.addType(description);
-            found = true;
+            juce::PluginDescription description;
+            if (description.loadFromXml(*element))
+            {
+                knownPlugins.addType(description);
+                found = true;
+            }
         }
+        if (found)
+            saveCatalogToDisk();
     }
     if (! found)
         return juce::Result::fail("No VST3 plug-in type was found");
-    saveCatalogToDisk();
     return juce::Result::ok();
 }
 
@@ -385,14 +396,27 @@ juce::Result PluginHostService::scanDefaultVst3Locations()
         if (const auto result = scanVst3(juce::File { candidate }); result.failed())
             failed.add(result.getErrorMessage());
 
-    saveCatalogToDisk();
+    {
+        const juce::ScopedLock lock(catalogLock);
+        saveCatalogToDisk();
+    }
     return failed.isEmpty() ? juce::Result::ok()
                             : juce::Result::fail("Some VST3 plug-ins were skipped safely: " + failed.joinIntoString(" | "));
 }
 
 void PluginHostService::scanDefaultVst3LocationsAsync(std::function<void(juce::Result)> completion)
 {
-    scanPool.addJob(new DefaultVst3ScanJob(*this, std::move(completion)), true);
+    bool expected = false;
+    if (! defaultScanInFlight.compare_exchange_strong(expected, true))
+        return;
+
+    auto wrappedCompletion = [this, completion = std::move(completion)] (juce::Result result) mutable
+    {
+        defaultScanInFlight.store(false);
+        if (completion != nullptr)
+            completion(std::move(result));
+    };
+    scanPool.addJob(new DefaultVst3ScanJob(*this, std::move(wrappedCompletion)), true);
 }
 
 juce::Result PluginHostService::scanAudioUnits()
@@ -404,12 +428,18 @@ juce::Result PluginHostService::scanAudioUnits()
     // Audio Units are registered with Core Audio rather than discovered only
     // from .component bundles, so ask the format for every registered AU ID.
     const auto identifiers = audioUnitFormat->searchPathsForPlugins({}, false, false);
+    // Discovery may query a slow or misbehaving third-party component. Scan
+    // into an isolated list, then publish the completed metadata in one short
+    // critical section so opening the plug-in browser never waits on CoreAudio.
+    juce::KnownPluginList scannedPlugins;
     juce::OwnedArray<juce::PluginDescription> found;
     for (const auto& identifier : identifiers)
-        knownPlugins.scanAndAddFile(identifier, true, found, *audioUnitFormat);
+        scannedPlugins.scanAndAddFile(identifier, true, found, *audioUnitFormat);
 
     {
         const juce::ScopedLock lock(catalogLock);
+        for (const auto& description : scannedPlugins.getTypes())
+            knownPlugins.addType(description);
         saveCatalogToDisk();
     }
     return juce::Result::ok();
@@ -474,13 +504,25 @@ juce::Array<juce::PluginDescription> PluginHostService::findKnownPlugins(const j
     return matches;
 }
 
-void PluginHostService::loadCatalogFromDisk()
+bool PluginHostService::loadCatalogFromDisk()
 {
     if (! catalog.existsAsFile())
-        return;
+        return false;
 
-    if (const auto document = juce::parseXML(catalog); document != nullptr)
+    if (const auto document = juce::parseXML(catalog);
+        document != nullptr && document->hasTagName("KNOWNPLUGINS"))
+    {
         knownPlugins.recreateFromXml(*document);
+        return true;
+    }
+
+    // A partial catalog must not permanently suppress first-run discovery.
+    // Preserve it for support diagnostics, but allow a clean catalog to be
+    // rebuilt on the next discovery pass.
+    const auto corruptCopy = catalog.getSiblingFile(
+        catalog.getFileName() + ".corrupt-" + juce::String(juce::Time::currentTimeMillis()));
+    catalog.moveFileTo(corruptCopy);
+    return false;
 }
 
 void PluginHostService::saveCatalogToDisk() const
@@ -488,7 +530,16 @@ void PluginHostService::saveCatalogToDisk() const
     if (! catalog.getParentDirectory().exists())
         catalog.getParentDirectory().createDirectory();
     if (const auto document = knownPlugins.createXml(); document != nullptr)
-        document->writeTo(catalog);
+    {
+        // Never truncate the live catalog directly. A scan can happen while
+        // the app is closing, so write a complete sibling file first and
+        // atomically replace the previous catalog only after success.
+        const auto temporary = catalog.getSiblingFile(catalog.getFileName() + ".tmp");
+        if (document->writeTo(temporary))
+            temporary.replaceFileIn(catalog);
+        else
+            temporary.deleteFile();
+    }
 }
 
 juce::AudioPluginFormat* PluginHostService::findVst3Format() const noexcept

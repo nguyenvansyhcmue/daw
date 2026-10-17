@@ -14,6 +14,8 @@ public:
     static juce::File defaultStorageFile();
 
 private:
+    bool writeEntries(const juce::StringArray& entries) const;
+
     juce::File storage;
     static constexpr int maximumEntries = 12;
 };

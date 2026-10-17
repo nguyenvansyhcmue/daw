@@ -53,8 +53,12 @@ void WaveformCacheStore::store(const juce::File& sourceFile, const WaveformThumb
         return;
     }
     output.flush();
-    destination.deleteFile();
-    temporary.moveFileTo(destination);
+    // Never delete a valid envelope before its replacement is complete.
+    // A cancelled write or a full disk must leave the previous cache usable.
+    const auto committed = destination.existsAsFile() ? temporary.replaceFileIn(destination)
+                                                      : temporary.moveFileTo(destination);
+    if (! committed)
+        temporary.deleteFile();
 }
 
 juce::File WaveformCacheStore::cacheFileFor(const juce::File& sourceFile) const

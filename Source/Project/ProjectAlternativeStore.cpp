@@ -27,5 +27,5 @@ juce::File ProjectAlternativeStore::makeAlternativeFile(const juce::File& projec
 {
     const auto requestedName = name.trim().isEmpty() ? "Alternative" : name.trim();
     const auto safeName = juce::File::createLegalFileName(requestedName);
-    return alternativesDirectory(projectFile).getChildFile(safeName).withFileExtension("studioforge");
+    return alternativesDirectory(projectFile).getNonexistentChildFile(safeName, ".studioforge", false);
 }

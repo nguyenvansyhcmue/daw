@@ -455,7 +455,10 @@ ControlBar::ControlBar(TrackDataModel* model, AudioEngine* engine)
     addAndMakeVisible(countInButton);
     addAndMakeVisible(studioModeButton);
     addAndMakeVisible(stageModeButton);
-    addAndMakeVisible(streamModeButton);
+    // LIVE is a safe-performance state inside Studio, not a third, unrelated
+    // workspace.  Keep the legacy stream profile internally for project
+    // compatibility, but expose it as this deliberate Studio control.
+    addAndMakeVisible(liveModeButton);
     addAndMakeVisible(countInBarsBox);
     addAndMakeVisible(punchButton);
     addAndMakeVisible(cycleButton);
@@ -547,8 +550,16 @@ ControlBar::ControlBar(TrackDataModel* model, AudioEngine* engine)
                         "Studio: recording, editing, mixing and mastering.");
     configureModeButton(stageModeButton, WorkspaceMode::stage,
                         "Stage: low-latency live-performance workspace.");
-    configureModeButton(streamModeButton, WorkspaceMode::stream,
-                        "Stream: vocal, backing and broadcast-output workspace.");
+    streamModeButton.setVisible(false);
+    liveModeButton.setClickingTogglesState(true);
+    liveModeButton.setTooltip("LIVE: prepare low-latency monitoring and protect the live signal path. Click again to return to Studio.");
+    liveModeButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff16343b));
+    liveModeButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xffb72e38));
+    liveModeButton.onClick = [this]
+    {
+        setWorkspaceMode(liveModeButton.getToggleState() ? WorkspaceMode::stream : WorkspaceMode::studio);
+    };
+    liveModeButton.setVisible(false);
     countInButton.setClickingTogglesState(true);
     countInButton.setTooltip("Count-in before recording");
     countInButton.onClick = [this]
@@ -627,7 +638,7 @@ void ControlBar::setWorkspaceMode(WorkspaceMode mode) noexcept
     if (workspaceMode == mode
         && ((mode == WorkspaceMode::studio && studioModeButton.getToggleState())
             || (mode == WorkspaceMode::stage && stageModeButton.getToggleState())
-            || (mode == WorkspaceMode::stream && streamModeButton.getToggleState())))
+            || (mode == WorkspaceMode::stream && liveModeButton.getToggleState())))
         return;
 
     workspaceMode = mode;
@@ -637,9 +648,15 @@ void ControlBar::setWorkspaceMode(WorkspaceMode mode) noexcept
         button.setToggleState(active, juce::dontSendNotification);
         juce::ignoreUnused(accent);
     };
-    apply(studioModeButton, WorkspaceMode::studio, StudioForgeTheme::accentBlue);
+    // Stream is the persisted live-safe profile, but is intentionally
+    // presented as LIVE within Studio so users keep their recording/mixing
+    // layout while the audio engine enters its live policy.
+    studioModeButton.setToggleState(mode != WorkspaceMode::stage, juce::dontSendNotification);
     apply(stageModeButton, WorkspaceMode::stage, juce::Colour(0xffc97839));
-    apply(streamModeButton, WorkspaceMode::stream, juce::Colour(0xff3d9fc6));
+    streamModeButton.setToggleState(false, juce::dontSendNotification);
+    streamModeButton.setVisible(false);
+    liveModeButton.setToggleState(mode == WorkspaceMode::stream, juce::dontSendNotification);
+    liveModeButton.setVisible(false);
     if (onWorkspaceModeChanged != nullptr)
         onWorkspaceModeChanged(mode);
     repaint();
@@ -787,7 +804,12 @@ void ControlBar::timerCallback()
     punchButton.setToggleState(trackModel->isPunchActive(), juce::dontSendNotification);
     cycleButton.setToggleState(trackModel->isCycleActive(), juce::dontSendNotification);
     metronomeButton.setToggleState(audioEngine != nullptr && audioEngine->isMetronomeEnabled(), juce::dontSendNotification);
-    if (referenceConsoleStrip.isValid())
+    // The artwork includes its own large Live DAW wordmark on the left. Its
+    // fixed reference coordinates only leave a safe lane for controls on a
+    // genuinely wide, tall console. At normal or reduced window sizes, using
+    // it puts the Studio button on top of the wordmark; use the responsive
+    // control layout below instead.
+    if (referenceConsoleStrip.isValid() && getWidth() >= 2100 && getHeight() >= 100)
         repaint();
 }
 
@@ -809,7 +831,10 @@ void ControlBar::updateLogoPlaybackGlow(bool shouldGlow) noexcept
 
 void ControlBar::paint(juce::Graphics& g)
 {
-    if (referenceConsoleStrip.isValid())
+    // The reference strip is a fixed-width artwork.  Only use it at its
+    // intended desktop size; otherwise the responsive controls below own the
+    // entire bar.
+    if (referenceConsoleStrip.isValid() && getWidth() >= 2100 && getHeight() >= 100)
     {
         g.fillAll(juce::Colour(0xff202426));
         g.setImageResamplingQuality(juce::Graphics::highResamplingQuality);
@@ -904,15 +929,13 @@ void ControlBar::paint(juce::Graphics& g)
     g.setColour(juce::Colours::black.withAlpha(0.85f));
     g.drawLine(area.getX(), area.getBottom() - 1.0f, area.getRight(), area.getBottom() - 1.0f, 1.0f);
 
-    // The Live DAW marque occupies the fixed left edge. Its idle and lit
-    // variants crossfade during playback/recording without affecting the
-    // centred console layout.
+    // The Live DAW marque owns a responsive lane at the left edge. It remains
+    // present at every useful desktop width while the console uses only the
+    // remaining space, rather than treating the logo as an expendable layer.
     const auto logoHeight = juce::jmin(52, juce::jmax(32, getHeight() - 12));
-    // Leave a deliberate breathing gap before the first workspace key. The
-    // source logo contains transparent flourish pixels, so its visual edge is
-    // wider than the nominal bounds and can otherwise touch Studio.
-    const auto logoBounds = juce::Rectangle<int>(12, (getHeight() - logoHeight) / 2, 132, logoHeight);
-    if (brandLogo.isValid())
+    const auto logoWidth = juce::jlimit(96, 156, getWidth() / 12);
+    const auto logoBounds = juce::Rectangle<int>(36, (getHeight() - logoHeight) / 2, logoWidth, logoHeight);
+    if (getWidth() < 2100 && brandLogo.isValid())
     {
         // Standby is deliberately subdued. The illuminated layer below is
         // only blended in by timerCallback while playback/recording is real.
@@ -920,7 +943,7 @@ void ControlBar::paint(juce::Graphics& g)
         g.drawImageWithin(brandLogo, logoBounds.getX(), logoBounds.getY(), logoBounds.getWidth(), logoBounds.getHeight(),
                           juce::RectanglePlacement::centred | juce::RectanglePlacement::onlyReduceInSize);
     }
-    if (illuminatedBrandLogo.isValid() && logoPlaybackGlow > 0.002f)
+    if (getWidth() < 2100 && illuminatedBrandLogo.isValid() && logoPlaybackGlow > 0.002f)
     {
         g.setOpacity(logoPlaybackGlow);
         g.drawImageWithin(illuminatedBrandLogo, logoBounds.getX(), logoBounds.getY(), logoBounds.getWidth(), logoBounds.getHeight(),
@@ -934,7 +957,11 @@ void ControlBar::paint(juce::Graphics& g)
 
 void ControlBar::resized()
 {
-    if (referenceConsoleStrip.isValid())
+    // This artwork contains absolute desktop coordinates.  It cannot be
+    // scaled into a narrow window without preserving the old positions and
+    // causing its controls to collide.  Below this breakpoint the responsive
+    // layout underneath is the sole owner of every control.
+    if (referenceConsoleStrip.isValid() && getWidth() >= 2100 && getHeight() >= 100)
     {
         constexpr float referenceWidth = 1916.0f;
         constexpr float referenceHeight = 130.0f;
@@ -959,7 +986,8 @@ void ControlBar::resized()
         constexpr float workspaceNudge = 28.0f;
         studioModeButton.setBounds(referenceBounds(20 + workspaceNudge, 21, 104, 85));
         stageModeButton.setBounds(referenceBounds(126 + workspaceNudge, 21, 99, 85));
-        streamModeButton.setBounds(referenceBounds(228 + workspaceNudge, 21, 99, 85));
+        streamModeButton.setVisible(false);
+        liveModeButton.setVisible(false);
         metronomeButton.setBounds(referenceBounds(349, 21, 61, 65));
         countInButton.setBounds(referenceBounds(423, 21, 122, 65));
         autoKeyButton.setBounds(referenceBounds(552, 21, 88, 65));
@@ -989,7 +1017,7 @@ void ControlBar::resized()
     // Keep the console as a centred instrument, not a row stretched to the
     // window edges.  This preserves the deliberate density of the reference
     // layout on ultrawide displays.
-    if (getWidth() >= 1000)
+    if (getWidth() >= 720)
     {
         // The console is an instrument panel, not a toolbar.  At desktop
         // widths it needs enough physical height for the glyphs and LED
@@ -1018,45 +1046,61 @@ void ControlBar::resized()
         // so the visible Count-in -> LCD gap equals LCD -> transport.
         const auto clusterRightShift = countInWidth - clusterNudge - countInKeyWidth + 14;
         const auto autoKeyWidth = wide ? 88 : 76;
-        const auto leftWidth = modeWidth * 2 + (modeWidth + 10) + metroWidth + countInWidth + autoKeyWidth
-            + modeGap * 3 + countInGap + 8;
+        const auto leftWidth = modeWidth * 2 + metroWidth + countInWidth + autoKeyWidth
+            + modeGap * 2 + countInGap + 8;
         constexpr auto meterRightInset = 12;
         const auto consoleWidth = leftWidth + outerGap + lcdWidth + outerGap + transportWidth
             + 18 + timeWidth + 18 + meterWidth + meterRightInset;
         // Align the musical LCD with the start of the arrange ruler rather
         // than mathematical window centre; the left inspector is visually
         // heavier than the right edge of the arrange view.
-        const auto consoleRightNudge = wide ? 70 : 62;
-        const auto consoleX = juce::jmax(12, (getWidth() - consoleWidth) / 2 + consoleRightNudge);
-        auto cursor = consoleX + clusterNudge + clusterRightShift;
+        // Scale the complete console as one instrument face when the window
+        // narrows.  Scaling only selected controls was what left the mode
+        // keys fixed while the time display ran off the right edge.
+        // Reserve the logo's visual lane before calculating the scale. This
+        // gives the wordmark and the first workspace key a real boundary at
+        // every width instead of allowing a centred console to drift over it.
+        const auto logoLaneWidth = juce::jlimit(132, 202, getWidth() / 10);
+        const auto consoleAvailableWidth = juce::jmax(1, getWidth() - logoLaneWidth - 12);
+        const auto layoutScale = juce::jmin(1.0f,
+            static_cast<float>(consoleAvailableWidth) / static_cast<float>(consoleWidth));
+        const auto scaled = [layoutScale] (int value)
+        {
+            return juce::jmax(1, juce::roundToInt(static_cast<float>(value) * layoutScale));
+        };
+        const auto scaledControlHeight = scaled(controlHeight);
+        const auto scaledControlY = (getHeight() - scaledControlHeight) / 2;
+        const auto scaledConsoleWidth = scaled(consoleWidth);
+        const auto consoleX = logoLaneWidth + (consoleAvailableWidth - scaledConsoleWidth) / 2;
+        auto cursor = consoleX + scaled(clusterNudge + clusterRightShift);
 
         inspectorButton.setVisible(false); mixerButton.setVisible(false); pianoRollButton.setVisible(false);
         browserButton.setVisible(false); addTrackButton.setVisible(false); cycleButton.setVisible(false);
         punchButton.setVisible(false); bpmSlider.setVisible(false); bpmLabel.setVisible(false);
         pointerTool.setVisible(false); scissorsTool.setVisible(false); eraserTool.setVisible(false);
-        studioModeButton.setVisible(true); stageModeButton.setVisible(true); streamModeButton.setVisible(true);
+        studioModeButton.setVisible(true); stageModeButton.setVisible(true); streamModeButton.setVisible(false); liveModeButton.setVisible(false);
         metronomeButton.setVisible(true); countInButton.setVisible(true);
-        studioModeButton.setBounds(cursor, controlY, modeWidth, controlHeight); cursor += modeWidth + modeGap;
-        stageModeButton.setBounds(cursor, controlY, modeWidth, controlHeight); cursor += modeWidth + modeGap;
-        streamModeButton.setBounds(cursor, controlY, modeWidth + 10, controlHeight); cursor += modeWidth + 10 + modeGap;
-        metronomeButton.setBounds(cursor, controlY, metroWidth, controlHeight); cursor += metroWidth + countInGap;
-        countInButton.setBounds(cursor, controlY, countInKeyWidth, controlHeight);
-        cursor += countInKeyWidth + 8;
-        autoKeyButton.setBounds(cursor, controlY, autoKeyWidth, controlHeight);
+        studioModeButton.setBounds(cursor, scaledControlY, scaled(modeWidth), scaledControlHeight); cursor += scaled(modeWidth + modeGap);
+        liveModeButton.setBounds(studioModeButton.getRight() - scaled(42), scaledControlY + scaled(5), scaled(38), scaled(18));
+        stageModeButton.setBounds(cursor, scaledControlY, scaled(modeWidth), scaledControlHeight); cursor += scaled(modeWidth + modeGap);
+        metronomeButton.setBounds(cursor, scaledControlY, scaled(metroWidth), scaledControlHeight); cursor += scaled(metroWidth + countInGap);
+        countInButton.setBounds(cursor, scaledControlY, scaled(countInKeyWidth), scaledControlHeight);
+        cursor += scaled(countInKeyWidth + 8);
+        autoKeyButton.setBounds(cursor, scaledControlY, scaled(autoKeyWidth), scaledControlHeight);
         autoKeyButton.setVisible(true);
         countInBarsBox.setVisible(false);
-        cursor = consoleX + leftWidth + outerGap;
-        transportLCD.setBounds(cursor, controlY, lcdWidth, controlHeight); cursor += lcdWidth + outerGap;
-        goToBeginningButton.setBounds(cursor, controlY, transportKeyWidth, controlHeight); cursor += transportKeyWidth + transportGap;
-        rewindButton.setBounds(cursor, controlY, transportKeyWidth, controlHeight); cursor += transportKeyWidth + transportGap;
-        playButton.setBounds(cursor, controlY, transportKeyWidth, controlHeight); cursor += transportKeyWidth + transportGap;
-        stopButton.setBounds(cursor, controlY, transportKeyWidth, controlHeight); cursor += transportKeyWidth + transportGap;
-        forwardButton.setBounds(cursor, controlY, transportKeyWidth, controlHeight); cursor += transportKeyWidth + transportGap;
-        recordButton.setBounds(cursor, controlY, transportKeyWidth, controlHeight); cursor += transportKeyWidth + 18;
-        transportTimeLabel.setBounds(cursor, controlY, timeWidth, controlHeight); cursor += timeWidth + 18;
+        cursor = consoleX + scaled(leftWidth + outerGap);
+        transportLCD.setBounds(cursor, scaledControlY, scaled(lcdWidth), scaledControlHeight); cursor += scaled(lcdWidth + outerGap);
+        goToBeginningButton.setBounds(cursor, scaledControlY, scaled(transportKeyWidth), scaledControlHeight); cursor += scaled(transportKeyWidth + transportGap);
+        rewindButton.setBounds(cursor, scaledControlY, scaled(transportKeyWidth), scaledControlHeight); cursor += scaled(transportKeyWidth + transportGap);
+        playButton.setBounds(cursor, scaledControlY, scaled(transportKeyWidth), scaledControlHeight); cursor += scaled(transportKeyWidth + transportGap);
+        stopButton.setBounds(cursor, scaledControlY, scaled(transportKeyWidth), scaledControlHeight); cursor += scaled(transportKeyWidth + transportGap);
+        forwardButton.setBounds(cursor, scaledControlY, scaled(transportKeyWidth), scaledControlHeight); cursor += scaled(transportKeyWidth + transportGap);
+        recordButton.setBounds(cursor, scaledControlY, scaled(transportKeyWidth), scaledControlHeight); cursor += scaled(transportKeyWidth + 18);
+        transportTimeLabel.setBounds(cursor, scaledControlY, scaled(timeWidth), scaledControlHeight); cursor += scaled(timeWidth + 18);
         // Keep the meter well visually separated from the window edge. The
         // transport/time cluster remains fixed; only the meter is nudged left.
-        masterMeter.setBounds(cursor - 12, controlY + 5, juce::jmax(132, meterWidth - 4), controlHeight - 10);
+        masterMeter.setBounds(cursor - scaled(12), scaledControlY + scaled(5), scaled(meterWidth - 4), scaled(controlHeight - 10));
         masterMeter.setVisible(true);
         return;
     }
@@ -1070,6 +1114,7 @@ void ControlBar::resized()
     browserButton.setVisible(false);
     addTrackButton.setVisible(false);
     autoKeyButton.setVisible(true);
+    liveModeButton.setVisible(false);
 
     const auto rightControlsWidth = 0;
     const auto rightX = bounds.getRight() - rightControlsWidth;
@@ -1092,12 +1137,13 @@ void ControlBar::resized()
     const auto lcdX = wideLayout ? bounds.getCentreX() - lcdWidth / 2 : bounds.getX() + performanceControlsWidth;
     const auto clusterX = lcdX - performanceControlsWidth - 16;
     studioModeButton.setBounds(clusterX, bounds.getY(), 72, buttonHeight);
+    liveModeButton.setBounds(clusterX + 32, bounds.getY() + 4, 36, 18);
     stageModeButton.setBounds(clusterX + 76, bounds.getY(), 72, buttonHeight);
-    streamModeButton.setBounds(clusterX + 152, bounds.getY(), 78, buttonHeight);
-    metronomeButton.setBounds(clusterX + 238, bounds.getY(), 42, buttonHeight);
-    countInButton.setBounds(clusterX + 284, bounds.getY(), 42, buttonHeight);
-    countInBarsBox.setBounds(clusterX + 330, bounds.getY() + 4, 42, buttonHeight - 8);
-    autoKeyButton.setBounds(clusterX + 376, bounds.getY(), 80, buttonHeight);
+    streamModeButton.setVisible(false);
+    metronomeButton.setBounds(clusterX + 156, bounds.getY(), 42, buttonHeight);
+    countInButton.setBounds(clusterX + 202, bounds.getY(), 42, buttonHeight);
+    countInBarsBox.setBounds(clusterX + 248, bounds.getY() + 4, 42, buttonHeight - 8);
+    autoKeyButton.setBounds(clusterX + 294, bounds.getY(), 80, buttonHeight);
     transportLCD.setBounds(lcdX, bounds.getY(), lcdWidth, buttonHeight);
     const auto transportX = lcdX + lcdWidth + 16;
     goToBeginningButton.setBounds(transportX, bounds.getY(), 42, buttonHeight);

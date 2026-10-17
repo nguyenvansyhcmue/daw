@@ -17,7 +17,7 @@ const AudioMediaPool::Source& AudioMediaPool::registerDecodedSource(
         source.id = { nextSourceId++ };
         source.sourceFile = sourceFile;
     }
-    if (source.playbackData == nullptr)
+    if (source.playbackData.expired())
         source.playbackData = std::move(playbackData);
     return source;
 }
@@ -35,7 +35,7 @@ const AudioMediaPool::Source* AudioMediaPool::find(const juce::File& sourceFile)
 std::shared_ptr<juce::AudioBuffer<float>> AudioMediaPool::findPlaybackData(const juce::File& sourceFile) const
 {
     if (const auto* source = find(sourceFile); source != nullptr)
-        return source->playbackData;
+        return source->playbackData.lock();
     return {};
 }
 

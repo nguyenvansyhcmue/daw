@@ -4,6 +4,7 @@
 #include "../Models/TrackDataModel.h"
 #include "../Media/MediaReloadService.h"
 #include "../Plugins/PluginHostService.h"
+#include "../Control/PerformanceMacroService.h"
 
 #include <charconv>
 #include <cmath>
@@ -132,6 +133,87 @@ void writeControlRouting(juce::XmlElement& root, const ControlRoutingProfile& pr
     }
 }
 
+juce::Result readPerformanceMacros(const juce::XmlElement& root,
+                                   std::vector<PersistedPerformanceMacroState>& macros)
+{
+    const auto* section = root.getChildByName("PerformanceMacros");
+    if (section == nullptr) return juce::Result::fail("Project is missing performance macro assignments");
+
+    for (const auto* element : section->getChildIterator())
+    {
+        if (! element->hasTagName("Macro"))
+            return juce::Result::fail("Performance macro list has an unknown element");
+
+        PersistedPerformanceMacroState macro;
+        uint64_t bus = 0;
+        double value = 0.0;
+        if (! readInt(*element, "index", macro.macroIndex) || ! readInt(*element, "state", macro.state)
+            || ! readDouble(*element, "value", value)
+            || ! readUnsigned(*element, "bus", bus) || ! readInt(*element, "slot", macro.pluginSlot)
+            || macro.macroIndex < 0 || macro.macroIndex >= 3 || macro.state < 0 || macro.state > 3
+            || ! std::isfinite(value) || value < 0.0 || value > 1.0
+            || bus == 0 || macro.pluginSlot < 0 || macro.pluginSlot >= 8)
+            return juce::Result::fail("Performance macro assignment is malformed");
+
+        macro.value = static_cast<float>(value);
+        macro.bus = { bus };
+        macro.displayName = element->getStringAttribute("name");
+        macro.pluginIdentifier = element->getStringAttribute("plugin").trim();
+        if (macro.pluginIdentifier.isEmpty())
+            return juce::Result::fail("Performance macro plug-in identity is missing");
+        if (std::any_of(macros.begin(), macros.end(), [&macro] (const auto& existing)
+            { return existing.macroIndex == macro.macroIndex; }))
+            return juce::Result::fail("Performance macro index is duplicated");
+
+        for (const auto* target : element->getChildIterator())
+        {
+            if (! target->hasTagName("Target"))
+                return juce::Result::fail("Performance macro target is malformed");
+            PersistedPerformanceMacroTarget savedTarget;
+            double minimum = 0.0, maximum = 0.0;
+            if (! readInt(*target, "semantic", savedTarget.semantic)
+                || ! readDouble(*target, "minimum", minimum) || ! readDouble(*target, "maximum", maximum)
+                || ! std::isfinite(minimum) || ! std::isfinite(maximum) || minimum > maximum)
+                return juce::Result::fail("Performance macro range is malformed");
+            savedTarget.parameterIdentifier = target->getStringAttribute("parameter").trim();
+            savedTarget.displayName = target->getStringAttribute("name");
+            if (savedTarget.parameterIdentifier.isEmpty())
+                return juce::Result::fail("Performance macro parameter identity is missing");
+            savedTarget.minimum = static_cast<float>(minimum);
+            savedTarget.maximum = static_cast<float>(maximum);
+            macro.targets.push_back(std::move(savedTarget));
+        }
+        macros.push_back(std::move(macro));
+    }
+    return juce::Result::ok();
+}
+
+void writePerformanceMacros(juce::XmlElement& root,
+                            const std::vector<PersistedPerformanceMacroState>& macros)
+{
+    auto* section = root.createNewChildElement("PerformanceMacros");
+    for (const auto& macro : macros)
+    {
+        auto* element = section->createNewChildElement("Macro");
+        element->setAttribute("index", macro.macroIndex);
+        element->setAttribute("state", macro.state);
+        element->setAttribute("value", static_cast<double>(macro.value));
+        element->setAttribute("bus", juce::String(macro.bus.value));
+        element->setAttribute("slot", macro.pluginSlot);
+        element->setAttribute("name", macro.displayName);
+        element->setAttribute("plugin", macro.pluginIdentifier);
+        for (const auto& target : macro.targets)
+        {
+            auto* savedTarget = element->createNewChildElement("Target");
+            savedTarget->setAttribute("parameter", target.parameterIdentifier);
+            savedTarget->setAttribute("name", target.displayName);
+            savedTarget->setAttribute("semantic", target.semantic);
+            savedTarget->setAttribute("minimum", static_cast<double>(target.minimum));
+            savedTarget->setAttribute("maximum", static_cast<double>(target.maximum));
+        }
+    }
+}
+
 juce::Result readFxSlots(const juce::XmlElement& parent,
                          std::array<PersistedTrackState::FxSlot, PersistedTrackState::maxFxSlots>& slots)
 {
@@ -248,6 +330,8 @@ juce::Result parseProject(const juce::File& file, ProjectState& state)
             return juce::Result::fail("Live Auto-Key reference track is malformed");
         state.liveKeyReferenceTrack = { referenceTrack };
     }
+    if (version >= 32)
+        if (const auto result = readPerformanceMacros(*root, state.performanceMacros); result.failed()) return result;
 
     const auto* tempoMap = root->getChildByName("TempoMap");
     const auto* tracks = root->getChildByName("Tracks");
@@ -375,6 +459,7 @@ juce::Result parseProject(const juce::File& file, ProjectState& state)
                     || parsedTrack.sends[static_cast<size_t>(slot)].targetBus.isValid())
                     return juce::Result::fail("Track send slot is malformed");
                 parsedTrack.sends[static_cast<size_t>(slot)] = { { bus }, static_cast<float>(level), pre };
+                parsedTrack.sends[static_cast<size_t>(slot)].postFaderBeforePan = ! pre && send->getBoolAttribute("postFaderBeforePan", false);
                 ++parsedTrack.activeSendCount;
             }
         }
@@ -445,13 +530,88 @@ juce::Result parseProject(const juce::File& file, ProjectState& state)
                     || ! std::isfinite(parsedClip.loopLengthSamples) || parsedClip.loopLengthSamples < 0.0)
                     return juce::Result::fail("Clip loop state is malformed");
             }
+            if (version >= 29)
+            {
+                uint64_t takeGroupId = 0;
+                if (! readUnsigned(*clip, "takeGroupId", takeGroupId)
+                    || ! readBool(*clip, "takeActive", parsedClip.takeActive)
+                    || ! readBool(*clip, "recordedTake", parsedClip.recordedTake))
+                    return juce::Result::fail("Clip take state is malformed");
+                parsedClip.takeGroupId = takeGroupId;
+                if (parsedClip.takeGroupId == 0 && ! parsedClip.takeActive)
+                    return juce::Result::fail("Clip take state is invalid");
+            }
+            if (version >= 30 && ! readUnsigned(*clip, "takeId", parsedClip.takeId))
+                return juce::Result::fail("Clip take identity is malformed");
             parsedClip.id = { clipId };
             parsedClip.trackId = { clipTrackId };
+            // Version 29 introduced take groups before a stable take identity
+            // existed. Treat each legacy region as its own pass on load.
+            if (version < 30 && parsedClip.takeGroupId != 0)
+                parsedClip.takeId = clipId;
             parsedClip.sourcePath = clip->getStringAttribute("sourcePath");
             if (parsedClip.sourcePath.isNotEmpty() && ! juce::File::isAbsolutePath(parsedClip.sourcePath))
                 parsedClip.sourcePath = file.getParentDirectory().getChildFile(parsedClip.sourcePath).getFullPathName();
             parsedClip.clipName = clip->getStringAttribute("clipName");
             parsedTrack.clips.push_back(std::move(parsedClip));
+        }
+        if (version >= 31)
+        {
+            const auto* folders = track->getChildByName("TakeFolders");
+            if (folders == nullptr)
+                return juce::Result::fail("Track is missing take folders");
+            for (const auto* folderElement : folders->getChildIterator())
+            {
+                if (! folderElement->hasTagName("TakeFolder"))
+                    return juce::Result::fail("Take folders has an unknown element");
+                PersistedTakeFolderState parsedFolder;
+                uint64_t folderId = 0, folderTrackId = 0, activeCompId = 0;
+                if (! readUnsigned(*folderElement, "id", folderId)
+                    || ! readUnsigned(*folderElement, "trackId", folderTrackId)
+                    || ! readDouble(*folderElement, "startSample", parsedFolder.state.startSample)
+                    || ! readDouble(*folderElement, "durationSamples", parsedFolder.state.durationSamples)
+                    || ! readUnsigned(*folderElement, "activeCompId", activeCompId)
+                    || ! readBool(*folderElement, "quickSwipeEnabled", parsedFolder.state.quickSwipeEnabled))
+                    return juce::Result::fail("Take folder state is malformed");
+                parsedFolder.state.id = { folderId };
+                parsedFolder.state.trackId = { folderTrackId };
+                parsedFolder.state.activeCompId = { activeCompId };
+                const auto* takes = folderElement->getChildByName("Takes");
+                const auto* comps = folderElement->getChildByName("Comps");
+                if (takes == nullptr || comps == nullptr)
+                    return juce::Result::fail("Take folder is missing takes or comps");
+                for (const auto* take : takes->getChildIterator())
+                {
+                    uint64_t takeId = 0;
+                    if (! take->hasTagName("Take") || ! readUnsigned(*take, "id", takeId))
+                        return juce::Result::fail("Take folder take is malformed");
+                    parsedFolder.state.takeIds.push_back(takeId);
+                }
+                for (const auto* compElement : comps->getChildIterator())
+                {
+                    uint64_t compId = 0;
+                    if (! compElement->hasTagName("Comp") || ! readUnsigned(*compElement, "id", compId)
+                        || ! compElement->hasAttribute("name"))
+                        return juce::Result::fail("Take comp is malformed");
+                    TakeCompState comp;
+                    comp.id = { compId };
+                    comp.name = compElement->getStringAttribute("name").trim().substring(0, 64);
+                    for (const auto* segmentElement : compElement->getChildIterator())
+                    {
+                        CompSegmentState segment;
+                        if (! segmentElement->hasTagName("Segment")
+                            || ! readDouble(*segmentElement, "startSample", segment.startSample)
+                            || ! readDouble(*segmentElement, "durationSamples", segment.durationSamples)
+                            || ! readUnsigned(*segmentElement, "sourceTakeId", segment.sourceTakeId)
+                            || ! readDouble(*segmentElement, "fadeInSamples", segment.fadeInSamples)
+                            || ! readDouble(*segmentElement, "fadeOutSamples", segment.fadeOutSamples))
+                            return juce::Result::fail("Comp segment is malformed");
+                        comp.segments.push_back(segment);
+                    }
+                    parsedFolder.state.comps.push_back(std::move(comp));
+                }
+                parsedTrack.takeFolders.push_back(std::move(parsedFolder));
+            }
         }
         state.tracks.push_back(std::move(parsedTrack));
     }
@@ -470,7 +630,14 @@ juce::Result parseProject(const juce::File& file, ProjectState& state)
                 || ! readBool(*bus, "muted", parsedBus.muted))
                 return juce::Result::fail("Bus state is malformed");
             parsedBus.id = { busId };
+            parsedBus.name = bus->getStringAttribute("name");
             parsedBus.gain = static_cast<float>(gain);
+            if (version >= 34)
+            {
+                double balance = 0.0;
+                if (! readDouble(*bus, "balance", balance)) return juce::Result::fail("Bus balance is malformed");
+                parsedBus.balance = static_cast<float>(balance);
+            }
         state.buses.push_back(parsedBus);
         if (version >= 13)
             if (const auto result = readFxSlots(*bus, state.buses.back().fxSlots); result.failed()) return result;
@@ -536,6 +703,7 @@ juce::Result writeProjectState(const ProjectState& state, const juce::File& file
     root.setAttribute("punchOutSample", state.punchOutSample);
     writeControlRouting(root, state.controlRoutingProfile);
     root.setAttribute("liveKeyReferenceTrack", juce::String(state.liveKeyReferenceTrack.value));
+    writePerformanceMacros(root, state.performanceMacros);
 
     auto* tempoMap = root.createNewChildElement("TempoMap");
     for (const auto& event : state.tempoMap)
@@ -591,6 +759,7 @@ juce::Result writeProjectState(const ProjectState& state, const juce::File& file
             send->setAttribute("bus", juce::String(track.sends[i].targetBus.value));
             send->setAttribute("level", static_cast<double>(track.sends[i].level));
             send->setAttribute("preFader", track.sends[i].preFader ? 1 : 0);
+            send->setAttribute("postFaderBeforePan", track.sends[i].postFaderBeforePan ? 1 : 0);
         }
         auto* automation = element->createNewChildElement("Automation");
         for (const auto& lane : track.automationLanes)
@@ -624,6 +793,44 @@ juce::Result writeProjectState(const ProjectState& state, const juce::File& file
             savedClip->setAttribute("gain", static_cast<double>(clip.gain));
             savedClip->setAttribute("fadeInSamples", clip.fadeInSamples);
             savedClip->setAttribute("fadeOutSamples", clip.fadeOutSamples);
+            savedClip->setAttribute("takeGroupId", juce::String(clip.takeGroupId));
+            savedClip->setAttribute("takeId", juce::String(clip.takeId));
+            savedClip->setAttribute("takeActive", clip.takeActive ? 1 : 0);
+            savedClip->setAttribute("recordedTake", clip.recordedTake ? 1 : 0);
+        }
+        auto* folders = element->createNewChildElement("TakeFolders");
+        for (const auto& persistedFolder : track.takeFolders)
+        {
+            const auto& folder = persistedFolder.state;
+            auto* savedFolder = folders->createNewChildElement("TakeFolder");
+            savedFolder->setAttribute("id", juce::String(folder.id.value));
+            savedFolder->setAttribute("trackId", juce::String(folder.trackId.value));
+            savedFolder->setAttribute("startSample", folder.startSample);
+            savedFolder->setAttribute("durationSamples", folder.durationSamples);
+            savedFolder->setAttribute("activeCompId", juce::String(folder.activeCompId.value));
+            savedFolder->setAttribute("quickSwipeEnabled", folder.quickSwipeEnabled ? 1 : 0);
+            auto* takes = savedFolder->createNewChildElement("Takes");
+            for (const auto takeId : folder.takeIds)
+            {
+                auto* savedTake = takes->createNewChildElement("Take");
+                savedTake->setAttribute("id", juce::String(takeId));
+            }
+            auto* comps = savedFolder->createNewChildElement("Comps");
+            for (const auto& comp : folder.comps)
+            {
+                auto* savedComp = comps->createNewChildElement("Comp");
+                savedComp->setAttribute("id", juce::String(comp.id.value));
+                savedComp->setAttribute("name", comp.name);
+                for (const auto& segment : comp.segments)
+                {
+                    auto* savedSegment = savedComp->createNewChildElement("Segment");
+                    savedSegment->setAttribute("startSample", segment.startSample);
+                    savedSegment->setAttribute("durationSamples", segment.durationSamples);
+                    savedSegment->setAttribute("sourceTakeId", juce::String(segment.sourceTakeId));
+                    savedSegment->setAttribute("fadeInSamples", segment.fadeInSamples);
+                    savedSegment->setAttribute("fadeOutSamples", segment.fadeOutSamples);
+                }
+            }
         }
     }
     auto* buses = root.createNewChildElement("Buses");
@@ -631,8 +838,10 @@ juce::Result writeProjectState(const ProjectState& state, const juce::File& file
     {
         auto* element = buses->createNewChildElement("Bus");
         element->setAttribute("id", juce::String(bus.id.value));
+        element->setAttribute("name", bus.name);
         element->setAttribute("gain", static_cast<double>(bus.gain));
         element->setAttribute("muted", bus.muted ? 1 : 0);
+        element->setAttribute("balance", static_cast<double>(bus.balance));
         writeFxSlots(*element, bus.fxSlots);
     }
     auto* midiClips = root.createNewChildElement("MidiClips");
@@ -655,13 +864,32 @@ juce::Result writeProjectState(const ProjectState& state, const juce::File& file
             savedNote->setAttribute("channel", note.channel);
         }
     }
-    if (! root.writeTo(file)) return juce::Result::fail("Cannot write project file: " + file.getFullPathName());
+    // A project document is the user's source of truth. Never stream XML
+    // directly into that file: an interrupted save must leave the last valid
+    // document intact. Write a complete sibling first, then replace it.
+    const auto temporary = file.getSiblingFile(file.getFileName() + ".write-tmp");
+    temporary.deleteFile();
+    if (! root.writeTo(temporary))
+    {
+        temporary.deleteFile();
+        return juce::Result::fail("Cannot write project file: " + file.getFullPathName());
+    }
+    const auto committed = file.existsAsFile() ? temporary.replaceFileIn(file)
+                                               : temporary.moveFileTo(file);
+    if (! committed)
+    {
+        temporary.deleteFile();
+        return juce::Result::fail("Cannot safely replace project file: " + file.getFullPathName());
+    }
     return juce::Result::ok();
 }
 
-juce::Result ProjectSerializer::save(const TrackDataModel& model, const juce::File& file)
+juce::Result ProjectSerializer::save(const TrackDataModel& model, const juce::File& file,
+                                     const PerformanceMacroService* performanceMacros)
 {
     auto state = model.createProjectState();
+    if (performanceMacros != nullptr)
+        state.performanceMacros = performanceMacros->createPersistedState();
     if (const auto result = makeMediaPortable(state, file); result.failed()) return result;
     return writeProjectState(state, file);
 }
@@ -683,7 +911,8 @@ juce::Result ProjectSerializer::load(TrackDataModel& model, const juce::File& fi
 }
 
 juce::Result ProjectSerializer::load(TrackDataModel& model, PluginHostService& pluginHost, const juce::File& file,
-                                     juce::StringArray* missingReferences)
+                                     juce::StringArray* missingReferences,
+                                     PerformanceMacroService* performanceMacros)
 {
     ProjectState candidate;
     if (const auto result = parseProject(file, candidate); result.failed()) return result;
@@ -692,6 +921,8 @@ juce::Result ProjectSerializer::load(TrackDataModel& model, PluginHostService& p
     const auto mediaReport = MediaReloadService::reloadProjectMedia(model);
     juce::StringArray unavailablePlugins;
     restoreFxSlots(model, pluginHost, candidate, unavailablePlugins);
+    if (performanceMacros != nullptr)
+        performanceMacros->restorePersistedState(candidate.performanceMacros);
     if (missingReferences != nullptr)
     {
         *missingReferences = mediaReport.missingMediaReferences;

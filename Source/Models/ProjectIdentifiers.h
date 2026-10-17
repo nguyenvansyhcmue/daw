@@ -18,6 +18,20 @@ struct ClipId
     friend constexpr bool operator==(ClipId, ClipId) noexcept = default;
 };
 
+struct TakeFolderId
+{
+    uint64_t value = 0;
+    [[nodiscard]] constexpr bool isValid() const noexcept { return value != 0; }
+    friend constexpr bool operator==(TakeFolderId, TakeFolderId) noexcept = default;
+};
+
+struct CompId
+{
+    uint64_t value = 0;
+    [[nodiscard]] constexpr bool isValid() const noexcept { return value != 0; }
+    friend constexpr bool operator==(CompId, CompId) noexcept = default;
+};
+
 struct AudioSourceId
 {
     uint64_t value = 0;

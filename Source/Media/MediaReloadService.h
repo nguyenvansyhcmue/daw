@@ -8,6 +8,8 @@ struct ClipId;
 struct MediaReloadReport
 {
     int decodedClipCount = 0;
+    int decodedSourceCount = 0;
+    int failedSourceCount = 0;
     juce::StringArray missingMediaReferences;
     juce::StringArray decodeFailures;
 };

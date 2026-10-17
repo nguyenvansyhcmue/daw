@@ -29,6 +29,15 @@ struct AudioClipState
     float gain { 1.0f };
     double fadeInSamples { 0.0 };
     double fadeOutSamples { 0.0 };
+    // Recorded passes are kept together without destroying an earlier take.
+    // A zero group means a normal timeline clip.  Within a non-zero group the
+    // engine renders only the active take.
+    uint64_t takeGroupId { 0 };
+    // A take can be split into multiple arrangement regions.  This stable
+    // identity keeps those fragments acting as one selectable pass.
+    uint64_t takeId { 0 };
+    bool takeActive { true };
+    bool recordedTake { false };
     TrackId trackId;
     juce::String clipName;
     std::shared_ptr<juce::AudioBuffer<float>> cachedBuffer;

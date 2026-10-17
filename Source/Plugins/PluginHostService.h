@@ -3,6 +3,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 
 #include <functional>
+#include <atomic>
 
 #include "../AudioEngine/AudioEffectProcessor.h"
 
@@ -32,7 +33,7 @@ public:
     static juce::File defaultCatalogFile();
 
 private:
-    void loadCatalogFromDisk();
+    bool loadCatalogFromDisk();
     void saveCatalogToDisk() const;
     juce::AudioPluginFormat* findVst3Format() const noexcept;
     juce::AudioPluginFormat* findAudioUnitFormat() const noexcept;
@@ -43,4 +44,8 @@ private:
     juce::File catalog;
     mutable juce::CriticalSection catalogLock;
     juce::ThreadPool scanPool { 1 };
+    // Prevent repeated browser opens/startup paths from queueing duplicate
+    // filesystem scans. The flag is control-thread state only; it never
+    // touches the realtime audio callback.
+    std::atomic_bool defaultScanInFlight { false };
 };

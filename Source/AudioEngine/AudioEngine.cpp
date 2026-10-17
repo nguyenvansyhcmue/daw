@@ -7,6 +7,7 @@
 namespace
 {
 constexpr int livePluginLatencyBudgetSamples = 64;
+constexpr uint64_t recordingDeviceRecoveryGraceMs = 1000;
 
 int preferredLiveBufferSize(const juce::Array<int>& availableSizes, int currentSize)
 {
@@ -483,6 +484,23 @@ void AudioEngine::startAudioTrace()
     recordDeviceSessionEvent(1);
 }
 
+void AudioEngine::selectPluginTraceTarget(size_t trackIndex, size_t slot) noexcept
+{
+    pluginTraceTrackIndex.store(trackIndex < TrackDataModel::maxTracks ? static_cast<int>(trackIndex) : -1,
+                                std::memory_order_release);
+    pluginTraceSlot.store(slot < TrackDataModel::maxFxSlots ? static_cast<int>(slot) : -1,
+                          std::memory_order_release);
+    pluginTracePresent.store(0, std::memory_order_release);
+    pluginTraceProcessed.store(0, std::memory_order_release);
+    pluginTraceSkippedForLatency.store(0, std::memory_order_release);
+}
+
+void AudioEngine::clearPluginTraceTarget() noexcept
+{
+    pluginTraceTrackIndex.store(-1, std::memory_order_release);
+    pluginTraceSlot.store(-1, std::memory_order_release);
+}
+
 void AudioEngine::recordDeviceSessionEvent(uint8_t kind) noexcept
 {
     if (! diagnosticTracer.isEnabled())
@@ -592,6 +610,57 @@ void AudioEngine::recoverPreferredAudioDeviceAfterHotPlug()
     recoveringPreferredAudioDevice.store(false, std::memory_order_release);
 }
 
+juce::Result AudioEngine::ensureCurrentStereoOutputPair()
+{
+    auto* device = deviceManager.getCurrentAudioDevice();
+    if (device == nullptr)
+        return juce::Result::fail("No active audio output device");
+
+    const auto outputCount = device->getOutputChannelNames().size();
+    if (outputCount < 2)
+        return juce::Result::fail("The active audio device has no stereo output pair");
+
+    auto setup = deviceManager.getAudioDeviceSetup();
+    auto requestedOutputs = setup.outputChannels;
+    requestedOutputs.setBit(0);
+    requestedOutputs.setBit(1);
+    if (setup.outputChannels == requestedOutputs)
+        return juce::Result::ok();
+
+    // StudioForge has one physical Master bus. Choosing an interface must
+    // therefore never leave CoreAudio with a stale/empty output mask from the
+    // previously selected device; map Master to the interface's main 1/2.
+    setup.outputChannels = requestedOutputs;
+    setup.useDefaultOutputChannels = false;
+    if (const auto error = deviceManager.setAudioDeviceSetup(setup, true); error.isNotEmpty())
+        return juce::Result::fail(error);
+    return juce::Result::ok();
+}
+
+juce::Result AudioEngine::ensureCurrentCueOutputPair()
+{
+    auto* device = deviceManager.getCurrentAudioDevice();
+    if (device == nullptr)
+        return juce::Result::fail("No active audio output device");
+    if (device->getOutputChannelNames().size() < 4)
+        return juce::Result::fail("Cue requires a device with physical outputs 3/4");
+
+    auto setup = deviceManager.getAudioDeviceSetup();
+    auto requestedOutputs = setup.outputChannels;
+    requestedOutputs.setBit(0);
+    requestedOutputs.setBit(1);
+    requestedOutputs.setBit(2);
+    requestedOutputs.setBit(3);
+    if (setup.outputChannels == requestedOutputs)
+        return juce::Result::ok();
+
+    setup.outputChannels = requestedOutputs;
+    setup.useDefaultOutputChannels = false;
+    if (const auto error = deviceManager.setAudioDeviceSetup(setup, true); error.isNotEmpty())
+        return juce::Result::fail(error);
+    return juce::Result::ok();
+}
+
 void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster*)
 {
     // This is delivered on JUCE's message thread.  A device manager change is
@@ -600,6 +669,9 @@ void AudioEngine::changeListenerCallback(juce::ChangeBroadcaster*)
     recordDeviceSessionEvent(4);
     refreshMidiInputDevices();
     recoverPreferredAudioDeviceAfterHotPlug();
+    // Do this after preference recovery, because it may reopen a fallback
+    // device as the selected USB interface and must inspect that final device.
+    ensureCurrentStereoOutputPair();
 }
 
 void AudioEngine::stopAudioTrace() { diagnosticTracer.stop(); }
@@ -646,9 +718,13 @@ juce::Result AudioEngine::validateMonitorRoute(size_t trackIndex, MonitorDestina
     auto* device = deviceManager.getCurrentAudioDevice();
     if (device == nullptr)
         return juce::Result::fail("No active audio output device");
-    if (destination == MonitorDestination::cue
-        && (callbackOutputForPhysicalChannel(2) < 0 || callbackOutputForPhysicalChannel(3) < 0))
-        return juce::Result::fail("Cue requires physical output channels 3/4");
+    if (destination == MonitorDestination::cue)
+    {
+        const auto setup = deviceManager.getAudioDeviceSetup();
+        if (device->getOutputChannelNames().size() < 4
+            || ! setup.outputChannels[2] || ! setup.outputChannels[3])
+            return juce::Result::fail("Cue requires enabled physical output channels 3/4");
+    }
     if (destination == MonitorDestination::streamOnly)
     {
         if (! isStreamOutputConfigured())
@@ -667,6 +743,13 @@ juce::Result AudioEngine::validateMonitorRoute(size_t trackIndex, MonitorDestina
 juce::Result AudioEngine::enableTrackMonitor(size_t trackIndex, MonitorDestination destination,
                                              bool allowSpeakerRisk)
 {
+    // Configure the primary device before validating the Cue route. The
+    // device callback rebuilds its compact physical-to-callback map during
+    // this reconfiguration; validation intentionally uses the requested
+    // physical mask so a harmless callback restart cannot reject the route.
+    if (destination == MonitorDestination::cue)
+        if (const auto cue = ensureCurrentCueOutputPair(); cue.failed())
+            return cue;
     if (const auto validation = validateMonitorRoute(trackIndex, destination, allowSpeakerRisk); validation.failed())
         return validation;
     dataModel->setTrackMonitorDestination(trackIndex, destination);
@@ -820,8 +903,11 @@ juce::Result AudioEngine::startRecordings(const std::vector<AudioRecordingTarget
     const auto startSample = timelineStartSample >= 0.0 ? timelineStartSample : dataModel->getPlayheadPosition();
     const auto result = recordingSession->startMany(recordingTargets, startSample, sampleRate, blockSize);
     if (result.wasOk())
+    {
+        recordingDeviceStopMs.store(0, std::memory_order_release);
         for (const auto& target : targets)
             dataModel->setTrackArmed(target.trackIndex, true);
+    }
     return result;
 }
 
@@ -872,7 +958,15 @@ bool AudioEngine::isRecording() const noexcept { return recordingSession != null
 
 bool AudioEngine::consumeRecordingInterruptedByDeviceDisconnect() noexcept
 {
-    return recordingInterruptedByDeviceDisconnect.exchange(false, std::memory_order_acq_rel);
+    auto stoppedAt = recordingDeviceStopMs.load(std::memory_order_acquire);
+    if (stoppedAt == 0)
+        return false;
+
+    const auto now = static_cast<uint64_t>(juce::Time::getMillisecondCounterHiRes());
+    if (now - stoppedAt < recordingDeviceRecoveryGraceMs)
+        return false;
+
+    return recordingDeviceStopMs.compare_exchange_strong(stoppedAt, 0, std::memory_order_acq_rel);
 }
 
 juce::Result AudioEngine::startMidiRecording(size_t trackIndex)
@@ -976,6 +1070,98 @@ juce::Result AudioEngine::renderOfflineWav(const juce::File& destination, double
     return renderOfflineAudio(destination.withFileExtension(".wav"), options);
 }
 
+juce::Result AudioEngine::renderOfflineStems(const juce::File& directory,
+                                             const OfflineRenderOptions& options)
+{
+    if (directory == juce::File {} || (! directory.exists() && ! directory.createDirectory()))
+        return juce::Result::fail("Cannot create stem export directory");
+
+    const auto state = dataModel != nullptr ? dataModel->createProjectState() : ProjectState {};
+    if (state.tracks.empty())
+        return juce::Result::fail("Project has no tracks to export");
+
+    struct StagedStem
+    {
+        juce::File temporaryFile;
+        juce::File destinationFile;
+    };
+
+    std::vector<StagedStem> stagedStems;
+    std::vector<std::unique_ptr<juce::AudioFormatWriter>> writers(state.tracks.size());
+    const auto discardStagedStems = [&stagedStems]
+    {
+        for (const auto& stem : stagedStems)
+            stem.temporaryFile.deleteFile();
+    };
+    auto selectedCount = 0;
+    for (size_t index = 0; index < state.tracks.size(); ++index)
+    {
+        if (options.trackExportFilter != nullptr && ! options.trackExportFilter(index))
+            continue;
+        auto name = state.tracks[index].name.replaceCharacters("/\\:*?\"<>|", "_________").trim();
+        if (name.isEmpty()) name = "Track " + juce::String(static_cast<int>(index + 1));
+        const auto destinationFile = directory.getNonexistentChildFile(name, ".wav", false);
+        const auto temporaryFile = destinationFile.getSiblingFile(
+            "." + destinationFile.getFileNameWithoutExtension()
+                + ".studioforge-stem.tmp" + destinationFile.getFileExtension());
+        temporaryFile.deleteFile();
+        auto stream = temporaryFile.createOutputStream();
+        if (stream == nullptr)
+        {
+            discardStagedStems();
+            return juce::Result::fail("Cannot create stem file: " + destinationFile.getFileName());
+        }
+        auto* raw = stream.release();
+        juce::WavAudioFormat format;
+        writers[index].reset(format.createWriterFor(raw, options.sampleRate, 2,
+                                                    juce::jlimit(16, 32, options.bitDepth), {}, 0));
+        if (writers[index] == nullptr)
+        {
+            delete raw;
+            temporaryFile.deleteFile();
+            discardStagedStems();
+            return juce::Result::fail("Cannot initialise stem writer: " + destinationFile.getFileName());
+        }
+        stagedStems.push_back({ temporaryFile, destinationFile });
+        ++selectedCount;
+    }
+    if (selectedCount == 0)
+        return juce::Result::fail("No tracks are selected for stem export");
+
+    const auto temporaryMix = directory.getChildFile(".studioforge-stem-render.tmp.wav");
+    auto stemOptions = options;
+    stemOptions.trackBlockCallback = [&writers, filter = options.trackExportFilter]
+        (size_t index, const juce::AudioBuffer<float>& buffer, int count)
+    {
+        if (index >= writers.size())
+            return;
+        if (filter != nullptr && ! filter(index))
+            return;
+        writers[index]->writeFromAudioSampleBuffer(buffer, 0, count);
+    };
+    const auto result = renderOfflineAudio(temporaryMix, stemOptions);
+    // Close every stem before promotion: the files are intentionally invisible
+    // until the complete render succeeds.
+    writers.clear();
+    temporaryMix.deleteFile();
+    if (result.failed())
+    {
+        discardStagedStems();
+        return result;
+    }
+
+    for (const auto& stem : stagedStems)
+    {
+        if (! stem.temporaryFile.replaceFileIn(stem.destinationFile))
+        {
+            discardStagedStems();
+            return juce::Result::fail("Cannot finalise stem file: " + stem.destinationFile.getFileName());
+        }
+    }
+
+    return juce::Result::ok();
+}
+
 juce::Result AudioEngine::renderOfflineAudio(const juce::File& destination,
                                              const OfflineRenderOptions& options)
 {
@@ -997,14 +1183,19 @@ juce::Result AudioEngine::renderOfflineAudio(const juce::File& destination,
     if (options.useCycle && dataModel->isCycleActive()) endSample = dataModel->getCycleEndSample();
     if (endSample <= 0.0) return juce::Result::fail("Project has no audio to render");
 
-    destination.deleteFile();
-    auto stream = destination.createOutputStream();
+    // Render beside the destination and promote only a complete file. This
+    // preserves an existing bounce if the disk fills up or a writer fails.
+    const auto temporaryDestination = destination.getSiblingFile(
+        "." + destination.getFileNameWithoutExtension() + ".studioforge-render.tmp" + destination.getFileExtension());
+    temporaryDestination.deleteFile();
+    auto stream = temporaryDestination.createOutputStream();
     if (stream == nullptr) return juce::Result::fail("Cannot create offline render file");
     auto* rawStream = stream.release();
     std::unique_ptr<juce::AudioFormatWriter> writer(format->createWriterFor(rawStream, options.sampleRate, 2, bitDepth, {}, 0));
     if (writer == nullptr)
     {
         delete rawStream;
+        temporaryDestination.deleteFile();
         return juce::Result::fail("Cannot create offline WAV writer");
     }
 
@@ -1070,18 +1261,34 @@ juce::Result AudioEngine::renderOfflineAudio(const juce::File& destination,
     float* outputs[] { renderBuffer.getWritePointer(0), renderBuffer.getWritePointer(1) };
     const auto totalSamples = static_cast<int64_t>(std::ceil(endSample));
     int64_t rendered = 0;
+    auto writeFailed = false;
     while (rendered < totalSamples)
     {
         const auto count = static_cast<int>(juce::jmin<int64_t>(options.blockSize, totalSamples - rendered));
         audioDeviceIOCallbackWithContext(nullptr, 0, outputs, 2, count, {});
+        if (options.trackBlockCallback != nullptr)
+            for (size_t trackIndex = 0; trackIndex < projectState.tracks.size(); ++trackIndex)
+                options.trackBlockCallback(trackIndex, trackBuffers[trackIndex], count);
         if (! writer->writeFromAudioSampleBuffer(renderBuffer, 0, count))
         {
-            restoreTransport();
-            return juce::Result::fail("Offline WAV write failed");
+            writeFailed = true;
+            break;
         }
         rendered += count;
     }
+    // Close the writer before replacement so all format buffers are flushed.
+    writer.reset();
     restoreTransport();
+    if (writeFailed)
+    {
+        temporaryDestination.deleteFile();
+        return juce::Result::fail("Offline audio write failed");
+    }
+    if (! temporaryDestination.replaceFileIn(destination))
+    {
+        temporaryDestination.deleteFile();
+        return juce::Result::fail("Cannot finalise offline render file");
+    }
     return juce::Result::ok();
 }
 
@@ -1584,6 +1791,9 @@ void AudioEngine::publishMasterFxRack(std::unique_ptr<const TrackDataModel::FxRa
 
 void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
 {
+    // CoreAudio routinely emits stopped/started around buffer negotiation.
+    // Treat a fresh callback endpoint as a recovered session, not a lost take.
+    recordingDeviceStopMs.store(0, std::memory_order_release);
     const auto outputChannels = device != nullptr ? device->getActiveOutputChannels().countNumberOfSetBits() : 2;
     const auto blockSize = device != nullptr ? device->getCurrentBufferSizeSamples() : 512;
     // CoreAudio can briefly change callback size while a USB interface
@@ -1652,7 +1862,8 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
 void AudioEngine::audioDeviceStopped()
 {
     if (recordingSession != nullptr && recordingSession->isRecording())
-        recordingInterruptedByDeviceDisconnect.store(true, std::memory_order_release);
+        recordingDeviceStopMs.store(static_cast<uint64_t>(juce::Time::getMillisecondCounterHiRes()),
+                                    std::memory_order_release);
     recordDeviceSessionEvent(2);
     // CoreAudio calls this for benign changes too (buffer-size/device setup).
     // Do not silently turn off a performer's MIC route: audioDeviceAboutToStart
@@ -1906,31 +2117,37 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
             // rendered/raw clip is diagnosable), then a monitored track as a
             // fallback for device-routing diagnostics.
             auto selectedIndex = structure->trackCount;
-            auto fallbackMonitoredIndex = structure->trackCount;
-            for (size_t index = 0; index < structure->trackCount; ++index)
+            const auto requestedTraceTrack = pluginTraceTrackIndex.load(std::memory_order_acquire);
+            if (requestedTraceTrack >= 0 && requestedTraceTrack < static_cast<int>(structure->trackCount))
+                selectedIndex = static_cast<size_t>(requestedTraceTrack);
+            else
             {
-                const auto& track = structure->tracks[index];
-                auto containsNativeVibe = false;
-                if (const auto* rack = track.fxRack; rack != nullptr)
-                    for (const auto& processor : rack->processors)
-                        if (processor != nullptr && processor->isStudioForgeNativeVibeAutotune())
-                        {
-                            containsNativeVibe = true;
-                            break;
-                        }
-
-                const auto isMonitored = isInputMonitoringEligible(track);
-                if (containsNativeVibe && (selectedIndex == structure->trackCount || isMonitored))
+                auto fallbackMonitoredIndex = structure->trackCount;
+                for (size_t index = 0; index < structure->trackCount; ++index)
                 {
-                    selectedIndex = index;
-                    if (isMonitored)
-                        break;
+                    const auto& track = structure->tracks[index];
+                    auto containsNativeVibe = false;
+                    if (const auto* rack = track.fxRack; rack != nullptr)
+                        for (const auto& processor : rack->processors)
+                            if (processor != nullptr && processor->isStudioForgeNativeVibeAutotune())
+                            {
+                                containsNativeVibe = true;
+                                break;
+                            }
+
+                    const auto isMonitored = isInputMonitoringEligible(track);
+                    if (containsNativeVibe && (selectedIndex == structure->trackCount || isMonitored))
+                    {
+                        selectedIndex = index;
+                        if (isMonitored)
+                            break;
+                    }
+                    if (isMonitored && fallbackMonitoredIndex == structure->trackCount)
+                        fallbackMonitoredIndex = index;
                 }
-                if (isMonitored && fallbackMonitoredIndex == structure->trackCount)
-                    fallbackMonitoredIndex = index;
+                if (selectedIndex == structure->trackCount)
+                    selectedIndex = fallbackMonitoredIndex;
             }
-            if (selectedIndex == structure->trackCount)
-                selectedIndex = fallbackMonitoredIndex;
             if (selectedIndex != structure->trackCount)
             {
                 const auto& track = structure->tracks[selectedIndex];
@@ -1972,6 +2189,14 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* inputChan
         event.vibeHardDryRescue = hasNativeVibe ? static_cast<uint8_t>(vibeHealth.hardDryRescue) : 0;
         event.vibeProtectionCount = hasNativeVibe ? vibeHealth.protectionCount : 0;
         event.vibeOverloadCount = hasNativeVibe ? vibeHealth.overloadCount : 0;
+        event.pluginSlot = pluginTraceSlot.load(std::memory_order_relaxed);
+        event.pluginLatencySamples = pluginTraceLatencySamples.load(std::memory_order_relaxed);
+        event.pluginPreFxPeak = pluginTracePreFxPeak.load(std::memory_order_relaxed);
+        event.pluginPostFxPeak = pluginTracePostFxPeak.load(std::memory_order_relaxed);
+        event.pluginPresent = pluginTracePresent.load(std::memory_order_relaxed);
+        event.pluginBypassed = pluginTraceBypassed.load(std::memory_order_relaxed);
+        event.pluginProcessed = pluginTraceProcessed.load(std::memory_order_relaxed);
+        event.pluginSkippedForLatency = pluginTraceSkippedForLatency.load(std::memory_order_relaxed);
         if (monitoredPhysicalInput >= 0)
         {
             const auto i = callbackInputForPhysicalChannel(monitoredPhysicalInput);
@@ -2091,16 +2316,39 @@ void AudioEngine::processTrackAudio(const TrackDataModel::RenderStructureSnapsho
     // monitored path retains only the selected insert chain's own latency.
     const auto longestTrackLatency = isLivePerformanceEnabled() || ! isStudioPluginDelayCompensationEnabled()
         ? 0 : maximumTrackRackLatency(*structure);
+    const auto traceTrackIndex = pluginTraceTrackIndex.load(std::memory_order_acquire);
+    const auto traceSlot = pluginTraceSlot.load(std::memory_order_acquire);
     for (size_t trackIndex = 0; trackIndex < structure->trackCount; ++trackIndex)
     {
         auto& trackBuffer = trackBuffers[trackIndex];
         const auto& track = structure->tracks[trackIndex];
         if (track.fxRack != nullptr)
             for (size_t slot = 0; slot < TrackDataModel::maxFxSlots; ++slot)
-                if (const auto& processor = track.fxRack->processors[slot]; processor != nullptr
-                    && ! track.fxRack->bypass[slot] && ! processor->isMidiEffect()
-                    && shouldProcessForLive(*processor))
+            {
+                const auto& processor = track.fxRack->processors[slot];
+                const auto tracingThisSlot = static_cast<int>(trackIndex) == traceTrackIndex
+                                          && static_cast<int>(slot) == traceSlot;
+                const auto bypassed = track.fxRack->bypass[slot];
+                const auto processable = processor != nullptr && ! bypassed && ! processor->isMidiEffect();
+                const auto admitted = processable && shouldProcessForLive(*processor);
+                if (tracingThisSlot)
+                {
+                    pluginTracePresent.store(processor != nullptr, std::memory_order_relaxed);
+                    pluginTraceBypassed.store(bypassed, std::memory_order_relaxed);
+                    pluginTraceProcessed.store(false, std::memory_order_relaxed);
+                    pluginTraceSkippedForLatency.store(processable && ! admitted, std::memory_order_relaxed);
+                    pluginTraceLatencySamples.store(processor != nullptr ? processor->getLatencySamples() : 0,
+                                                    std::memory_order_relaxed);
+                    pluginTracePreFxPeak.store(TrackMixing::peak(trackBuffer, numSamples), std::memory_order_relaxed);
+                }
+                if (admitted)
                     processEffectBlock(*processor, trackBuffer, trackMidiBuffers[trackIndex], numSamples);
+                if (tracingThisSlot)
+                {
+                    pluginTraceProcessed.store(admitted, std::memory_order_relaxed);
+                    pluginTracePostFxPeak.store(TrackMixing::peak(trackBuffer, numSamples), std::memory_order_relaxed);
+                }
+            }
 
         // Align every insert chain before sends, faders and summing. A vocal
         // through Vibe therefore stays time-aligned with raw backing tracks.
@@ -2128,6 +2376,12 @@ void AudioEngine::processTrackAudio(const TrackDataModel::RenderStructureSnapsho
             ? track.volumeAutomation.evaluate(automationSample) : track.volume;
         const auto pan = track.panAutomation.mode == AutomationMode::read && track.panAutomation.pointCount > 0
             ? track.panAutomation.evaluate(automationSample) : track.pan;
+        const auto audible = ! track.muted && (! anyTrackSoloed || track.solo || track.soloSafe);
+        for (size_t route = 0; route < TrackDataModel::maxSendsPerTrack; ++route)
+            if (track.sends[route].targetBus.isValid() && ! track.sends[route].preFader
+                && track.sends[route].postFaderBeforePan)
+                addTrackToBus(track, trackIndex, trackBuffer, structure, route,
+                              audible ? sendLevel(route) * volume : 0.0f, numSamples);
         TrackMixing::apply(trackBuffer, numSamples, { volume, pan, !track.muted && (!anyTrackSoloed || track.solo || track.soloSafe) });
         trackPeaks[trackIndex].store(TrackMixing::peak(trackBuffer, numSamples), std::memory_order_relaxed);
 
@@ -2136,7 +2390,7 @@ void AudioEngine::processTrackAudio(const TrackDataModel::RenderStructureSnapsho
         for (int channel = 0; channel < juce::jmin(trackBuffer.getNumChannels(), destination.getNumChannels()); ++channel)
             juce::FloatVectorOperations::add(destination.getWritePointer(channel), trackBuffer.getReadPointer(channel), numSamples);
         for (size_t route = 0; route < TrackDataModel::maxSendsPerTrack; ++route)
-            if (track.sends[route].targetBus.isValid() && ! track.sends[route].preFader)
+            if (track.sends[route].targetBus.isValid() && ! track.sends[route].preFader && ! track.sends[route].postFaderBeforePan)
                 addTrackToBus(track, trackIndex, trackBuffer, structure, route, sendLevel(route), numSamples);
     }
 }
@@ -2158,7 +2412,11 @@ void AudioEngine::processBusReturns(const TrackDataModel::RenderStructureSnapsho
                                     juce::jmax(0, longestBusLatency - rackLatencySamples(bus.fxRack)), numSamples);
         if (bus.muted) busBuffers[busIndex].clear(0, numSamples);
         else for (int channel = 0; channel < busBuffers[busIndex].getNumChannels(); ++channel)
-            busBuffers[busIndex].applyGain(channel, 0, numSamples, bus.gain);
+        {
+            const auto balanceGain = channel == 0 ? 1.0f - juce::jmax(0.0f, bus.balance)
+                                    : channel == 1 ? 1.0f + juce::jmin(0.0f, bus.balance) : 1.0f;
+            busBuffers[busIndex].applyGain(channel, 0, numSamples, bus.gain * balanceGain);
+        }
         busPeaks[busIndex].store(TrackMixing::peak(busBuffers[busIndex], numSamples), std::memory_order_relaxed);
         for (int channel = 0; channel < juce::jmin(busBuffers[busIndex].getNumChannels(), processingBuffer.getNumChannels()); ++channel)
             juce::FloatVectorOperations::add(processingBuffer.getWritePointer(channel), busBuffers[busIndex].getReadPointer(channel), numSamples);
@@ -2176,7 +2434,7 @@ void AudioEngine::addTrackToBus(const TrackDataModel::RenderTrack& track,
     const auto busIndex = structure->getBusIndex(track.sends[route].targetBus);
     if (busIndex < 0) return;
     auto& destination = busBuffers[static_cast<size_t>(busIndex)];
-    const auto targetGain = juce::jlimit(0.0f, TrackDataModel::maximumSendGain, level);
+    const auto targetGain = juce::jlimit(0.0f, TrackDataModel::maximumSendGain * AudioGainRange::maximumChannelGain, level);
     auto& previousGain = smoothedSendGains[trackIndex][route];
     // A newly-created route must be audible at its configured level on the
     // first callback. Subsequent automation still uses a ramp to avoid steps.
@@ -2581,6 +2839,8 @@ void AudioEngine::renderClipSegment(const std::vector<AudioClipState>& clips,
     const auto segmentEndSample = segmentStartSample + numSamples;
     for (const auto& clip : clips)
     {
+        if (clip.takeGroupId != 0 && ! clip.takeActive)
+            continue;
         const auto trackIndex = structure.getTrackIndex(clip.trackId);
         if (clip.cachedBuffer == nullptr || clip.cachedBuffer->getNumChannels() == 0 || trackIndex < 0
             || static_cast<size_t>(trackIndex) >= trackBuffers.size())

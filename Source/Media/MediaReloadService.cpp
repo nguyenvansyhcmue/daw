@@ -5,6 +5,14 @@
 
 #include <limits>
 #include <map>
+#include <new>
+
+namespace
+{
+// Audio clips are currently kept in decoded RAM for realtime playback. Keep
+// one pathological file from exhausting the process and taking down a session.
+constexpr juce::int64 maximumDecodedMediaBytes = 512LL * 1024 * 1024;
+}
 
 juce::Result MediaReloadService::decode(const juce::File& file,
                                         std::shared_ptr<juce::AudioBuffer<float>>& decodedBuffer)
@@ -20,8 +28,21 @@ juce::Result MediaReloadService::decode(const juce::File& file,
         || reader->lengthInSamples > std::numeric_limits<int>::max())
         return juce::Result::fail("Media has no supported audio samples: " + file.getFullPathName());
 
-    auto buffer = std::make_shared<juce::AudioBuffer<float>>(static_cast<int>(reader->numChannels),
-                                                              static_cast<int>(reader->lengthInSamples));
+    const auto channelCount = static_cast<juce::int64>(reader->numChannels);
+    const auto sampleCount = static_cast<juce::int64>(reader->lengthInSamples);
+    if (channelCount > maximumDecodedMediaBytes / (sampleCount * static_cast<juce::int64>(sizeof(float))))
+        return juce::Result::fail("Media is too large for safe in-memory playback: " + file.getFileName());
+
+    std::shared_ptr<juce::AudioBuffer<float>> buffer;
+    try
+    {
+        buffer = std::make_shared<juce::AudioBuffer<float>>(static_cast<int>(reader->numChannels),
+                                                            static_cast<int>(reader->lengthInSamples));
+    }
+    catch (const std::bad_alloc&)
+    {
+        return juce::Result::fail("Insufficient memory to decode media: " + file.getFileName());
+    }
     if (! reader->read(buffer.get(), 0, buffer->getNumSamples(), 0, true, true))
         return juce::Result::fail("Cannot decode media samples: " + file.getFullPathName());
     decodedBuffer = std::move(buffer);
@@ -32,6 +53,8 @@ MediaReloadReport MediaReloadService::reloadProjectMedia(TrackDataModel& model)
 {
     MediaReloadReport report;
     std::map<juce::String, std::shared_ptr<juce::AudioBuffer<float>>> decodedByPath;
+    std::map<juce::String, juce::String> failedByPath;
+    std::vector<TrackDataModel::ClipMediaUpdate> updates;
     const auto project = model.createProjectState();
     for (const auto& track : project.tracks)
         for (const auto& clip : track.clips)
@@ -39,25 +62,35 @@ MediaReloadReport MediaReloadService::reloadProjectMedia(TrackDataModel& model)
             const auto file = juce::File(clip.sourcePath);
             if (! file.existsAsFile())
             {
-                model.setClipMediaStatus(clip.id, AudioMediaStatus::Missing);
+                updates.push_back({ clip.id, {}, {}, AudioMediaStatus::Missing });
                 if (clip.sourcePath.isNotEmpty()) report.missingMediaReferences.addIfNotAlreadyThere(clip.sourcePath);
                 continue;
             }
             const auto path = AudioMediaPool::canonicalPath(file);
+            if (const auto failed = failedByPath.find(path); failed != failedByPath.end())
+            {
+                updates.push_back({ clip.id, {}, {}, AudioMediaStatus::DecodeFailed });
+                continue;
+            }
             auto decoded = decodedByPath.find(path);
             if (decoded == decodedByPath.end())
             {
                 std::shared_ptr<juce::AudioBuffer<float>> buffer;
                 if (const auto result = decode(file, buffer); result.failed())
                 {
-                    model.setClipMediaStatus(clip.id, AudioMediaStatus::DecodeFailed);
+                    updates.push_back({ clip.id, {}, {}, AudioMediaStatus::DecodeFailed });
+                    failedByPath.emplace(path, result.getErrorMessage());
+                    ++report.failedSourceCount;
                     report.decodeFailures.addIfNotAlreadyThere(result.getErrorMessage());
                     continue;
                 }
                 decoded = decodedByPath.emplace(path, std::move(buffer)).first;
+                ++report.decodedSourceCount;
             }
-            if (model.setClipMediaResource(clip.id, file, decoded->second)) ++report.decodedClipCount;
+            updates.push_back({ clip.id, file, decoded->second, AudioMediaStatus::Ready });
+            ++report.decodedClipCount;
         }
+    model.applyClipMediaUpdates(updates);
     return report;
 }
 

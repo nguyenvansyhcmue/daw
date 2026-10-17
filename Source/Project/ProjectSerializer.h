@@ -4,16 +4,19 @@
 
 class TrackDataModel;
 class PluginHostService;
+class PerformanceMacroService;
 
 class ProjectSerializer final
 {
 public:
-    static juce::Result save(const TrackDataModel& model, const juce::File& file);
+    static juce::Result save(const TrackDataModel& model, const juce::File& file,
+                             const PerformanceMacroService* performanceMacros = nullptr);
     // Writes only the session document. Recovery files keep references to the
     // existing media instead of duplicating it beside every autosave.
     static juce::Result saveRecoverySnapshot(const TrackDataModel& model, const juce::File& file);
     static juce::Result load(TrackDataModel& model, const juce::File& file,
                              juce::StringArray* missingMediaReferences = nullptr);
     static juce::Result load(TrackDataModel& model, PluginHostService& pluginHost, const juce::File& file,
-                             juce::StringArray* missingReferences = nullptr);
+                             juce::StringArray* missingReferences = nullptr,
+                             PerformanceMacroService* performanceMacros = nullptr);
 };

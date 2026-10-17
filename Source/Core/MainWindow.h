@@ -7,6 +7,7 @@
 #include "Project/RecentProjectsStore.h"
 #include "Project/ProjectTemplateStore.h"
 #include "Project/ProjectAlternativeStore.h"
+#include "Project/ProjectBackupStore.h"
 #include "Project/AutosaveService.h"
 
 class MainWindow final : public juce::DocumentWindow,
@@ -49,6 +50,10 @@ private:
         importMidi,
         analyzeYoutubeKaraoke,
         bounceProject,
+        exportAudio,
+        exportStems,
+        exportSelectedTrack,
+        exportMidi,
         deviceSettings,
         projectSettings,
         quitApplication,
@@ -81,6 +86,7 @@ private:
     void saveCurrentProject();
     void loadProjectFromFile(const juce::File& file);
     void refreshRecentProjects();
+    void scaleWorkspaceToWindow();
     void confirmDiscardChanges(std::function<void()> continuation);
     void showProjectError(const juce::String& title, const juce::Result& result) const;
 
@@ -94,6 +100,7 @@ private:
     RecentProjectsStore recentProjects;
     ProjectTemplateStore projectTemplates;
     ProjectAlternativeStore projectAlternatives;
+    ProjectBackupStore projectBackups;
     std::unique_ptr<AutosaveService> autosaveService;
     std::unique_ptr<WindowControls> windowControls;
     float menuBarAlpha = 1.0f;

@@ -17,6 +17,21 @@
 
 class AudioEngine;
 
+// Compact track-header fader. Its handle controls gain; the thin illuminated
+// rail beneath it visualises the post-fader signal without turning the gain
+// control into a second, ambiguous meter.
+class TrackHeaderGainSlider final : public juce::Slider
+{
+public:
+    void setSignalActivity(float level, float heldPeak) noexcept;
+
+private:
+    void paint(juce::Graphics& g) override;
+
+    float displayedLevel = 0.0f;
+    float displayedPeak = 0.0f;
+};
+
 class TrackHeaderPanel final : public juce::Component, private juce::Timer
 {
 public:
@@ -47,8 +62,14 @@ private:
     TrackDataModel* trackModel = nullptr;
     AudioEngine* audioEngine = nullptr;
     int selectedTrack = 0;
-    std::array<juce::Slider, TrackDataModel::maxTracks> volumeControls;
+    std::array<TrackHeaderGainSlider, TrackDataModel::maxTracks> volumeControls;
     std::array<juce::Slider, TrackDataModel::maxTracks> panControls;
+    // Meter input arrives as block peaks from the audio thread. The header
+    // owns only its display envelope, so paint never touches realtime state.
+    std::array<float, TrackDataModel::maxTracks> displayedInputLevels {};
+    std::array<float, TrackDataModel::maxTracks> displayedOutputLevels {};
+    std::array<float, TrackDataModel::maxTracks> heldInputPeaks {};
+    std::array<float, TrackDataModel::maxTracks> heldOutputPeaks {};
     size_t laidOutTrackCount = 0;
     int laidOutTrackHeight = -1;
     int pressedTrack = -1;
@@ -117,6 +138,7 @@ public:
     void toggleSelectedTrackZoom();
     void setTrackHeight(int height);
     void setWaveformZoom(float zoom);
+    void zoomWaveformByFactor(float multiplier);
     void zoomHorizontalBy(float multiplier, float pivotX);
     void zoomVerticalBy(int delta);
     void zoomVerticalByFactor(float multiplier);
@@ -207,8 +229,39 @@ private:
     float waveformZoom = 1.0f;
     int audioFileDropTarget = -1;
 
+    // Take folders own their visual lanes.  Keeping this layout derived from
+    // TrackDataModel (rather than storing pixel state in the model) makes a
+    // saved project independent of monitor size and timeline zoom.
+    struct TrackRowLayout
+    {
+        int trackIndex = -1;
+        float top = 0.0f;
+        float height = 0.0f;
+    };
+
+    struct TakeFolderLayout
+    {
+        TakeFolderId folderId;
+        int trackIndex = -1;
+        juce::Rectangle<float> header;
+        juce::Rectangle<float> compLane;
+        std::vector<juce::Rectangle<float>> takeLanes;
+    };
+
+    std::set<uint64_t> expandedTakeFolderIds;
+    TakeFolderId quickSwipeFolderId;
+    uint64_t quickSwipeTakeId = 0;
+    double quickSwipeStartSample = 0.0;
+    double quickSwipeCurrentSample = 0.0;
+    bool quickSwipeDragging = false;
+
     double sampleAt(const juce::Point<float>& position) const noexcept;
     int trackAt(const juce::Point<float>& position) const noexcept;
+    std::vector<TrackRowLayout> getTrackRows() const;
+    std::vector<TakeFolderLayout> getTakeFolderLayouts() const;
+    int getTimelineContentHeight() const;
+    bool isTakeFolderExpanded(TakeFolderId folderId) const noexcept;
+    void toggleTakeFolderExpanded(TakeFolderId folderId);
     void showContextMenu(const juce::MouseEvent& event, int track, ClipId clip, double sampleAtMouse);
     void updateView(double startSample, float zoom);
     void updateVerticalScroll(int offset);
@@ -270,6 +323,7 @@ public:
     std::function<void(MidiClipId)> onMidiClipSelected;
     std::function<void(MidiClipId)> onMidiClipOpenRequested;
     std::function<void()> onPerformanceSetupRequested;
+    std::function<void(bool)> onLiveModeRequested;
     // Announces the resolved destination immediately. The owner can arm a
     // first-pass key analysis without coupling import code to control logic.
     std::function<void(int, const juce::File&)> onAudioFileImported;
@@ -279,6 +333,7 @@ public:
     void setSelectedTrack(int trackIndex) noexcept;
     void showRecordingPreview(int trackIndex, double startSample) noexcept;
     void hideRecordingPreview() noexcept;
+    void setLiveModeActive(bool active) noexcept;
 
     void paint(juce::Graphics& g) override;
     void resized() override;
@@ -328,6 +383,7 @@ private:
     juce::Label trackHeightReadout;
     juce::Label waveformZoomReadout;
     juce::TextButton addPerformanceButton { "+" };
+    juce::TextButton livePerformanceButton { "LIVE" };
     juce::TextButton snapButton { "SNAP OFF" };
     juce::TextButton markerButton { "+ MARKER" };
     TrackDataModel* trackModel = nullptr;

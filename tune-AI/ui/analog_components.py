@@ -417,6 +417,13 @@ class AnalogKnobPanel(QWidget):
         self._controls = controls  # label, minimum, maximum
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
+    def set_controls(self, controls: tuple[tuple[str, int, int], ...]):
+        """Replace captions from DAW state without rebuilding knob widgets."""
+        if len(controls) != len(self._controls):
+            return
+        self._controls = controls
+        self.update()
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -453,6 +460,63 @@ class AnalogKnobPanel(QWidget):
             display = QRectF(center_x - 30, rect.bottom() - 31, 60, 23)
             painter.setPen(QPen(QColor("#32291F"), 1)); painter.setBrush(QColor("#07090A"))
             painter.drawRoundedRect(display, 4, 4)
+        painter.end()
+
+
+class MacroRoutingCaption(QWidget):
+    """An always-live routing label drawn above the chassis reference artwork.
+
+    The lower analogue artwork contains printed effect names.  Those names are
+    useful as a visual reference, but must never be mistaken for the actual
+    DAW mapping.  This compact, opaque caption deliberately owns that small
+    patch of the faceplate and replaces it with the current macro state.
+    """
+
+    def __init__(self, macro_number: int, parent=None):
+        super().__init__(parent)
+        self._macro_number = macro_number
+        self._summary = "UNASSIGNED"
+        self._state = "unassigned"
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+
+    def set_mapping(self, summary: str, state: str):
+        summary = (summary or "UNASSIGNED").upper()
+        state = state or "unassigned"
+        if summary == self._summary and state == self._state:
+            return
+        self._summary = summary
+        self._state = state
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect())
+        # Opaque faceplate patch: this intentionally masks the baked reference
+        # caption below, making the runtime mapping the single source of truth.
+        painter.fillRect(rect, QColor("#141516"))
+        colors = {
+            "active": QColor("#70D9C9"),
+            "review": QColor("#E1B56F"),
+            "bypassed": QColor("#B86C62"),
+            "unassigned": QColor("#8B857A"),
+        }
+        accent = colors.get(self._state, colors["unassigned"])
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(accent)
+        painter.drawEllipse(QRectF(1.5, rect.center().y() - 2.25, 4.5, 4.5))
+
+        painter.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+        painter.setPen(QColor("#C4B69E"))
+        painter.drawText(QRectF(9, 0, 18, rect.height()), Qt.AlignmentFlag.AlignVCenter,
+                         f"M{self._macro_number}")
+        painter.setFont(QFont("Segoe UI", 7, QFont.Weight.DemiBold))
+        painter.setPen(QColor("#EFE1C7") if self._state == "active" else QColor("#C3B8A8"))
+        painter.drawText(QRectF(28, 0, rect.width() - 30, rect.height()),
+                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                         painter.fontMetrics().elidedText(self._summary, Qt.TextElideMode.ElideRight,
+                                                          max(10, int(rect.width() - 31))))
         painter.end()
 
 

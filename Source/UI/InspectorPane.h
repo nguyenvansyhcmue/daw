@@ -18,8 +18,11 @@ public:
 private:
     void layoutContextInspectors(juce::Rectangle<int> bounds);
     void layoutChannelStrips(juce::Rectangle<int> bounds);
+    void showAuxBus(BusId bus);
+    void showStereoOutput();
 
     TrackInspectorComponent trackInspector;
     ChannelStripComponent selectedTrackChannel;
     ChannelStripComponent stereoOutputChannel;
+    int selectedTrackIndex = -1;
 };

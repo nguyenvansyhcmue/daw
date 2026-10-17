@@ -116,6 +116,7 @@ private:
     WorkspaceModeButton studioModeButton { WorkspaceModeButton::Mode::studio, "STUDIO" };
     WorkspaceModeButton stageModeButton { WorkspaceModeButton::Mode::stage, "STAGE" };
     WorkspaceModeButton streamModeButton { WorkspaceModeButton::Mode::stream, "STREAM" };
+    juce::TextButton liveModeButton { "LIVE" };
     juce::ComboBox countInBarsBox;
     juce::Slider bpmSlider;
     juce::Label bpmLabel;

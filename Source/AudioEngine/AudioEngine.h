@@ -7,6 +7,7 @@
 #include <memory>
 #include <vector>
 #include <chrono>
+#include <functional>
 
 #include "AudioGraph.h"
 #include "AudioDiagnosticTracer.h"
@@ -88,6 +89,10 @@ public:
     void startAudioTrace();
     void stopAudioTrace();
     void markAudioTraceIssue() noexcept;
+    // Diagnostic-only selection. This never changes routing or plug-in state;
+    // it chooses the slot whose pre/post-FX evidence is written to the trace.
+    void selectPluginTraceTarget(size_t trackIndex, size_t slot) noexcept;
+    void clearPluginTraceTarget() noexcept;
     bool isPanicMuteEnabled() const noexcept;
     void setStreamMuted(bool muted) noexcept;
     bool isStreamMuted() const noexcept;
@@ -190,9 +195,14 @@ public:
         int blockSize = 512;
         bool useCycle = false;
         int bitDepth = 24;
+        // Offline-only observer used by stem/selected-track exporters. It is
+        // called after each rendered block, before the next block is started.
+        std::function<void(size_t, const juce::AudioBuffer<float>&, int)> trackBlockCallback;
+        std::function<bool(size_t)> trackExportFilter;
     };
 
     juce::Result renderOfflineAudio(const juce::File& destination, const OfflineRenderOptions& options);
+    juce::Result renderOfflineStems(const juce::File& directory, const OfflineRenderOptions& options);
     juce::Result renderOfflineWav(const juce::File& destination, double sampleRate,
                                   int blockSize = 512, bool useCycle = false);
 
@@ -275,6 +285,14 @@ private:
     // Runs only on JUCE's message thread after CoreAudio reports that its
     // device list changed. It never touches the realtime callback.
     void recoverPreferredAudioDeviceAfterHotPlug();
+    // The mixer always renders a stereo Master bus. CoreAudio device changes
+    // do not reliably retain an active output mask (notably on USB
+    // interfaces), so ensure physical outputs 1/2 are explicitly available.
+    juce::Result ensureCurrentStereoOutputPair();
+    // Cue is a real hardware route, never an alias for the Master bus. It
+    // needs outputs 3/4 in the primary device callback while preserving the
+    // master pair and any explicitly active output channels.
+    juce::Result ensureCurrentCueOutputPair();
     void changeListenerCallback(juce::ChangeBroadcaster*) override;
     int callbackOutputForPhysicalChannel(int physicalChannel) const noexcept;
     void prepareTrackMidiBuffers(const TrackDataModel::RenderStructureSnapshot* structure) noexcept;
@@ -345,6 +363,15 @@ private:
     std::atomic<uint64_t> focusedMonitorTrackId { 0 };
     std::atomic<uint64_t> liveKeyReferenceTrackId { 0 };
     AudioDiagnosticTracer diagnosticTracer;
+    std::atomic<int> pluginTraceTrackIndex { -1 };
+    std::atomic<int> pluginTraceSlot { -1 };
+    std::atomic<int> pluginTraceLatencySamples { 0 };
+    std::atomic<float> pluginTracePreFxPeak { 0.0f };
+    std::atomic<float> pluginTracePostFxPeak { 0.0f };
+    std::atomic<uint8_t> pluginTracePresent { 0 };
+    std::atomic<uint8_t> pluginTraceBypassed { 0 };
+    std::atomic<uint8_t> pluginTraceProcessed { 0 };
+    std::atomic<uint8_t> pluginTraceSkippedForLatency { 0 };
     LiveKeyDetector liveKeyDetector;
     juce::AudioBuffer<float> processingBuffer;
     juce::AudioBuffer<float> liveKeyReferenceBuffer;
@@ -365,7 +392,10 @@ private:
     std::atomic<int> activeBufferSize { 0 };
     std::atomic<int> activeInputLatencySamples { 0 };
     std::atomic<int> activeOutputLatencySamples { 0 };
-    std::atomic<bool> recordingInterruptedByDeviceDisconnect { false };
+    // A device stop is also emitted for harmless CoreAudio renegotiations.
+    // Store its time and only surface an interruption if no matching start
+    // arrives within the recovery grace period.
+    std::atomic<uint64_t> recordingDeviceStopMs { 0 };
     std::atomic<float> callbackLoad { 0.0f };
     std::atomic<uint64_t> callbackOverloadCount { 0 };
     std::unique_ptr<const TrackDataModel::FxRackSnapshot> masterFxRack;

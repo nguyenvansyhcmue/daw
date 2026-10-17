@@ -19,13 +19,38 @@ InspectorPane::InspectorPane(TrackDataModel& model, AudioEngine& engine, PluginH
     addAndMakeVisible(trackInspector);
     addAndMakeVisible(selectedTrackChannel);
     addAndMakeVisible(stereoOutputChannel);
+    selectedTrackChannel.onRevealAuxBus = [this] (BusId bus) { showAuxBus(bus); };
+    stereoOutputChannel.onRevealAuxBus = [this] (BusId bus)
+    {
+        if (bus.isValid()) showAuxBus(bus);
+        else showStereoOutput();
+    };
     stereoOutputChannel.refresh();
 }
 
 void InspectorPane::setSelectedTrack(int trackIndex)
 {
+    if (trackIndex != selectedTrackIndex)
+    {
+        selectedTrackIndex = trackIndex;
+        showStereoOutput();
+    }
     trackInspector.setSelectedTrack(trackIndex);
     selectedTrackChannel.setSelectedTrack(trackIndex);
+}
+
+void InspectorPane::showAuxBus(BusId bus)
+{
+    if (! bus.isValid())
+        return;
+    stereoOutputChannel.setAuxBus(bus);
+    selectedTrackChannel.setViewedAux(bus);
+}
+
+void InspectorPane::showStereoOutput()
+{
+    stereoOutputChannel.setAuxBus({});
+    selectedTrackChannel.setViewedAux({});
 }
 
 void InspectorPane::paint(juce::Graphics& g)

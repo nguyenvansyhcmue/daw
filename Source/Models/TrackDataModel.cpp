@@ -349,10 +349,41 @@ bool TrackDataModel::reorderTrack(TrackId id, size_t destinationIndex)
 BusId TrackDataModel::addBus()
 {
     if (busStates.size() >= maxBuses) return {};
-    busStates.push_back({ { nextBusId++ } });
+    const auto ordinal = static_cast<int>(busStates.size() + 1);
+    // A bus created from a track Send is an effect return. Naming it as such
+    // exposes its purpose before the performer opens the Mixer.
+    busStates.push_back({ { nextBusId++ }, "FX Bus " + juce::String(ordinal) });
     publishRenderStructureSnapshot();
     markProjectModified();
     return busStates.back().id;
+}
+
+juce::String TrackDataModel::getBusDisplayName(BusId id) const
+{
+    const auto found = std::find_if(busStates.begin(), busStates.end(), [id] (const auto& bus) { return bus.id == id; });
+    if (found == busStates.end())
+        return {};
+
+    return found->name.isNotEmpty() ? found->name
+                                    : "Aux " + juce::String(static_cast<int>(std::distance(busStates.begin(), found)) + 1);
+}
+
+bool TrackDataModel::setBusName(BusId id, juce::String name)
+{
+    const auto found = std::find_if(busStates.begin(), busStates.end(), [id] (const auto& bus) { return bus.id == id; });
+    if (found == busStates.end())
+        return false;
+
+    name = name.trim().substring(0, 48);
+    if (name.isEmpty())
+        name = "Aux " + juce::String(static_cast<int>(std::distance(busStates.begin(), found)) + 1);
+    if (found->name == name)
+        return true;
+
+    found->name = std::move(name);
+    markProjectModified();
+    sendChangeMessage();
+    return true;
 }
 bool TrackDataModel::removeBus(BusId id)
 {
@@ -402,6 +433,17 @@ bool TrackDataModel::setBusGain(BusId id, float gain)
     markProjectModified();
     return true;
 }
+bool TrackDataModel::setBusBalance(BusId id, float balance)
+{
+    const auto found = std::find_if(busStates.begin(), busStates.end(), [id] (const BusState& bus) { return bus.id == id; });
+    if (found == busStates.end() || ! std::isfinite(balance)) return false;
+    const auto value = juce::jlimit(-1.0f, 1.0f, balance);
+    if (found->balance == value) return true;
+    found->balance = value;
+    publishRenderStructureSnapshot();
+    markProjectModified();
+    return true;
+}
 bool TrackDataModel::setBusMuted(BusId id, bool muted)
 {
     const auto found = std::find_if(busStates.begin(), busStates.end(), [id] (const BusState& bus) { return bus.id == id; });
@@ -430,6 +472,7 @@ void TrackDataModel::setBusFxProcessor(BusId bus, size_t slot, std::shared_ptr<A
     publishBusFxRackSnapshot(index, std::move(updated));
     publishRenderStructureSnapshot();
     markProjectModified();
+    sendChangeMessage();
 }
 void TrackDataModel::setBusFxBypassed(BusId bus, size_t slot, bool bypassed)
 {
@@ -443,6 +486,7 @@ void TrackDataModel::setBusFxBypassed(BusId bus, size_t slot, bool bypassed)
     publishBusFxRackSnapshot(index, std::move(updated));
     publishRenderStructureSnapshot();
     markProjectModified();
+    sendChangeMessage();
 }
 bool TrackDataModel::setTrackOutputBus(TrackId trackId, BusId bus)
 {
@@ -462,13 +506,27 @@ bool TrackDataModel::setTrackSendRoute(TrackId trackId, size_t route, BusId bus,
     const auto index = getTrackIndex(trackId); if (index < 0) return false;
     auto& track = trackStates[static_cast<size_t>(index)];
     const auto constrainedAmount = juce::jlimit(0.0f, maximumSendGain, amount);
-    track.sends[route] = { bus, constrainedAmount, preFader };
+    const auto postFaderBeforePan = ! preFader && track.sends[route].postFaderBeforePan;
+    track.sends[route] = { bus, constrainedAmount, preFader, postFaderBeforePan };
     if (isPlaying() && track.sendAutomation[route].getMode() != AutomationMode::read)
         try { track.sendAutomation[route].upsertPoint(getPlayheadPosition(), constrainedAmount); }
         catch (const std::length_error&) {}
     track.activeSendCount = static_cast<uint8_t>(std::count_if(track.sends.begin(), track.sends.end(),
         [] (const TrackState::SendRoute& send) { return send.targetBus.isValid(); }));
     publishRenderStructureSnapshot(); markProjectModified(); return true;
+}
+bool TrackDataModel::setTrackSendPostFaderBeforePan(TrackId id, size_t route, bool enabled)
+{
+    const auto index = getTrackIndex(id);
+    if (index < 0 || route >= maxSendsPerTrack) return false;
+    auto& send = trackStates[static_cast<size_t>(index)].sends[route];
+    if (! send.targetBus.isValid()) return false;
+    send.preFader = false;
+    send.postFaderBeforePan = enabled;
+    publishRenderStructureSnapshot();
+    markProjectModified();
+    sendChangeMessage();
+    return true;
 }
 bool TrackDataModel::clearTrackSendRoute(TrackId trackId, size_t route)
 {
@@ -1219,14 +1277,17 @@ ClipId TrackDataModel::addClipToTrack(int trackIndex, const juce::File& file, do
 
     AudioClipState clip;
     clip.id = { nextClipId++ };
-    const auto& source = audioMediaPool.registerDecodedSource(file, std::move(loadedBuffer));
+    const auto& source = audioMediaPool.registerDecodedSource(file, loadedBuffer);
+    const auto playbackData = source.playbackData.lock();
+    if (playbackData == nullptr)
+        return {};
     clip.sourceId = source.id;
     clip.sourceFile = source.sourceFile;
     clip.startSample = std::max(0.0, startSample);
-    clip.durationSamples = source.playbackData->getNumSamples();
+    clip.durationSamples = playbackData->getNumSamples();
     clip.trackId = trackStates[static_cast<size_t>(trackIndex)].id;
     clip.clipName = file.getFileNameWithoutExtension();
-    clip.cachedBuffer = source.playbackData;
+    clip.cachedBuffer = playbackData;
     clip.mediaStatus = AudioMediaStatus::Ready;
     trackStates[static_cast<size_t>(trackIndex)].clips.push_back(clip);
     publishAudioClipSnapshot();
@@ -1234,6 +1295,125 @@ ClipId TrackDataModel::addClipToTrack(int trackIndex, const juce::File& file, do
     commitEdit(std::move(before));
     sendChangeMessage();
     return clip.id;
+}
+
+ClipId TrackDataModel::addRecordedClipToTrack(int trackIndex, const juce::File& file, double startSample,
+                                              std::shared_ptr<juce::AudioBuffer<float>> loadedBuffer)
+{
+    if (trackIndex < 0 || loadedBuffer == nullptr)
+        return {};
+    ensureTrackCount(static_cast<size_t>(trackIndex + 1));
+    if (static_cast<size_t>(trackIndex) >= trackStates.size())
+        return {};
+
+    const auto& source = audioMediaPool.registerDecodedSource(file, loadedBuffer);
+    const auto playbackData = source.playbackData.lock();
+    if (playbackData == nullptr || playbackData->getNumSamples() <= 0)
+        return {};
+
+    auto before = captureEditState();
+    AudioClipState clip;
+    clip.id = { nextClipId++ };
+    clip.sourceId = source.id;
+    clip.sourceFile = source.sourceFile;
+    clip.startSample = std::max(0.0, startSample);
+    clip.durationSamples = playbackData->getNumSamples();
+    clip.trackId = trackStates[static_cast<size_t>(trackIndex)].id;
+    clip.clipName = file.getFileNameWithoutExtension();
+    clip.cachedBuffer = playbackData;
+    clip.mediaStatus = AudioMediaStatus::Ready;
+    clip.recordedTake = true;
+    clip.takeId = clip.id.value;
+
+    auto& trackClips = trackStates[static_cast<size_t>(trackIndex)].clips;
+    const auto takeEnd = clip.startSample + clip.durationSamples;
+    uint64_t groupId = 0;
+    for (const auto& existing : trackClips)
+    {
+        const auto overlaps = existing.startSample < takeEnd
+            && existing.startSample + existing.durationSamples > clip.startSample;
+        if (overlaps && existing.recordedTake)
+        {
+            groupId = existing.takeGroupId;
+            if (groupId != 0)
+                break;
+        }
+    }
+
+    if (groupId == 0)
+    {
+        const auto hasRecordedOverlap = std::any_of(trackClips.begin(), trackClips.end(), [&] (const AudioClipState& existing)
+        {
+            return existing.recordedTake && existing.startSample < takeEnd
+                && existing.startSample + existing.durationSamples > clip.startSample;
+        });
+        if (hasRecordedOverlap)
+            groupId = nextTakeGroupId++;
+    }
+
+    if (groupId != 0)
+    {
+        clip.takeGroupId = groupId;
+        for (auto& existing : trackClips)
+        {
+            const auto overlaps = existing.startSample < takeEnd
+                && existing.startSample + existing.durationSamples > clip.startSample;
+            if (! overlaps || ! existing.recordedTake)
+                continue;
+            if (existing.takeGroupId == 0)
+                existing.takeGroupId = groupId;
+            if (existing.takeGroupId == groupId)
+                existing.takeActive = false;
+        }
+    }
+
+    trackClips.push_back(std::move(clip));
+    if (groupId != 0)
+    {
+        auto folder = std::find_if(trackStates[static_cast<size_t>(trackIndex)].takeFolders.begin(),
+                                   trackStates[static_cast<size_t>(trackIndex)].takeFolders.end(),
+                                   [groupId] (const TakeFolderState& candidate) { return candidate.id.value == groupId; });
+        if (folder == trackStates[static_cast<size_t>(trackIndex)].takeFolders.end())
+        {
+            TakeFolderState created;
+            created.id = { groupId };
+            created.trackId = trackStates[static_cast<size_t>(trackIndex)].id;
+            created.startSample = trackClips.back().startSample;
+            auto endSample = trackClips.back().startSample + trackClips.back().durationSamples;
+            for (const auto& candidate : trackClips)
+                if (candidate.takeGroupId == groupId)
+                {
+                    created.startSample = juce::jmin(created.startSample, candidate.startSample);
+                    endSample = juce::jmax(endSample, candidate.startSample + candidate.durationSamples);
+                    if (std::find(created.takeIds.begin(), created.takeIds.end(), candidate.takeId) == created.takeIds.end())
+                        created.takeIds.push_back(candidate.takeId);
+                }
+            created.durationSamples = endSample - created.startSample;
+            TakeCompState initialComp;
+            initialComp.id = { nextCompId++ };
+            initialComp.name = "Comp 1";
+            initialComp.segments.push_back({ trackClips.back().startSample, trackClips.back().durationSamples,
+                                             trackClips.back().takeId });
+            created.activeCompId = initialComp.id;
+            created.comps.push_back(std::move(initialComp));
+            trackStates[static_cast<size_t>(trackIndex)].takeFolders.push_back(std::move(created));
+        }
+        else
+        {
+            const auto& newest = trackClips.back();
+            if (std::find(folder->takeIds.begin(), folder->takeIds.end(), newest.takeId) == folder->takeIds.end())
+                folder->takeIds.push_back(newest.takeId);
+            const auto folderEnd = juce::jmax(folder->startSample + folder->durationSamples,
+                                               newest.startSample + newest.durationSamples);
+            folder->startSample = juce::jmin(folder->startSample, newest.startSample);
+            folder->durationSamples = folderEnd - folder->startSample;
+        }
+    }
+    publishAudioClipSnapshot();
+    publishRenderStructureSnapshot();
+    commitEdit(std::move(before));
+    sendChangeMessage();
+    return trackClips.back().id;
 }
 
 ClipId TrackDataModel::addUnloadedClipToTrack(int trackIndex, const juce::File& file, double startSample,
@@ -1354,7 +1534,6 @@ void TrackDataModel::splitAudioClip(size_t trackIndex, size_t clipIndex, double 
 void TrackDataModel::trimAudioClip(size_t trackIndex, size_t clipIndex, double startSample, double durationSamples)
 {
     if (trackIndex >= trackStates.size() || clipIndex >= trackStates[trackIndex].clips.size()) return;
-    auto before = captureEditState();
     auto& clip = trackStates[trackIndex].clips[clipIndex];
     const auto end = clip.startSample + clip.durationSamples;
     // The left edge may be restored up to the source's original in-point, but
@@ -1372,11 +1551,20 @@ void TrackDataModel::trimAudioClip(size_t trackIndex, size_t clipIndex, double s
             static_cast<double>(clip.cachedBuffer->getNumSamples()) - newSourceOffset);
         newEnd = juce::jmin(newEnd, sourceEnd);
     }
+    const auto newDuration = newEnd - newStart;
+    const auto newFadeIn = juce::jmin(clip.fadeInSamples, newDuration);
+    const auto newFadeOut = juce::jmin(clip.fadeOutSamples, newDuration);
+    if (clip.sourceOffsetSamples == newSourceOffset && clip.startSample == newStart
+        && clip.durationSamples == newDuration && clip.fadeInSamples == newFadeIn
+        && clip.fadeOutSamples == newFadeOut)
+        return;
+
+    auto before = captureEditState();
     clip.sourceOffsetSamples = newSourceOffset;
     clip.startSample = newStart;
-    clip.durationSamples = newEnd - newStart;
-    clip.fadeInSamples = juce::jmin(clip.fadeInSamples, clip.durationSamples);
-    clip.fadeOutSamples = juce::jmin(clip.fadeOutSamples, clip.durationSamples);
+    clip.durationSamples = newDuration;
+    clip.fadeInSamples = newFadeIn;
+    clip.fadeOutSamples = newFadeOut;
     publishAudioClipSnapshot();
     publishRenderStructureSnapshot();
     commitEdit(std::move(before));
@@ -1398,19 +1586,25 @@ bool TrackDataModel::moveAudioClip(ClipId clipId, TrackId destinationTrack, doub
 {
     const auto destinationIndex = getTrackIndex(destinationTrack);
     if (destinationIndex < 0) return false;
-    auto before = captureEditState();
-    for (auto& track : trackStates)
+    const auto targetStart = std::max(0.0, startSample);
+    for (size_t sourceIndex = 0; sourceIndex < trackStates.size(); ++sourceIndex)
     {
+        auto& track = trackStates[sourceIndex];
         const auto iter = std::find_if(track.clips.begin(), track.clips.end(), [clipId] (const AudioClipState& clip) { return clip.id == clipId; });
         if (iter == track.clips.end()) continue;
+
+        if (track.id == destinationTrack && iter->startSample == targetStart)
+            return true;
+
+        auto before = captureEditState();
         if (track.id == destinationTrack)
-            iter->startSample = std::max(0.0, startSample);
+            iter->startSample = targetStart;
         else
         {
             auto moved = *iter;
             track.clips.erase(iter);
             moved.trackId = destinationTrack;
-            moved.startSample = std::max(0.0, startSample);
+            moved.startSample = targetStart;
             trackStates[static_cast<size_t>(destinationIndex)].clips.push_back(std::move(moved));
         }
         publishAudioClipSnapshot();
@@ -1605,6 +1799,120 @@ bool TrackDataModel::setClipLoopEnabled(ClipId clipId, bool enabled)
     return false;
 }
 
+bool TrackDataModel::selectActiveTake(ClipId clipId)
+{
+    for (auto& track : trackStates)
+    {
+        const auto selected = std::find_if(track.clips.begin(), track.clips.end(), [clipId] (const AudioClipState& clip)
+        {
+            return clip.id == clipId;
+        });
+        if (selected == track.clips.end() || selected->takeGroupId == 0)
+            continue;
+
+        const auto groupId = selected->takeGroupId;
+        const auto takeId = selected->takeId != 0 ? selected->takeId : selected->id.value;
+        auto before = captureEditState();
+        for (auto& clip : track.clips)
+            if (clip.takeGroupId == groupId)
+                clip.takeActive = clip.takeId == takeId;
+        const auto folder = std::find_if(track.takeFolders.begin(), track.takeFolders.end(), [groupId] (const TakeFolderState& candidate)
+        {
+            return candidate.id.value == groupId;
+        });
+        if (folder != track.takeFolders.end())
+            if (const auto comp = std::find_if(folder->comps.begin(), folder->comps.end(), [&] (const TakeCompState& candidate)
+                { return candidate.id == folder->activeCompId; }); comp != folder->comps.end())
+            {
+                comp->segments.clear();
+                comp->segments.push_back({ selected->startSample, selected->durationSamples, takeId });
+            }
+        publishAudioClipSnapshot();
+        commitEdit(std::move(before));
+        sendChangeMessage();
+        return true;
+    }
+    return false;
+}
+
+const std::vector<TakeFolderState>& TrackDataModel::getTakeFolders(size_t trackIndex) const noexcept
+{
+    static const std::vector<TakeFolderState> empty;
+    return trackIndex < trackStates.size() ? trackStates[trackIndex].takeFolders : empty;
+}
+
+bool TrackDataModel::selectTakeFolderRange(TakeFolderId folderId, uint64_t takeId,
+                                           double startSample, double endSample)
+{
+    if (! folderId.isValid() || takeId == 0 || ! std::isfinite(startSample) || ! std::isfinite(endSample))
+        return false;
+    for (auto& track : trackStates)
+    {
+        const auto folder = std::find_if(track.takeFolders.begin(), track.takeFolders.end(), [folderId] (const TakeFolderState& candidate)
+        {
+            return candidate.id == folderId;
+        });
+        if (folder == track.takeFolders.end())
+            continue;
+        if (std::find(folder->takeIds.begin(), folder->takeIds.end(), takeId) == folder->takeIds.end())
+            return false;
+        const auto folderStart = folder->startSample;
+        const auto folderEnd = folder->startSample + folder->durationSamples;
+        const auto selectionStart = juce::jlimit(folderStart, folderEnd, juce::jmin(startSample, endSample));
+        const auto selectionEnd = juce::jlimit(folderStart, folderEnd, juce::jmax(startSample, endSample));
+        if (selectionEnd <= selectionStart)
+            return false;
+        const auto activeComp = std::find_if(folder->comps.begin(), folder->comps.end(), [&] (const TakeCompState& candidate)
+        {
+            return candidate.id == folder->activeCompId;
+        });
+        if (activeComp == folder->comps.end())
+            return false;
+
+        auto before = captureEditState();
+        std::vector<CompSegmentState> next;
+        next.reserve(activeComp->segments.size() + 2);
+        for (const auto& segment : activeComp->segments)
+        {
+            const auto segmentEnd = segment.startSample + segment.durationSamples;
+            if (segmentEnd <= selectionStart || segment.startSample >= selectionEnd)
+            {
+                next.push_back(segment);
+                continue;
+            }
+            if (segment.startSample < selectionStart)
+            {
+                auto left = segment;
+                left.durationSamples = selectionStart - segment.startSample;
+                next.push_back(left);
+            }
+            if (segmentEnd > selectionEnd)
+            {
+                auto right = segment;
+                right.startSample = selectionEnd;
+                right.durationSamples = segmentEnd - selectionEnd;
+                next.push_back(right);
+            }
+        }
+        next.push_back({ selectionStart, selectionEnd - selectionStart, takeId });
+        std::stable_sort(next.begin(), next.end(), [] (const CompSegmentState& lhs, const CompSegmentState& rhs)
+        {
+            return lhs.startSample < rhs.startSample;
+        });
+        // Segment bounds stay contiguous here. Crossfade overlap is applied
+        // by the comp editor, which expands adjacent bounds together; adding
+        // fades without overlap would create an audible gain dip.
+        for (auto& segment : next)
+            segment.fadeInSamples = segment.fadeOutSamples = 0.0;
+        activeComp->segments = std::move(next);
+        publishAudioClipSnapshot();
+        commitEdit(std::move(before));
+        sendChangeMessage();
+        return true;
+    }
+    return false;
+}
+
 bool TrackDataModel::createCrossfadesForTrack(TrackId trackId)
 {
     const auto trackIndex = getTrackIndex(trackId);
@@ -1659,10 +1967,13 @@ bool TrackDataModel::setClipMediaResource(ClipId clipId, const juce::File& file,
         for (auto& clip : track.clips)
             if (clip.id == clipId)
             {
-                const auto& source = audioMediaPool.registerDecodedSource(file, std::move(decodedBuffer));
+                const auto& source = audioMediaPool.registerDecodedSource(file, decodedBuffer);
+                const auto playbackData = source.playbackData.lock();
+                if (playbackData == nullptr)
+                    return false;
                 clip.sourceId = source.id;
                 clip.sourceFile = source.sourceFile;
-                clip.cachedBuffer = source.playbackData;
+                clip.cachedBuffer = playbackData;
                 clip.mediaStatus = AudioMediaStatus::Ready;
                 publishAudioClipSnapshot();
                 publishRenderStructureSnapshot();
@@ -1670,6 +1981,62 @@ bool TrackDataModel::setClipMediaResource(ClipId clipId, const juce::File& file,
                 return true;
             }
     return false;
+}
+
+size_t TrackDataModel::applyClipMediaUpdates(const std::vector<ClipMediaUpdate>& updates)
+{
+    auto applied = size_t { 0 };
+    auto changed = false;
+    for (const auto& update : updates)
+    {
+        if (! update.clipId.isValid())
+            continue;
+
+        for (auto& track : trackStates)
+        {
+            const auto found = std::find_if(track.clips.begin(), track.clips.end(), [&] (const AudioClipState& clip)
+            {
+                return clip.id == update.clipId;
+            });
+            if (found == track.clips.end())
+                continue;
+
+            auto& clip = *found;
+            if (update.status == AudioMediaStatus::Ready)
+            {
+                if (update.decodedBuffer == nullptr || update.decodedBuffer->getNumChannels() <= 0
+                    || update.decodedBuffer->getNumSamples() <= 0)
+                    break;
+
+                const auto& source = audioMediaPool.registerDecodedSource(update.sourceFile, update.decodedBuffer);
+                const auto playbackData = source.playbackData.lock();
+                if (playbackData == nullptr)
+                    break;
+                changed = changed || clip.sourceId != source.id || clip.sourceFile != source.sourceFile
+                    || clip.cachedBuffer != playbackData || clip.mediaStatus != AudioMediaStatus::Ready;
+                clip.sourceId = source.id;
+                clip.sourceFile = source.sourceFile;
+                clip.cachedBuffer = playbackData;
+                clip.mediaStatus = AudioMediaStatus::Ready;
+            }
+            else
+            {
+                changed = changed || clip.cachedBuffer != nullptr || clip.mediaStatus != update.status;
+                clip.cachedBuffer.reset();
+                clip.mediaStatus = update.status;
+            }
+            ++applied;
+            break;
+        }
+    }
+
+    if (changed)
+    {
+        publishAudioClipSnapshot();
+        publishRenderStructureSnapshot();
+        sendChangeMessage();
+    }
+    return applied;
 }
 
 std::shared_ptr<juce::AudioBuffer<float>> TrackDataModel::findDecodedAudioSource(const juce::File& sourceFile) const
@@ -1815,7 +2182,8 @@ ProjectState TrackDataModel::createProjectState() const
     for (size_t busIndex = 0; busIndex < busStates.size(); ++busIndex)
     {
         const auto& bus = busStates[busIndex];
-        PersistedBusState savedBus { bus.id, bus.gain, bus.muted };
+        PersistedBusState savedBus { bus.id, bus.name, bus.gain, bus.muted };
+        savedBus.balance = bus.balance;
         if (const auto* rack = publishedBusFxRacks[busIndex].load(std::memory_order_acquire); rack != nullptr)
             for (size_t slot = 0; slot < maxFxSlots; ++slot)
                 if (const auto& processor = rack->processors[slot]; processor != nullptr)
@@ -1849,7 +2217,7 @@ ProjectState TrackDataModel::createProjectState() const
         savedTrack.outputBus = track.outputBus;
         savedTrack.activeSendCount = track.activeSendCount;
         for (size_t i = 0; i < maxSendsPerTrack; ++i)
-            savedTrack.sends[i] = { track.sends[i].targetBus, track.sends[i].level, track.sends[i].preFader };
+            savedTrack.sends[i] = { track.sends[i].targetBus, track.sends[i].level, track.sends[i].preFader, track.sends[i].postFaderBeforePan };
         if (const auto* rack = getFxRackSnapshot(trackIndex); rack != nullptr)
             for (size_t slot = 0; slot < maxFxSlots; ++slot)
                 if (const auto& processor = rack->processors[slot]; processor != nullptr)
@@ -1886,9 +2254,29 @@ ProjectState TrackDataModel::createProjectState() const
             }
         savedTrack.clips.reserve(track.clips.size());
         for (const auto& clip : track.clips)
-            savedTrack.clips.push_back({ clip.id, clip.trackId, clip.sourceFile.getFullPathName(), clip.clipName,
-                                         clip.startSample, clip.durationSamples, clip.sourceOffsetSamples,
-                                         clip.loopEnabled, clip.loopLengthSamples, clip.gain, clip.fadeInSamples, clip.fadeOutSamples });
+        {
+            PersistedClipState savedClip;
+            savedClip.id = clip.id;
+            savedClip.trackId = clip.trackId;
+            savedClip.sourcePath = clip.sourceFile.getFullPathName();
+            savedClip.clipName = clip.clipName;
+            savedClip.startSample = clip.startSample;
+            savedClip.durationSamples = clip.durationSamples;
+            savedClip.sourceOffsetSamples = clip.sourceOffsetSamples;
+            savedClip.loopEnabled = clip.loopEnabled;
+            savedClip.loopLengthSamples = clip.loopLengthSamples;
+            savedClip.gain = clip.gain;
+            savedClip.fadeInSamples = clip.fadeInSamples;
+            savedClip.fadeOutSamples = clip.fadeOutSamples;
+            savedClip.takeGroupId = clip.takeGroupId;
+            savedClip.takeId = clip.takeId;
+            savedClip.takeActive = clip.takeActive;
+            savedClip.recordedTake = clip.recordedTake;
+            savedTrack.clips.push_back(std::move(savedClip));
+        }
+        savedTrack.takeFolders.reserve(track.takeFolders.size());
+        for (const auto& folder : track.takeFolders)
+            savedTrack.takeFolders.push_back({ folder });
         state.tracks.push_back(std::move(savedTrack));
     }
     state.midiClips.reserve(midiClips.size());
@@ -1941,6 +2329,8 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
     uint64_t largestTrackId = 0;
     uint64_t largestBusId = 0;
     uint64_t largestClipId = 0;
+    uint64_t largestTakeGroupId = 0;
+    uint64_t largestCompId = 0;
     uint64_t largestMidiClipId = 0;
     uint64_t largestMidiEventId = 0;
     std::vector<TrackId> trackIds;
@@ -1953,7 +2343,8 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
     for (const auto& bus : state.buses)
     {
         if (! bus.id.isValid() || std::find(busIds.begin(), busIds.end(), bus.id) != busIds.end()
-            || ! std::isfinite(bus.gain) || bus.gain < 0.0f || bus.gain > AudioGainRange::maximumChannelGain)
+            || ! std::isfinite(bus.gain) || bus.gain < 0.0f || bus.gain > AudioGainRange::maximumChannelGain
+            || ! std::isfinite(bus.balance) || bus.balance < -1.0f || bus.balance > 1.0f)
             return juce::Result::fail("Project bus state is invalid");
         busIds.push_back(bus.id);
         largestBusId = std::max(largestBusId, bus.id.value);
@@ -2034,7 +2425,55 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
                 return juce::Result::fail("Project clip timing is invalid");
             clipIds.push_back(clip.id);
             largestClipId = std::max(largestClipId, clip.id.value);
+            if (clip.takeGroupId == 0 && ! clip.takeActive)
+                return juce::Result::fail("Project has an inactive clip outside a take group");
+            if (clip.takeGroupId != 0 && clip.takeId == 0)
+                return juce::Result::fail("Project take clip has no take identity");
+            largestTakeGroupId = std::max(largestTakeGroupId, clip.takeGroupId);
         }
+
+        for (const auto& persistedFolder : track.takeFolders)
+        {
+            const auto& folder = persistedFolder.state;
+            if (! folder.id.isValid() || folder.trackId != track.id || folder.durationSamples <= 0.0
+                || ! std::isfinite(folder.startSample) || ! std::isfinite(folder.durationSamples)
+                || folder.takeIds.size() < 2 || folder.comps.empty() || ! folder.activeCompId.isValid())
+                return juce::Result::fail("Project take folder is invalid");
+            if (std::find_if(folder.comps.begin(), folder.comps.end(), [&] (const TakeCompState& comp)
+                { return comp.id == folder.activeCompId; }) == folder.comps.end())
+                return juce::Result::fail("Project take folder has no active comp");
+            for (const auto takeId : folder.takeIds)
+                if (takeId == 0 || std::none_of(track.clips.begin(), track.clips.end(), [&] (const PersistedClipState& clip)
+                    { return clip.takeGroupId == folder.id.value && clip.takeId == takeId; }))
+                    return juce::Result::fail("Project take folder references a missing take");
+            largestTakeGroupId = std::max(largestTakeGroupId, folder.id.value);
+            for (const auto& comp : folder.comps)
+            {
+                if (! comp.id.isValid() || comp.name.isEmpty())
+                    return juce::Result::fail("Project take comp is invalid");
+                largestCompId = std::max(largestCompId, comp.id.value);
+                for (const auto& segment : comp.segments)
+                    if (! std::isfinite(segment.startSample) || ! std::isfinite(segment.durationSamples)
+                        || segment.durationSamples <= 0.0 || segment.sourceTakeId == 0
+                        || std::find(folder.takeIds.begin(), folder.takeIds.end(), segment.sourceTakeId) == folder.takeIds.end())
+                        return juce::Result::fail("Project comp segment is invalid");
+            }
+        }
+
+        for (const auto& clip : track.clips)
+            if (clip.takeGroupId != 0)
+            {
+                std::vector<uint64_t> activeTakeIds;
+                for (const auto& candidate : track.clips)
+                {
+                    if (candidate.takeGroupId != clip.takeGroupId || ! candidate.takeActive)
+                        continue;
+                    if (std::find(activeTakeIds.begin(), activeTakeIds.end(), candidate.takeId) == activeTakeIds.end())
+                        activeTakeIds.push_back(candidate.takeId);
+                }
+                if (activeTakeIds.size() != 1)
+                    return juce::Result::fail("Project take group must have one active take");
+            }
     }
     midiClipIds.reserve(state.midiClips.size());
     for (const auto& clip : state.midiClips)
@@ -2077,7 +2516,8 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
         previousSignaturePosition = event.samplePosition;
     }
     if (largestTrackId == std::numeric_limits<uint64_t>::max() || largestBusId == std::numeric_limits<uint64_t>::max()
-        || largestClipId == std::numeric_limits<uint64_t>::max()
+        || largestClipId == std::numeric_limits<uint64_t>::max() || largestTakeGroupId == std::numeric_limits<uint64_t>::max()
+        || largestCompId == std::numeric_limits<uint64_t>::max()
         || largestMidiClipId == std::numeric_limits<uint64_t>::max() || largestMidiEventId == std::numeric_limits<uint64_t>::max())
         return juce::Result::fail("Project ID range cannot allocate new objects safely");
 
@@ -2109,7 +2549,7 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
         restored.outputBus = track.outputBus;
         restored.activeSendCount = track.activeSendCount;
         for (size_t i = 0; i < maxSendsPerTrack; ++i)
-            restored.sends[i] = { track.sends[i].targetBus, track.sends[i].level, track.sends[i].preFader };
+            restored.sends[i] = { track.sends[i].targetBus, track.sends[i].level, track.sends[i].preFader, track.sends[i].postFaderBeforePan };
         for (const auto& lane : track.automationLanes)
         {
             const auto parameter = static_cast<AutomationParameter>(lane.parameter);
@@ -2139,8 +2579,15 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
             restoredClip.gain = clip.gain;
             restoredClip.fadeInSamples = clip.fadeInSamples;
             restoredClip.fadeOutSamples = clip.fadeOutSamples;
+            restoredClip.takeGroupId = clip.takeGroupId;
+            restoredClip.takeId = clip.takeId != 0 ? clip.takeId : clip.id.value;
+            restoredClip.takeActive = clip.takeActive;
+            restoredClip.recordedTake = clip.recordedTake;
             restored.clips.push_back(std::move(restoredClip));
         }
+        restored.takeFolders.reserve(track.takeFolders.size());
+        for (const auto& folder : track.takeFolders)
+            restored.takeFolders.push_back(folder.state);
     }
 
     std::vector<MidiClipState> restoredMidiClips;
@@ -2163,7 +2610,10 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
     std::vector<BusState> restoredBuses;
     restoredBuses.reserve(state.buses.size());
     for (const auto& bus : state.buses)
-        restoredBuses.push_back({ bus.id, bus.gain, bus.muted });
+    {
+        const auto fallbackName = "Aux " + juce::String(static_cast<int>(restoredBuses.size() + 1));
+        restoredBuses.push_back({ bus.id, bus.name.isNotEmpty() ? bus.name : fallbackName, bus.gain, bus.muted, bus.balance });
+    }
 
     audioMediaPool.clear();
     trackStates = std::move(restoredTracks);
@@ -2198,6 +2648,8 @@ juce::Result TrackDataModel::applyProjectState(const ProjectState& state)
     nextTrackId = largestTrackId + 1;
     nextBusId = largestBusId + 1;
     nextClipId = largestClipId + 1;
+    nextTakeGroupId = largestTakeGroupId + 1;
+    nextCompId = largestCompId + 1;
     nextMidiClipId = largestMidiClipId + 1;
     nextMidiEventId = largestMidiEventId + 1;
 
@@ -2305,7 +2757,59 @@ bool TrackDataModel::recallFxScene(size_t trackIndex, size_t sceneIndex) noexcep
 void TrackDataModel::publishAudioClipSnapshot()
 {
     auto updated = std::make_unique<std::vector<AudioClipState>>();
-    for (const auto& state : trackStates) updated->insert(updated->end(), state.clips.begin(), state.clips.end());
+    for (const auto& state : trackStates)
+    {
+        // Ordinary arrangement clips remain direct render sources. A take
+        // folder instead contributes only its active comp selections.
+        for (const auto& clip : state.clips)
+            if (clip.takeGroupId == 0)
+                updated->push_back(clip);
+
+        for (const auto& folder : state.takeFolders)
+        {
+            const auto comp = std::find_if(folder.comps.begin(), folder.comps.end(), [&] (const TakeCompState& candidate)
+            {
+                return candidate.id == folder.activeCompId;
+            });
+            if (comp == folder.comps.end())
+                continue;
+            for (const auto& segment : comp->segments)
+            {
+                const auto segmentEnd = segment.startSample + segment.durationSamples;
+                for (const auto& source : state.clips)
+                {
+                    if (source.takeGroupId != folder.id.value || source.takeId != segment.sourceTakeId)
+                        continue;
+                    const auto rangeStart = juce::jmax(segment.startSample, source.startSample);
+                    const auto rangeEnd = juce::jmin(segmentEnd, source.startSample + source.durationSamples);
+                    if (rangeEnd <= rangeStart)
+                        continue;
+                    auto renderedSegment = source;
+                    renderedSegment.takeGroupId = 0;
+                    renderedSegment.takeActive = true;
+                    renderedSegment.startSample = rangeStart;
+                    renderedSegment.durationSamples = rangeEnd - rangeStart;
+                    renderedSegment.sourceOffsetSamples += rangeStart - source.startSample;
+                    renderedSegment.fadeInSamples = rangeStart == segment.startSample ? segment.fadeInSamples : 0.0;
+                    renderedSegment.fadeOutSamples = rangeEnd == segmentEnd ? segment.fadeOutSamples : 0.0;
+                    updated->push_back(std::move(renderedSegment));
+                }
+            }
+        }
+
+        // Legacy projects can contain pre-folder take groups. Preserve their
+        // previous audible behavior until they are explicitly migrated.
+        const auto folderOwnsGroup = [&state] (uint64_t groupId)
+        {
+            return std::any_of(state.takeFolders.begin(), state.takeFolders.end(), [groupId] (const TakeFolderState& folder)
+            {
+                return folder.id.value == groupId;
+            });
+        };
+        for (const auto& clip : state.clips)
+            if (clip.takeGroupId != 0 && ! folderOwnsGroup(clip.takeGroupId) && clip.takeActive)
+                updated->push_back(clip);
+    }
     std::unique_ptr<const std::vector<AudioClipState>> next = std::move(updated);
     auto previous = std::move(audioClipSnapshot);
     audioClipSnapshot = std::move(next);
@@ -2343,7 +2847,7 @@ void TrackDataModel::publishRenderStructureSnapshot()
     next->busCount = busStates.size();
     for (size_t index = 0; index < next->busCount; ++index)
         next->buses[index] = { busStates[index].id, busStates[index].gain, busStates[index].muted,
-                               publishedBusFxRacks[index].load(std::memory_order_acquire) };
+                               publishedBusFxRacks[index].load(std::memory_order_acquire), busStates[index].balance };
     for (size_t index = 0; index < next->trackCount; ++index)
     {
         const auto& track = trackStates[index];
@@ -2370,7 +2874,7 @@ void TrackDataModel::publishRenderStructureSnapshot()
         renderTrack.activeSendCount = track.activeSendCount;
         for (size_t i = 0; i < maxSendsPerTrack; ++i)
             renderTrack.sends[i] = { track.sends[i].targetBus, track.sends[i].level, track.sends[i].preFader,
-                                     AutomationRenderLane::compile(track.sendAutomation[i]) };
+                                     AutomationRenderLane::compile(track.sendAutomation[i]), track.sends[i].postFaderBeforePan };
         renderTrack.volumeAutomation = AutomationRenderLane::compile(track.volumeAutomation);
         renderTrack.panAutomation = AutomationRenderLane::compile(track.panAutomation);
     }

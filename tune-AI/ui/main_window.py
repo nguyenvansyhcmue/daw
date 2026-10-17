@@ -24,13 +24,15 @@ from PyQt6.QtWidgets import (
 )
 
 from core.constants import APP_TITLE, ASSETS_DIR, BASE_DIR
+from core.services.performance_surface_service import PerformanceSurfaceService
 from ui.song_manager_dialog import SongEditDialog, SongManagerDialog
 from ui.youtube_panel import YouTubeBrowserDialog
 from ui.settings_dialog import SettingsDialog
 from ui.analog_dialog_theme import ANALOG_DIALOG_QSS, apply_analog_message_theme
 from ui.audio_permissions_dialog import AudioPermissionsDialog
+from ui.performance_macro_dialog import PerformanceMacroDialog
 from ui.premium_widgets import RotaryKnob, ToneShiftDisplay
-from ui.analog_components import AnalogKnobPanel, AutoKeyProgressStrip, AnalogChassis, AnalogPressButton, KnobValueReadout, ModeCardButton, ReactiveAudioWaveform, ReferenceOverlay, ToneDetectionReadout
+from ui.analog_components import AnalogKnobPanel, AutoKeyProgressStrip, AnalogChassis, AnalogPressButton, KnobValueReadout, MacroRoutingCaption, ModeCardButton, ReactiveAudioWaveform, ReferenceOverlay, ToneDetectionReadout
 from ui.analog_theme import REFERENCE_LAYOUT
 from ui.tone_value_utils import (
     coerce_tune_value,
@@ -155,6 +157,7 @@ class MainWindow(QMainWindow):
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
         self._window_drag_offset = None
         self._studioforge_host_frame = None
+        self._shutdown_started = False
 
         self.vang_on = True
         self.mic_on = True
@@ -203,6 +206,10 @@ class MainWindow(QMainWindow):
         self.progress_finish_pending = False
         self._pending_control_values = {}
         self._control_dispatch_timers = {}
+        # The DAW remains the sole owner of macro assignments. This client
+        # stores only the latest read-only snapshot for presentation.
+        self.performance_surface = PerformanceSurfaceService()
+        self._performance_surface_state = {}
 
         # Chế độ thu gọn Mini Bar.
         # Khi bấm nút minimize của cửa sổ chính, app sẽ chuyển sang thanh điều khiển nhỏ.
@@ -252,6 +259,11 @@ class MainWindow(QMainWindow):
         self._start_external_browser_auto_detect()
         QTimer.singleShot(350, self._start_live_audio_after_consent)
 
+        self.performance_surface_timer = QTimer(self)
+        self.performance_surface_timer.setInterval(250)  # UI control-rate, never audio-rate.
+        self.performance_surface_timer.timeout.connect(self._poll_performance_surface)
+        self.performance_surface_timer.start()
+
         self.end_modulation_timer = QTimer(self)
         self.end_modulation_timer.setSingleShot(True)
         self.end_modulation_timer.timeout.connect(self._run_end_modulation_check_if_ready)
@@ -275,6 +287,58 @@ class MainWindow(QMainWindow):
     # =========================================================
     # HELPERS
     # =========================================================
+
+    def _poll_performance_surface(self):
+        """Project the latest DAW macro snapshot onto the analog controls."""
+        snapshot = self.performance_surface.poll_state()
+        if snapshot is None:
+            return
+        self._performance_surface_state = snapshot
+        macros = snapshot.get("macros", [])
+        if not isinstance(macros, list) or not hasattr(self, "effect_knob_panel"):
+            return
+
+        cards = []
+        slider_names = ("slider_reverb_short", "slider_reverb_long", "slider_echo")
+        for index in range(3):
+            macro = macros[index] if index < len(macros) and isinstance(macros[index], dict) else {}
+            state = int(macro.get("state", 0) or 0)
+            name = str(macro.get("macroName", "") or "Unassigned")
+            plugin_name = str(macro.get("pluginName", "") or "")
+            bus_name = str(macro.get("busName", "") or "")
+            state_key = "bypassed" if state == 3 else ("review" if state == 1 else
+                        ("active" if state == 2 else "unassigned"))
+            status = "BYPASSED" if state_key == "bypassed" else (
+                "REVIEW" if state_key == "review" else name.upper()
+            )
+            cards.append((f"MACRO {index + 1} · {status}", 0, 100))
+            if hasattr(self, "macro_routing_captions") and index < len(self.macro_routing_captions):
+                if state_key == "active":
+                    summary = plugin_name or bus_name or name
+                elif state_key == "review":
+                    summary = "REVIEW MAP"
+                elif state_key == "bypassed":
+                    summary = "PLUGIN BYPASSED"
+                else:
+                    summary = "UNASSIGNED"
+                self.macro_routing_captions[index].set_mapping(summary, state_key)
+            slider = getattr(self, slider_names[index], None)
+            if slider is None:
+                continue
+            slider.blockSignals(True)
+            slider.setValue(round(max(0.0, min(1.0, float(macro.get("value", 0.0) or 0.0))) * 100))
+            slider.blockSignals(False)
+            self._set_knob_readout_value(slider_names[index], slider.value())
+        self.effect_knob_panel.set_controls(tuple(cards))
+
+    def _set_performance_macro_value(self, macro_index: int, value: int) -> bool:
+        """Send a normalised performer gesture only when DAW owns a mapping."""
+        if not self.performance_surface.connected:
+            return False
+        result = self.performance_surface.set_value(macro_index, value / 100.0)
+        if not result or not result.get("ok", False):
+            return False
+        return True
 
     def _fit_and_center_window(self):
         """Use a consistent 16:9 default while staying inside the active screen."""
@@ -645,7 +709,9 @@ class MainWindow(QMainWindow):
         # sections of the reference. Every visible knob inside is a live Blender
         # frame; no static knob remains underneath it.
         self.effect_knob_panel = AnalogKnobPanel(
-            "HIỆU ỨNG", (("Vang Ngắn", 0, 100), ("Dài", 0, 100), ("Echo", 0, 100)), overlay
+            "HIỆU ỨNG", (("MACRO 1 · UNASSIGNED", 0, 100),
+                            ("MACRO 2 · UNASSIGNED", 0, 100),
+                            ("MACRO 3 · UNASSIGNED", 0, 100)), overlay
         )
         self.volume_knob_panel = AnalogKnobPanel(
             "ÂM LƯỢNG", (("Mic Vol", 0, 100), ("Music Vol", 0, 100), ("Tune", -50, 50)), overlay
@@ -662,6 +728,8 @@ class MainWindow(QMainWindow):
             ("lbl_tune", "slider_tune", self.on_tune_changed, 41, -50, 50),
         )
         self._knob_value_readouts = {}
+        self.macro_map_buttons = []
+        self.macro_routing_captions = []
         for (label_name, slider_name, callback, default, minimum, maximum), center_x in zip(
             knob_specs, REFERENCE_LAYOUT.knob_centers
         ):
@@ -688,6 +756,49 @@ class MainWindow(QMainWindow):
                 REFERENCE_LAYOUT.knob_readout_height,
             )
             self._knob_value_readouts[slider_name] = readout
+
+            if len(self.macro_map_buttons) < 3:
+                map_button = QPushButton("MAP", overlay)
+                map_button.setFixedSize(28, 17)
+                map_button.setStyleSheet(
+                    "QPushButton { background: #211b14; color: #e4c18a; border: 1px solid #80603b;"
+                    " border-radius: 3px; font: 700 7px 'Segoe UI'; padding: 0; }"
+                    "QPushButton:hover { background: #4a321b; border-color: #d2a060; }"
+                )
+                macro_index = len(self.macro_map_buttons)
+                map_button.clicked.connect(lambda _checked=False, index=macro_index: self._open_macro_mapping(index))
+                overlay.place(map_button, center_x + 52, REFERENCE_LAYOUT.effect_panel.y + 28, 28, 17)
+                self.macro_map_buttons.append(map_button)
+
+                caption = MacroRoutingCaption(macro_index + 1, overlay)
+                # This small live surface deliberately sits over the printed
+                # effect name in the reference artwork.  The app must report
+                # the real DAW assignment, never a hard-coded karaoke label.
+                overlay.place(caption, center_x - 58, REFERENCE_LAYOUT.effect_panel.y + 28, 105, 17)
+                caption.raise_()
+                map_button.raise_()
+                self.macro_routing_captions.append(caption)
+
+    def _open_macro_mapping(self, macro_index: int):
+        if not self.performance_surface.connected:
+            self.performance_surface.refresh_configuration()
+            self._poll_performance_surface()
+        # The surface response contains project-wide buses plus one snapshot
+        # per macro.  Give the dialog the selected macro and the authoritative
+        # bus inventory together; previously it received only the outer state,
+        # which made a valid DAW look like "No Bus Available".
+        state = self._performance_surface_state
+        macros = state.get("macros", []) if isinstance(state, dict) else []
+        selected_macro = (
+            dict(macros[macro_index])
+            if isinstance(macros, list) and macro_index < len(macros) and isinstance(macros[macro_index], dict)
+            else {}
+        )
+        selected_macro["buses"] = state.get("buses", []) if isinstance(state, dict) else []
+        dialog = PerformanceMacroDialog(macro_index, selected_macro,
+                                        self.performance_surface, self)
+        dialog.exec()
+        self._poll_performance_surface()
 
     def _build_mode_and_footer_controls(self, overlay):
         """Build mode and footer hit areas over their fixed chassis artwork."""
@@ -732,7 +843,7 @@ class MainWindow(QMainWindow):
         bottom_specs = (("btn_vang", 38, self.on_toggle_vang), ("btn_mic", 157, self.on_toggle_mic),
                         ("btn_save_song", 276, self.on_save_song_clicked), ("btn_song_list", 395, self.on_song_list_clicked),
                         ("btn_karaoke", 578, self.on_open_karaoke_clicked), ("btn_contact", 697, self.on_contact_clicked),
-                        ("btn_settings", 816, self.on_settings_clicked), ("btn_exit", 935, self.close))
+                        ("btn_settings", 816, self.on_settings_clicked), ("btn_exit", 935, self.request_application_exit))
         for attribute, x, callback in bottom_specs:
             button = self._create_live_button(overlay, x, 598, 108, 70, callback)
             setattr(self, attribute, button)
@@ -931,6 +1042,12 @@ class MainWindow(QMainWindow):
         """)
 
         def _compact_close_event(event):
+            # A compact bar normally expands back into the main window when
+            # its close control is pressed.  During an application quit it
+            # must be allowed to close, otherwise it keeps the Qt app alive.
+            if self._shutdown_started:
+                event.accept()
+                return
             event.ignore()
             self.exit_compact_mode()
 
@@ -2180,6 +2297,8 @@ class MainWindow(QMainWindow):
 
     def _start_live_audio_after_consent(self):
         """Request live-audio consent once, then restore it on future runs."""
+        if self._shutdown_started:
+            return
         settings = self.controller.get_settings()
         if not settings.get("audio_onboarding_seen", False):
             dialog = AudioPermissionsDialog(self)
@@ -3282,16 +3401,22 @@ class MainWindow(QMainWindow):
     def on_reverb_short_changed(self, value: int):
         self.lbl_reverb_short.setText(str(value))
         self._set_knob_readout_value("slider_reverb_short", value)
+        if self._set_performance_macro_value(0, value):
+            return
         self._queue_control_backend("on_reverb_short_changed", value)
 
     def on_reverb_long_changed(self, value: int):
         self.lbl_reverb_long.setText(str(value))
         self._set_knob_readout_value("slider_reverb_long", value)
+        if self._set_performance_macro_value(1, value):
+            return
         self._queue_control_backend("on_reverb_long_changed", value)
 
     def on_echo_changed(self, value: int):
         self.lbl_echo.setText(str(value))
         self._set_knob_readout_value("slider_echo", value)
+        if self._set_performance_macro_value(2, value):
+            return
         self._queue_control_backend("on_echo_changed", value)
 
     def on_mic_vol_changed(self, value: int):
@@ -3476,10 +3601,38 @@ class MainWindow(QMainWindow):
             # Bài chưa có dữ liệu lên tone cuối thì mới phân tích và hỏi LƯU / SỬA / BỎ QUA.
             self._schedule_end_modulation_check(result, delay_ms=20000, reason="auto_detect")
 
-    def closeEvent(self, event):
+    def shutdown_services(self):
+        """Stop owned services exactly once before the Qt event loop exits."""
+        if self._shutdown_started:
+            return
+
+        self._shutdown_started = True
         try:
             self.controller.shutdown()
         except Exception:
             pass
-        finally:
-            super().closeEvent(event)
+
+    def request_application_exit(self):
+        """Quit Tune-AI, rather than merely hiding its window on macOS."""
+        application = QApplication.instance()
+        if application is not None:
+            # QApplication owns closing all top-level windows. Calling both
+            # self.close() and application.quit() used to re-enter closeEvent
+            # during macOS termination and PyQt aborts on any callback error.
+            application.quit()
+        else:
+            self.close()
+
+    def closeEvent(self, event):
+        self.shutdown_services()
+
+        if self.compact_window is not None:
+            try:
+                self.compact_window.close()
+            except RuntimeError:
+                # A native close can delete the mini controller before its
+                # Python wrapper observes the final event.
+                pass
+            self.compact_window = None
+
+        event.accept()

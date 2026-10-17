@@ -110,8 +110,6 @@ MainWindow::MainWindow(const juce::String& name, bool startAutomatedVibeTrace)
           juce::DocumentWindow::allButtons)
 {
    #if JUCE_MAC
-    // Use the standard macOS title bar so the red/yellow/green controls retain
-    // their normal close, minimise, and zoom behaviour.
     setUsingNativeTitleBar(true);
    #else
     setUsingNativeTitleBar(false);
@@ -138,7 +136,14 @@ MainWindow::MainWindow(const juce::String& name, bool startAutomatedVibeTrace)
         refreshRecentProjects();
         autosaveService = std::make_unique<AutosaveService>(mainComponent->getTrackDataModel());
     }
+   #if JUCE_MAC
+    // macOS owns the application menu bar at the top of the screen. Using
+    // DocumentWindow::setMenuBar here incorrectly embeds a second menu strip
+    // inside the document window.
+    juce::MenuBarModel::setMacMainMenu(this);
+   #else
     setMenuBar(this, 24);
+   #endif
    #if ! JUCE_MAC
     windowControls = std::make_unique<WindowControls>(*this);
     addAndMakeVisible(windowControls.get());
@@ -169,7 +174,11 @@ MainWindow::MainWindow(const juce::String& name, bool startAutomatedVibeTrace)
 MainWindow::~MainWindow()
 {
     stopTimer();
+   #if JUCE_MAC
+    juce::MenuBarModel::setMacMainMenu(nullptr);
+   #else
     setMenuBar(nullptr);
+   #endif
     projectFileChooser.reset();
 }
 
@@ -184,8 +193,28 @@ void MainWindow::closeButtonPressed()
 void MainWindow::resized()
 {
     juce::DocumentWindow::resized();
+    scaleWorkspaceToWindow();
     if (windowControls != nullptr)
         windowControls->setBounds(getWidth() - 98, 0, 92, 24);
+}
+
+void MainWindow::scaleWorkspaceToWindow()
+{
+    auto* content = getContentComponent();
+    if (content == nullptr)
+        return;
+
+    // A top-level transform gives the workspace a second coordinate system.
+    // That is particularly unsafe for startup overlays: a modal can be laid
+    // out against inverse-scaled coordinates, then painted outside the real
+    // window. Keep the document content in physical window coordinates and
+    // let its responsive child layout own compact-window adaptation.
+    content->setTransform({});
+    const auto available = getContentComponentBorder().subtractedFrom(getLocalBounds());
+    if (available.getWidth() <= 0 || available.getHeight() <= 0)
+        return;
+
+    content->setBounds(available);
 }
 
 void MainWindow::timerCallback()
@@ -342,6 +371,16 @@ juce::PopupMenu MainWindow::getMenuForIndex(int topLevelMenuIndex, const juce::S
         bounceMenu.addItem(bounceProject, "Project Mix...");
         menu.addSubMenu("Bounce", bounceMenu);
 
+        // Keep Export distinct from Bounce in the user-facing workflow. Both
+        // currently share the production offline renderer, while Export is
+        // the stable extension point for stems, tracks and MIDI assets.
+        juce::PopupMenu exportMenu;
+        exportMenu.addItem(exportAudio, "Audio File...");
+        exportMenu.addItem(exportStems, "All Stems...");
+        exportMenu.addItem(exportSelectedTrack, "Selected Track...");
+        exportMenu.addItem(exportMidi, "MIDI File...");
+        menu.addSubMenu("Export", exportMenu);
+
         menu.addSeparator();
         menu.addItem(projectSettings, "Project Settings...");
         addItem(deviceSettings, "Audio Device Settings...", "");
@@ -429,6 +468,10 @@ void MainWindow::menuItemSelected(int menuItemID, int)
         case importMidi: chooseMidiToImport(); break;
         case analyzeYoutubeKaraoke: if (mainComponent != nullptr) mainComponent->requestTuneAiUrlAnalysis(); break;
         case bounceProject: if (mainComponent != nullptr) mainComponent->requestProjectBounce(); break;
+        case exportAudio: if (mainComponent != nullptr) mainComponent->requestProjectExport(); break;
+        case exportStems: if (mainComponent != nullptr) mainComponent->requestStemExport(); break;
+        case exportSelectedTrack: if (mainComponent != nullptr) mainComponent->requestSelectedTrackExport(); break;
+        case exportMidi: if (mainComponent != nullptr) mainComponent->requestMidiExport(); break;
         case projectSettings: showProjectSettings(); break;
         case deviceSettings: showDeviceSettings(); break;
         case quitApplication: closeButtonPressed(); break;
@@ -437,9 +480,24 @@ void MainWindow::menuItemSelected(int menuItemID, int)
         case addTrack: if (mainComponent != nullptr) mainComponent->addTrackFromCommand(); break;
         case compactTracks: if (mainComponent != nullptr) mainComponent->setWorkspaceTrackHeight(40); break;
         case normalTracks: if (mainComponent != nullptr) mainComponent->setWorkspaceTrackHeight(60); break;
-        case toggleInspector: if (mainComponent != nullptr) mainComponent->setInspectorPanelVisible(!mainComponent->isInspectorPanelVisible()); break;
-        case toggleBrowser: if (mainComponent != nullptr) mainComponent->setBrowserPanelVisible(!mainComponent->isBrowserPanelVisible()); break;
-        case toggleMixer: if (mainComponent != nullptr) mainComponent->setMixerPanelVisible(!mainComponent->isMixerPanelVisible()); break;
+        case toggleInspector:
+            if (mainComponent != nullptr)
+                mainComponent->setInspectorPanelVisible(! mainComponent->isInspectorPanelVisible());
+            // macOS owns this menu outside the JUCE component tree. Explicitly
+            // invalidate it after every View action so its ticks cannot lag a
+            // dock visibility change or a workspace transition.
+            menuItemsChanged();
+            break;
+        case toggleBrowser:
+            if (mainComponent != nullptr)
+                mainComponent->setBrowserPanelVisible(! mainComponent->isBrowserPanelVisible());
+            menuItemsChanged();
+            break;
+        case toggleMixer:
+            if (mainComponent != nullptr)
+                mainComponent->setMixerPanelVisible(! mainComponent->isMixerPanelVisible());
+            menuItemsChanged();
+            break;
         default:
             if (menuItemID >= alternativeBase)
             {
@@ -593,6 +651,9 @@ void MainWindow::chooseProjectToSave()
             selected = selected.withFileExtension("studioforge");
         if (safeWindow->mainComponent != nullptr)
         {
+            // Preserve the previous known-good document before the atomic save
+            // promotes its replacement. A backup failure must not block Save.
+            (void) safeWindow->projectBackups.captureCurrentVersion(selected);
             const auto result = safeWindow->mainComponent->saveProject(selected);
             if (result.failed()) safeWindow->showProjectError("Save Failed", result);
             else
@@ -823,6 +884,9 @@ void MainWindow::saveCurrentProject()
     }
     if (mainComponent != nullptr)
     {
+        // Keep the history snapshot independent of AutosaveService, which is
+        // reserved for crash recovery of unsaved edits.
+        (void) projectBackups.captureCurrentVersion(currentProjectFile);
         const auto result = mainComponent->saveProject(currentProjectFile);
         if (result.failed()) showProjectError("Save Failed", result);
         else if (autosaveService != nullptr) autosaveService->markProjectSaved();

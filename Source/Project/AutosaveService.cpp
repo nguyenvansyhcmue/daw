@@ -36,8 +36,12 @@ void AutosaveService::markProjectSaved()
 {
     lastRecoveredRevision = trackDataModel.getProjectRevision();
     const auto recoveryFile = getRecoveryFile();
+    if (recoveryFile == juce::File {})
+        return;
     if (recoveryFile.existsAsFile())
         recoveryFile.deleteFile();
+    recoveryFile.getSiblingFile(recoveryFile.getFileName() + ".tmp").deleteFile();
+    recoveryFile.getSiblingFile(recoveryFile.getFileName() + ".tmp.write-tmp").deleteFile();
 }
 
 bool AutosaveService::saveRecoveryNow()
@@ -53,15 +57,17 @@ bool AutosaveService::saveRecoveryNow()
     temporaryFile.deleteFile();
 
     if (ProjectSerializer::saveRecoverySnapshot(trackDataModel, temporaryFile).failed())
-        return false;
-
-    if (recoveryFile.existsAsFile() && ! recoveryFile.deleteFile())
     {
         temporaryFile.deleteFile();
+        temporaryFile.getSiblingFile(temporaryFile.getFileName() + ".write-tmp").deleteFile();
         return false;
     }
 
-    if (! temporaryFile.moveFileTo(recoveryFile))
+    // Keep the previous recovery valid until the replacement snapshot has
+    // been completely serialised. Replacing the destination as one final
+    // operation removes the failure window where a crash could leave no
+    // recovery document at all.
+    if (! temporaryFile.replaceFileIn(recoveryFile))
     {
         temporaryFile.deleteFile();
         return false;

@@ -19,11 +19,31 @@ class FxSlotButton final : public juce::TextButton
 public:
     FxSlotButton() = default;
     std::function<void()> onRightClick;
+    std::function<void()> onBypassClick;
 
     void setActive(bool shouldBeActive) noexcept
     {
         active = shouldBeActive;
         repaint();
+    }
+
+    void setBypassControlState(bool slotHasPlugIn, bool slotIsBypassed) noexcept
+    {
+        hasPlugIn = slotHasPlugIn;
+        bypassed = slotIsBypassed;
+        repaint();
+    }
+
+    void mouseDown(const juce::MouseEvent& event) override
+    {
+        bypassPressed = hasPlugIn && ! event.mods.isPopupMenu()
+                        && bypassBounds().contains(event.getPosition());
+        if (bypassPressed)
+        {
+            repaint();
+            return;
+        }
+        juce::TextButton::mouseDown(event);
     }
 
     void mouseUp(const juce::MouseEvent& event) override
@@ -34,7 +54,37 @@ public:
             return;
         }
 
+        if (bypassPressed)
+        {
+            const auto activateBypass = bypassBounds().contains(event.getPosition());
+            bypassPressed = false;
+            repaint();
+            if (activateBypass && onBypassClick != nullptr)
+                onBypassClick();
+            return;
+        }
+
+        if (hasPlugIn && event.mods.isAltDown())
+        {
+            setState(juce::Button::buttonNormal);
+            if (onBypassClick != nullptr)
+                onBypassClick();
+            return;
+        }
+
         juce::TextButton::mouseUp(event);
+    }
+
+    void mouseMove(const juce::MouseEvent& event) override
+    {
+        juce::TextButton::mouseMove(event);
+        repaint();
+    }
+
+    void mouseExit(const juce::MouseEvent& event) override
+    {
+        juce::TextButton::mouseExit(event);
+        repaint();
     }
 
 private:
@@ -70,10 +120,32 @@ private:
         }
         g.setColour(juce::Colour(0xffd8e3e9).withAlpha(highlighted || down ? 0.96f : 0.78f));
         g.setFont(juce::Font(juce::FontOptions(10.0f, juce::Font::bold)));
-        g.drawText(getButtonText(), getLocalBounds(), juce::Justification::centred, false);
+        g.drawText(getButtonText(), getLocalBounds().withTrimmedLeft(hasPlugIn ? 10 : 0), juce::Justification::centred, false);
+
+        if (! hasPlugIn || ! isMouseOverOrDragging(true))
+            return;
+
+        const auto control = bypassBounds().toFloat();
+        const auto controlHovered = bypassBounds().contains(getMouseXYRelative());
+        const auto colour = bypassed ? juce::Colour(0xff94a2aa) : juce::Colour(0xff55d7e8);
+        g.setColour(juce::Colours::black.withAlpha(controlHovered ? 0.28f : 0.16f));
+        g.fillRoundedRectangle(control, 3.0f);
+        g.setColour(colour.withAlpha(controlHovered ? 1.0f : 0.76f));
+        const auto ring = control.reduced(5.0f);
+        g.drawEllipse(ring, 1.15f);
+        const auto centreX = ring.getCentreX();
+        g.drawLine(centreX, ring.getY() - 0.4f, centreX, ring.getCentreY() - 0.5f, 1.25f);
+    }
+
+    juce::Rectangle<int> bypassBounds() const noexcept
+    {
+        return getLocalBounds().removeFromLeft(18).reduced(1, 1);
     }
 
     bool active = false;
+    bool hasPlugIn = false;
+    bool bypassed = false;
+    bool bypassPressed = false;
 };
 
 // A bare, engraved route label. It deliberately has no button tile so the
@@ -91,7 +163,7 @@ private:
             g.fillRoundedRectangle(bounds.reduced(1.0f), 2.0f);
         }
         g.setColour(juce::Colour(0xffb9c7ce).withAlpha(isEnabled() ? 0.86f : 0.42f));
-        g.setFont(juce::Font(juce::FontOptions(7.4f, juce::Font::bold)));
+        g.setFont(juce::Font(juce::FontOptions(8.0f, juce::Font::bold)));
         g.drawText(getButtonText(), getLocalBounds(), juce::Justification::centred, false);
         if (highlighted)
         {
@@ -131,6 +203,9 @@ private:
     void showMasterPluginBrowser(size_t slot);
     void showMasterPluginEditor(size_t slot);
     void openMasterPluginEditorNow(size_t slot);
+    void showBusPluginBrowser(size_t busIndex, size_t slot);
+    void showBusPluginEditor(size_t busIndex, size_t slot);
+    void openBusPluginEditorNow(size_t busIndex, size_t slot);
     void showSendDestinationMenu(int trackIndex, size_t slot);
     void setView(View newView);
     void syncViewVisibility();
@@ -168,6 +243,17 @@ private:
     std::array<bool, TrackDataModel::maxTracks> fxRacksExpanded {};
     std::array<juce::Label, TrackDataModel::maxTracks> labels;
     std::array<juce::Rectangle<int>, TrackDataModel::maxTracks> trackStripBounds;
+    // Aux returns use the same physical language as source channels. They are
+    // indexed by the stable render-bus order, while every edit still resolves
+    // through BusId so a deleted bus cannot change another return's target.
+    std::array<AudioPeakMeter, TrackDataModel::maxBuses> busMeters;
+    std::array<juce::Slider, TrackDataModel::maxBuses> busFaders;
+    std::array<juce::Label, TrackDataModel::maxBuses> busLabels;
+    std::array<juce::Label, TrackDataModel::maxBuses> busReadouts;
+    std::array<juce::ToggleButton, TrackDataModel::maxBuses> busMuteButtons;
+    std::array<std::array<FxSlotButton, TrackDataModel::maxFxSlots>, TrackDataModel::maxBuses> busFxButtons;
+    std::array<juce::Rectangle<int>, TrackDataModel::maxBuses> busStripBounds;
+    int displayedBusCount = -1;
     int displayedTrackCount = -1;
     juce::TextButton mixerTab { "MIXER" };
     juce::TextButton masterTab { "MASTER" };

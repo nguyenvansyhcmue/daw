@@ -116,7 +116,8 @@ juce::Result configure(AudioEffectProcessor& effect, const StudioForgeCalibratio
         };
         if (! setUnitDiagnostic ("VIBE_DIAG_FLEX_RESIDUAL", "Diagnostic Flex Residual", 0.5f, 1.5f)
             || ! setUnitDiagnostic ("VIBE_DIAG_HUMANIZE_SCALE", "Diagnostic Humanize Scale", 0.5f, 1.5f)
-            || ! setUnitDiagnostic ("VIBE_DIAG_NATURAL_PHASE", "Diagnostic Natural Phase", 0.0f, 2.5f))
+            || ! setUnitDiagnostic ("VIBE_DIAG_NATURAL_PHASE", "Diagnostic Natural Phase", 0.0f, 2.5f)
+            || ! setUnitDiagnostic ("VIBE_DIAG_NATURAL_HARD_TUNE_SURFACE", "Diagnostic Natural Hard Tune Surface", 0.0f, 1.0f))
             return juce::Result::fail("VibeAutotune does not expose joint-calibration parameters");
     }
     return juce::Result::ok();

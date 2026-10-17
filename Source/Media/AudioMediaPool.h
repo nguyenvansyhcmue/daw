@@ -15,7 +15,10 @@ public:
     {
         AudioSourceId id;
         juce::File sourceFile;
-        std::shared_ptr<juce::AudioBuffer<float>> playbackData;
+        // The model and its immutable snapshots own decoded audio while it is in use.
+        // Keeping only a weak cache entry prevents removed media from being retained by
+        // the pool for the lifetime of a large project.
+        std::weak_ptr<juce::AudioBuffer<float>> playbackData;
     };
 
     const Source& registerDecodedSource(const juce::File& sourceFile,

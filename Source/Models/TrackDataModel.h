@@ -4,6 +4,7 @@
 #include <juce_events/juce_events.h>
 
 #include "AudioClipState.h"
+#include "TakeFolderState.h"
 #include "../Core/AudioGainRange.h"
 #include "../Core/Automation/AutomationRenderSnapshot.h"
 #include "../Media/AudioMediaPool.h"
@@ -72,7 +73,7 @@ public:
 
     struct TrackState
     {
-        struct SendRoute { BusId targetBus; float level = 1.0f; bool preFader = false; };
+        struct SendRoute { BusId targetBus; float level = 1.0f; bool preFader = false; bool postFaderBeforePan = false; };
         TrackId id;
         TrackType type = TrackType::audio;
         std::atomic<float> volume { 1.0f };
@@ -94,6 +95,7 @@ public:
         juce::String name;
         std::vector<FxScene> fxScenes;
         std::vector<AudioClipState> clips;
+        std::vector<TakeFolderState> takeFolders;
         BusId outputBus;
         std::array<SendRoute, maxSendsPerTrack> sends {};
         std::array<AutomationLane, maxSendsPerTrack> sendAutomation {
@@ -120,7 +122,7 @@ public:
               inputChannelCount(other.inputChannelCount.load()), midiInputChannel(other.midiInputChannel.load()),
               midiInputDeviceToken(other.midiInputDeviceToken.load()), midiInputDeviceIdentifier(other.midiInputDeviceIdentifier),
               name(other.name), fxScenes(other.fxScenes),
-              clips(other.clips), outputBus(other.outputBus), sends(other.sends), activeSendCount(other.activeSendCount),
+              clips(other.clips), takeFolders(other.takeFolders), outputBus(other.outputBus), sends(other.sends), activeSendCount(other.activeSendCount),
               volumeAutomation(other.volumeAutomation), panAutomation(other.panAutomation), sendAutomation(other.sendAutomation)
         {
         }
@@ -146,6 +148,7 @@ public:
             name = other.name;
             fxScenes = other.fxScenes;
             clips = other.clips;
+            takeFolders = other.takeFolders;
             outputBus = other.outputBus; sends = other.sends; activeSendCount = other.activeSendCount;
             volumeAutomation = other.volumeAutomation; panAutomation = other.panAutomation; sendAutomation = other.sendAutomation;
             return *this;
@@ -163,6 +166,7 @@ public:
             float level = 1.0f;
             bool preFader = false;
             AutomationRenderLane automation;
+            bool postFaderBeforePan = false;
         };
         TrackId id;
         TrackType type = TrackType::audio;
@@ -187,8 +191,10 @@ public:
         AutomationRenderLane volumeAutomation;
         AutomationRenderLane panAutomation;
     };
-    struct BusState { BusId id; float gain = 1.0f; bool muted = false; };
-    struct RenderBus { BusId id; float gain = 1.0f; bool muted = false; const FxRackSnapshot* fxRack = nullptr; };
+    // A bus is a first-class return channel. Keep its user-facing name in
+    // project state so removing another bus cannot rename an existing route.
+    struct BusState { BusId id; juce::String name; float gain = 1.0f; bool muted = false; float balance = 0.0f; };
+    struct RenderBus { BusId id; float gain = 1.0f; bool muted = false; const FxRackSnapshot* fxRack = nullptr; float balance = 0.0f; };
 
     struct RenderStructureSnapshot
     {
@@ -264,14 +270,18 @@ public:
     BusId addBus();
     bool removeBus(BusId id);
     const std::vector<BusState>& getBuses() const noexcept { return busStates; }
+    juce::String getBusDisplayName(BusId id) const;
+    bool setBusName(BusId id, juce::String name);
     const FxRackSnapshot* getBusFxRackSnapshot(BusId bus) const noexcept;
     void setBusFxProcessor(BusId bus, size_t slot, std::shared_ptr<AudioEffectProcessor> processor);
     void setBusFxBypassed(BusId bus, size_t slot, bool bypassed);
     bool setBusGain(BusId bus, float gain);
+    bool setBusBalance(BusId bus, float balance);
     bool setBusMuted(BusId bus, bool muted);
     bool setTrackOutputBus(TrackId track, BusId bus);
     bool setTrackSend(TrackId track, BusId bus, float amount);
     bool setTrackSendRoute(TrackId track, size_t route, BusId bus, float amount, bool preFader);
+    bool setTrackSendPostFaderBeforePan(TrackId track, size_t route, bool enabled);
     bool clearTrackSendRoute(TrackId track, size_t route);
     bool clearTrackSend(TrackId track);
     void setTrackVolume(size_t index, float volume);
@@ -330,6 +340,11 @@ public:
 
     ClipId addClipToTrack(int trackIndex, const juce::File& file, double startSample,
                           std::shared_ptr<juce::AudioBuffer<float>> loadedBuffer);
+    // Recording uses a separate entry point so imported/arranged audio never
+    // accidentally becomes a take. Re-recording an overlapping pass creates
+    // a take group and makes the newest pass the audible one.
+    ClipId addRecordedClipToTrack(int trackIndex, const juce::File& file, double startSample,
+                                  std::shared_ptr<juce::AudioBuffer<float>> loadedBuffer);
     // Creates a visible, non-playable region while media is decoded off-thread.
     ClipId addUnloadedClipToTrack(int trackIndex, const juce::File& file, double startSample,
                                   double durationSamples);
@@ -370,10 +385,26 @@ public:
     bool setClipGain(ClipId clipId, float gain);
     bool setClipFades(ClipId clipId, double fadeInSamples, double fadeOutSamples);
     bool setClipLoopEnabled(ClipId clipId, bool enabled);
+    bool selectActiveTake(ClipId clipId);
+    const std::vector<TakeFolderState>& getTakeFolders(size_t trackIndex) const noexcept;
+    // Quick Swipe Comping: replace the chosen time range with one source take.
+    // Adjacent comp selections are split non-destructively and retained.
+    bool selectTakeFolderRange(TakeFolderId folder, uint64_t takeId, double startSample, double endSample);
     bool createCrossfadesForTrack(TrackId trackId);
     bool setClipMediaResource(ClipId clipId, const juce::File& sourceFile,
                               std::shared_ptr<juce::AudioBuffer<float>> decodedBuffer);
     bool setClipMediaStatus(ClipId clipId, AudioMediaStatus status);
+    // Applies results from an asynchronous media reload as one realtime
+    // snapshot publication, preventing a large project opening from
+    // rebuilding the arrangement once per clip.
+    struct ClipMediaUpdate
+    {
+        ClipId clipId;
+        juce::File sourceFile;
+        std::shared_ptr<juce::AudioBuffer<float>> decodedBuffer;
+        AudioMediaStatus status = AudioMediaStatus::Unloaded;
+    };
+    size_t applyClipMediaUpdates(const std::vector<ClipMediaUpdate>& updates);
     std::shared_ptr<juce::AudioBuffer<float>> findDecodedAudioSource(const juce::File& sourceFile) const;
     size_t getAudioMediaSourceCount() const noexcept { return audioMediaPool.size(); }
     AudioMediaStatus getClipMediaStatus(ClipId clipId) const noexcept;
@@ -464,6 +495,8 @@ private:
     mutable std::atomic<unsigned int> realtimeSnapshotReaders { 0 };
     uint64_t nextTrackId = 1;
     uint64_t nextClipId = 1;
+    uint64_t nextTakeGroupId = 1;
+    uint64_t nextCompId = 1;
     uint64_t nextBusId = 1;
     uint64_t nextMidiClipId = 1;
     uint64_t nextMidiEventId = 1;

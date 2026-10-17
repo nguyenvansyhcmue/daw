@@ -1210,8 +1210,8 @@ void TimelineRuler::paint(juce::Graphics& g)
     g.fillRoundedRectangle(idleLoopStrip, 2.5f);
     g.setColour(juce::Colour(0xff637686).withAlpha(0.20f));
     g.drawRoundedRectangle(idleLoopStrip, 2.5f, 0.7f);
-    g.setColour(juce::Colours::white.withAlpha(0.13f));
-    g.drawHorizontalLine(locatorLaneHeight - 1, 0.0f, static_cast<float>(getWidth()));
+    // The locator lane is already defined by its recessed fill. A bright
+    // separator here read as an accidental extra rule beneath the drag strip.
 
     while (sample <= viewStartSample + trackModel->getSampleRate() * timelineWidth / pixelsPerSecond)
     {
@@ -3155,8 +3155,8 @@ void ArrangeWindow::resized()
     // Keep the commands immediately above the first track-number gutter, not
     // inside the first channel row where they obscure the track identity.
     const auto trackCommandY = juce::jmax(3, timelineRulerHeight - 26);
-    addPerformanceButton.setBounds(12, trackCommandY, 22, 22);
-    livePerformanceButton.setBounds(40, trackCommandY, 44, 22);
+    addPerformanceButton.setBounds(4, trackCommandY, 22, 22);
+    livePerformanceButton.setBounds(34, trackCommandY, 44, 22);
     snapButton.setVisible(false);
     markerButton.setVisible(false);
     trackHeaderPanel.setBounds(area.removeFromLeft(leftWidth));

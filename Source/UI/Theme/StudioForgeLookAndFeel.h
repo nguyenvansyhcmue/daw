@@ -44,6 +44,8 @@ public:
     void drawLinearSlider(juce::Graphics&, int x, int y, int width, int height, float sliderPosition,
                           float minimumPosition, float maximumPosition, juce::Slider::SliderStyle, juce::Slider&) override;
     void drawToggleButton(juce::Graphics&, juce::ToggleButton&, bool highlighted, bool down) override;
+    void drawComboBox(juce::Graphics&, int width, int height, bool isButtonDown,
+                      int buttonX, int buttonY, int buttonW, int buttonH, juce::ComboBox&) override;
     void drawMenuBarBackground(juce::Graphics&, int width, int height, bool isMouseOverBar,
                                juce::MenuBarComponent&) override;
     void drawMenuBarItem(juce::Graphics&, int width, int height, int itemIndex,

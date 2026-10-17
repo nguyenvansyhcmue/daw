@@ -17,6 +17,7 @@ StudioForgeLookAndFeel::StudioForgeLookAndFeel()
 {
     setColour(juce::TextButton::buttonOnColourId, StudioForgeTheme::accentBlue);
     setColour(juce::ComboBox::backgroundColourId, StudioForgeTheme::panelBackground);
+    setColour(juce::ComboBox::outlineColourId, juce::Colour(0xff55707a).withAlpha(0.72f));
     setColour(juce::Slider::backgroundColourId, StudioForgeTheme::panelBackground);
     setColour(juce::Slider::trackColourId, StudioForgeTheme::accentBlue);
     setColour(juce::Slider::thumbColourId, StudioForgeTheme::accentCyan);
@@ -125,6 +126,37 @@ void StudioForgeLookAndFeel::drawToggleButton(juce::Graphics& g, juce::ToggleBut
     // Toggle labels are compact state abbreviations (R, I, M, S). Ellipsising
     // them turns a control into an ambiguous "..." button.
     g.drawText(button.getButtonText(), area.reduced(3.0f), juce::Justification::centred, false);
+}
+
+void StudioForgeLookAndFeel::drawComboBox(juce::Graphics& g, int width, int height, bool isButtonDown,
+                                           int buttonX, int buttonY, int buttonW, int buttonH,
+                                           juce::ComboBox& box)
+{
+    const auto bounds = juce::Rectangle<float>(0.5f, 0.5f, static_cast<float>(width) - 1.0f,
+                                               static_cast<float>(height) - 1.0f);
+    auto base = box.findColour(juce::ComboBox::backgroundColourId);
+    if (isButtonDown) base = base.darker(0.13f);
+    else if (box.isMouseOverOrDragging()) base = base.brighter(0.07f);
+    g.setGradientFill(juce::ColourGradient(base.brighter(0.07f), bounds.getCentreX(), bounds.getY(),
+                                            base.darker(0.10f), bounds.getCentreX(), bounds.getBottom(), false));
+    g.fillRoundedRectangle(bounds, 4.0f);
+
+    const auto focused = box.hasKeyboardFocus(true) || box.isMouseOverOrDragging();
+    g.setColour(focused ? StudioForgeTheme::accentCyan.withAlpha(0.58f)
+                        : juce::Colour(0xff59717a).withAlpha(0.68f));
+    g.drawRoundedRectangle(bounds, 4.0f, focused ? 1.15f : 1.0f);
+    g.setColour(juce::Colours::black.withAlpha(0.36f));
+    g.drawLine(static_cast<float>(buttonX), static_cast<float>(buttonY + 3),
+               static_cast<float>(buttonX), static_cast<float>(buttonY + buttonH - 3), 1.0f);
+
+    const auto cx = static_cast<float>(buttonX + buttonW / 2);
+    const auto cy = static_cast<float>(buttonY + buttonH / 2);
+    juce::Path chevron;
+    chevron.startNewSubPath(cx - 7.0f, cy - 3.0f);
+    chevron.lineTo(cx, cy + 3.0f);
+    chevron.lineTo(cx + 7.0f, cy - 3.0f);
+    g.setColour(StudioForgeTheme::primaryText.withAlpha(0.88f));
+    g.strokePath(chevron, juce::PathStrokeType(2.1f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
 }
 
 void StudioForgeLookAndFeel::drawMenuBarBackground(juce::Graphics&, int, int, bool,

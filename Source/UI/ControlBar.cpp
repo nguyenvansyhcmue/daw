@@ -1037,8 +1037,10 @@ void ControlBar::resized()
         const auto metroWidth = wide ? 52 : 44;
         const auto countInWidth = wide ? 96 : 84;
         const auto outerGap = wide ? 30 : 24;
-        constexpr auto modeGap = 9;
-        constexpr auto countInGap = 4;
+        // Give the Studio → Auto Key performance cluster a deliberate rhythm;
+        // these are mode decisions, not a compressed transport button run.
+        constexpr auto modeGap = 11;
+        constexpr auto countInGap = 6;
         const auto clusterNudge = wide ? 10 : 8;
         const auto countInKeyWidth = juce::jmin(countInWidth, controlHeight);
         // The Count-in component used to reserve a wide invisible tail after
@@ -1085,7 +1087,7 @@ void ControlBar::resized()
         stageModeButton.setBounds(cursor, scaledControlY, scaled(modeWidth), scaledControlHeight); cursor += scaled(modeWidth + modeGap);
         metronomeButton.setBounds(cursor, scaledControlY, scaled(metroWidth), scaledControlHeight); cursor += scaled(metroWidth + countInGap);
         countInButton.setBounds(cursor, scaledControlY, scaled(countInKeyWidth), scaledControlHeight);
-        cursor += scaled(countInKeyWidth + 8);
+        cursor += scaled(countInKeyWidth + 10);
         autoKeyButton.setBounds(cursor, scaledControlY, scaled(autoKeyWidth), scaledControlHeight);
         autoKeyButton.setVisible(true);
         countInBarsBox.setVisible(false);
